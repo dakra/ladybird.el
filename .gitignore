@@ -1,0 +1,10 @@
+.build/
+.zig-cache/
+zig-out/
+*.elc
+/ladybird-module.dylib
+/ladybird-module.so
+/ladybird-module.version
+__pycache__/
+/test/fixtures/*.ladybird
+/test/fixtures/*.json

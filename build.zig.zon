@@ -1,0 +1,7 @@
+.{
+    .name = .ladybird,
+    .version = "0.2.0",
+    .minimum_zig_version = "0.17.0",
+    .paths = .{""},
+    .fingerprint = 0x29ff932c5a351df8,
+}
