@@ -17,7 +17,7 @@ grep -q "rejected the client: unsupported protocol version" "$WORK/reject.out" |
 
 SOCKET="$WORK/l.sock"
 start_socket_server "$SOCKET"
-[ "$(stat -f %Lp "$SOCKET" 2>/dev/null || stat -c %a "$SOCKET")" = 600 ] || fail "socket mode is not 0600"
+[ "$(stat -c %a "$SOCKET" 2>/dev/null || stat -f %Lp "$SOCKET")" = 600 ] || fail "socket mode is not 0600"
 
 "${CLIENT[@]}" --socket "$SOCKET" --no-view --strict --script "$WORK/ping.txt" || fail "socket handshake"
 

@@ -485,7 +485,12 @@ and needs tens of GiB of free disk; check `df -h` before starting. Prerequisites
 `brew install autoconf-archive nasm ccache rustup`; Ladybird pins Rust in
 `rust-toolchain.toml`, which needs rustup's shims ahead of Homebrew's `rustc`
 (`PATH="/opt/homebrew/opt/rustup/bin:$PATH"` for every build command); `pip` must reach
-a working index (the `angle` port installs `ply`). From
+a working index (the `angle` port installs `ply`). On Linux (verified on Ubuntu 26.04
+arm64 with clang 21): the package list of `Documentation/BuildInstructionsLadybird.md`
+plus `clang lld zstd rustup patchelf python3-pip`, `rustup toolchain install 1.98.0`, then
+`./Meta/ladybird.py build --cc clang --cxx clang++`; the binary is
+`Build/release/bin/Ladybird`. A headless Linux machine needs no display and no
+`--force-cpu-painting`; it needs fonts (`fonts-liberation2`). From
 `/Users/daniel/src/ladybird`:
 
 ```sh

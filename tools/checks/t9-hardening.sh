@@ -12,7 +12,7 @@ XDG_DOWNLOAD_DIR="$WORK/downloads" "${CLIENT[@]}" --server "$SERVER" --timeout 1
 SOCKET="$WORK/l.sock"
 start_socket_server "$SOCKET"
 SERVER_PID="${SERVER_PIDS[0]}"
-[ "$(stat -f %Lp "$WORK/server.log" 2>/dev/null || stat -c %a "$WORK/server.log")" = 600 ] || fail "log mode is not 0600"
+[ "$(stat -c %a "$WORK/server.log" 2>/dev/null || stat -f %Lp "$WORK/server.log")" = 600 ] || fail "log mode is not 0600"
 
 # A second server does not take the socket of one that answers, and a path that is not a socket is left alone.
 "$LADYBIRD" --headless=emacs --emacs-socket="$SOCKET" --emacs-log="$WORK/second.log" 2>/dev/null
