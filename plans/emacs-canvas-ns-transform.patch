@@ -1,0 +1,28 @@
+--- a/src/nsimage.m
++++ b/src/nsimage.m
+@@ -256,11 +256,23 @@
+   [(EmacsImage *)img setAlphaAtX: x Y: y to: a];
+ }
+ 
++/* Replace IMG with a new, zero-filled image of size WIDTH x HEIGHT.
++   The transform and smoothing settings stored by image_set_transform
++   are carried over to the new image.  */
+ void *
+ ns_image_reset (void *img, int width, int height)
+ {
+-  [(EmacsImage *)img release];
+-  return ns_image_for_XPM (width, height, 32);
++  EmacsImage *old = (EmacsImage *) img;
++  EmacsImage *fresh = ns_image_for_XPM (width, height, 32);
++
++  if (old != nil && fresh != nil)
++    {
++      fresh->transform = [old->transform retain];
++      fresh->smoothing = old->smoothing;
++    }
++
++  [old release];
++  return fresh;
+ }
+ 
+ size_t

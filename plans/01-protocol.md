@@ -1,0 +1,391 @@
+# 01 — Wire protocol between the Ladybird Emacs server and the Emacs client
+
+Status: **v1**, the integration contract for every other work package. Change it only
+by editing this file; every plan refers to it by message name. Where a plan's body
+conflicts with this file, this file wins. §11 lists what changed from the draft so the
+plans written against the draft can be read correctly.
+
+Working names: the Ladybird side is the **server** (`Ladybird --headless=emacs`), the
+Emacs side is the **client** (Elisp package `ladybird` with native module
+`ladybird-module`).
+
+## 1. Transport
+
+One bidirectional byte stream per client. The server offers it as:
+
+| Option | Stream | Use |
+| --- | --- | --- |
+| `--emacs-stdio` (default when no other is given) | stdin/stdout of the server process | local `make-process`, or `ssh host Ladybird --headless=emacs` |
+| `--emacs-socket=PATH` | Unix listener, mode 0600, unlinked on exit | detachable local session, `ssh -L` forwarding |
+| `--emacs-tcp=HOST:PORT` | TCP listener, no authentication | only for trusted networks such as a tailnet; v2 |
+
+A stdio server lives exactly as long as its client (or its ssh session). Detaching and
+reattaching needs `--emacs-socket` or `--emacs-tcp`.
+
+On macOS a Unix socket delivers at most 8 KiB per read to Emacs, while a pipe delivers
+64 KiB, so locally prefer stdio (or shm, §4) over a Unix socket.
+
+The stream carries **records**. Every record is:
+
+```
+u32 LE  length      bytes that follow this field: 1 for `kind` plus the payload;
+                    at least 1, at most 64 MiB
+u8      kind        1 = control (UTF-8 JSON object), 2 = frame (binary, §4)
+bytes   payload
+```
+
+Control records are JSON objects with a `type` string and, where a view is involved,
+`view` (integer id). Unknown `type` values are ignored by both sides. Unknown JSON keys
+are ignored. Integers are JSON numbers; booleans are `true`/`false`; absent means null.
+
+The server serves one client at a time. A second connection gets a `welcome`, and the
+previous client gets `{"type":"replaced"}` and a close. A client that disconnects leaves
+every view running; the next client sees them in its `welcome`. The server keeps
+running with zero views; `welcome.views` is then `[]`.
+
+All stderr/debug output of the server and its helpers goes to a log file, never to the
+stream (`TerminalWebView::take_over_terminal()` shows how to redirect it).
+
+A length-prefixed stream has no resynchronisation marker. A client that detects a
+framing error (bad kind, zero or oversize length) must close and reconnect.
+
+## 2. Handshake
+
+Client sends first:
+
+```json
+{"type":"hello","protocol":1,"client":"ladybird 0.1",
+ "viewport":{"width":1600,"height":1000,"dpr":2.0},
+ "encodings":["zstd","raw"],
+ "shm":true,
+ "token":null}
+```
+
+`viewport` is in device pixels; `dpr` is the device pixel ratio the client renders
+at. `encodings` lists what the client can decode, in preference order. `shm` says the
+client can map POSIX shared memory of the server's machine (only true when the client
+connected over stdio to a local process or over a Unix socket; the client decides from
+how it connected. A Unix socket may be an `ssh -L` forward of a remote one, which the
+client cannot see; `shm_failed`, §4.3, covers that case). `token` is reserved for TCP authentication (v2); the server
+ignores it in v1.
+
+Server answers:
+
+```json
+{"type":"welcome","protocol":1,"server":"Ladybird 0.x (abcdef)",
+ "encoding":"zstd","shm":true,
+ "log":"/tmp/ladybird-emacs-12345.log",
+ "host":{"hostname":"devbox","platform":"linux"},
+ "views":[{"view":1,"url":"https://…","title":"…","loading":false,
+           "can_go_back":true,"can_go_forward":false,"zoom":1.0,
+           "width":1600,"height":1000,"dpr":2.0}]}
+```
+
+`encoding` is the one the server will use; `shm` is `true` when both sides agreed to
+use shared memory (the segment itself is announced with `shm` messages, §4.3). `log` is
+the server's log file on its machine. If `views` is empty the client sends
+`create_view`. On a protocol mismatch the server sends `{"type":"reject","reason":"…"}`
+and closes.
+
+After `welcome` the server sends, for every view, a `state` and, as soon as the
+Compositor has presented one, a full frame (flag `full`, §4), so a reconnecting client
+has something to show.
+
+Keepalive: either side may send `{"type":"ping","id":n}`; the peer answers
+`{"type":"pong","id":n}`. The client treats a missing pong within 10 s as a dropped
+connection (rexel does the same).
+
+## 3. Views
+
+A view is one Ladybird `HeadlessWebView` (one tab). v1 implements one view at a time
+but every message carries `view`, so tabs come later without a protocol change. View ids
+are never reused within a server process: a view created after `close_view` gets the
+next id.
+
+| Client → server | Fields | Effect |
+| --- | --- | --- |
+| `create_view` | `url` (optional), `width`, `height`, `dpr`, `request` (optional integer) | Server creates a view and answers with `view_created` followed by `state` and a frame, or with an `error` when it cannot (the v1 server has one view per process). Both answers echo `request` |
+| `close_view` | `view` | Closes it; server answers `view_closed` |
+| `set_viewport` | `view`, `width`, `height`, `dpr` | Device pixels. Server resizes the view; the next frame has the new size and the `full` flag. The server clamps each dimension to 16000 and the area to 64 000 000 pixels (reducing the height); a `dpr` outside 0.25–8 is answered with `error` and changes nothing |
+| `set_visibility` | `view`, `visible` | Maps to `set_system_visibility_state`; a hidden view stops presenting frames |
+| `set_focus` | `view`, `focused` | Maps to `set_has_system_focus` |
+
+| Server → client | Fields | Meaning |
+| --- | --- | --- |
+| `view_created` | `view`, `url`, `title`, `width`, `height`, `dpr` | Answer to `create_view`; `url` is `about:blank`, the `state` that follows has the requested URL with `loading` true. Popups opened by pages are not shown in v1; the server sends `popup_blocked` instead |
+| `popup_blocked` | `view`, `url` (null when unknown) | A page tried to open a window with user activation (also middle click and "open in new tab"); the client may offer to `create_view` with that URL. Ladybird drops popups without user activation silently |
+| `view_closed` | `view`, `reason` (`"closed"`, `"crashed"`, `"client"`) | |
+| `state` | `view`, `url`, `title`, `loading`, `can_go_back`, `can_go_forward`, `zoom` | Whole state, sent whenever any of it changes. Sending the whole thing keeps the client stateless |
+| `crashed` | `view`, `reason` | WebContent died; the view shows Ladybird's crash page and keeps working |
+
+## 4. Frames
+
+### 4.1 Record layout
+
+A frame record (kind 2) has this **44-byte header**, all little-endian, then a payload:
+
+```
+u32  seq            starts at 1 per view, increases per frame record; the client acks it
+u32  view
+u32  frame_width    device pixels of the whole presented frame
+u32  frame_height
+f64  dpr            device pixel ratio the frame was rendered at
+u32  damage_x       rectangle of changed pixels within the frame
+u32  damage_y
+u32  damage_width
+u32  damage_height
+u8   encoding       0 = raw, 1 = zstd, 2 = shm
+u8   flags          bit 0 = full: the whole frame changed or its size changed; damage equals
+                    the frame rectangle and the client must repaint everything
+                    bit 1 = more: another record for the same presented frame follows
+                    (banding, §4.4); the client may defer refresh until a record without it
+u16  reserved       0
+```
+
+Pixels are **BGRA8888**, i.e. each pixel read as a little-endian `u32` is `0xAARRGGBB`,
+which is exactly the Emacs canvas's ARGB32. Alpha is 0xFF for page content.
+
+| encoding | payload |
+| --- | --- |
+| 0 raw | `damage_width * damage_height * 4` bytes: the damage rectangle, rows tightly packed |
+| 1 zstd | one zstd frame, with its content size pledged in the frame header, that decompresses to the raw payload above |
+| 2 shm | `u64 offset`: the whole frame lives in the current shared memory segment (§4.3) at `offset`, row stride `frame_width * 4`. The damage rectangle says what changed since the last acked frame |
+
+The server chooses raw over zstd for small damage rectangles (under 16 KiB) and when
+the client did not offer zstd. Compression level is zstd 1 (fast).
+
+### 4.2 Flow control
+
+The server keeps **one frame in flight per view**. It sends a frame and waits for
+`{"type":"frame_ack","view":v,"seq":n}` before sending the next. While waiting it
+coalesces: it remembers the union of damage rectangles and, when the ack arrives, sends
+the latest displayed frame with that union as damage.
+
+The client acks **every** frame record it receives, including ones it could not decode,
+ones for unknown views and ones it dropped as stale; otherwise the server stalls. It acks
+after it has copied the pixels (or decided to drop them), not after Emacs redisplayed.
+The server ignores acks whose `seq` is not the one in flight.
+
+### 4.3 Shared memory
+
+When `welcome.shm` is true the server announces each segment before the first frame
+that uses it:
+
+```json
+{"type":"shm","view":1,"name":"/ladybird-12345-2","size":6400000}
+```
+
+`size` is the number of bytes the server uses; the mapped object may be larger (macOS
+rounds it up to whole pages).
+
+`name` is a POSIX `shm_open` name, at most 31 bytes including the slash (macOS limit).
+A frame record with encoding 2 refers to the most recent `shm` message for its view.
+Segments are never resized: a viewport change allocates a new segment (new generation
+number in the name) and announces it; the server unlinks the previous segment after the
+client acks the first frame in the new one. With shm the server writes the segment only
+between an ack and the next frame record, so the client reads it only between receiving
+a frame record and sending its ack. The client needs no reply to `shm`.
+
+A client that cannot use an announced segment (the name does not open, or the object is
+smaller than `size`; `fstat` reports a page-rounded size, so larger is normal: the socket was forwarded from another machine, or a sandbox
+hides the segment) sends `{"type":"shm_failed","view":v}`. The server then stops using
+shm for this connection, clears its one-in-flight state for that view (the client still
+acks any shm frame record it received, with status irrelevant to the server) and sends a
+`full` frame with a stream encoding.
+
+### 4.4 Large frames
+
+A record holds at most 64 MiB. A raw frame larger than that (above about 4K at dpr 2)
+is sent as horizontal bands: several frame records with consecutive `seq`, the same
+`frame_*`/`dpr`, adjacent damage rectangles, and the `more` flag set on all but the
+last. Each band is acked like any frame; the one-in-flight rule applies per band. Of the
+bands of a `full` frame only the first carries the `full` flag. Zstd frames are banded
+the same way, so no record decodes to more than 64 MiB.
+
+## 5. Input
+
+Coordinates are device pixels of the frame (the same space as the frame header). The
+client converts from canvas coordinates.
+
+Modifier bitmask, shared by mouse and key messages:
+
+| bit | value | meaning | Ladybird |
+| --- | --- | --- | --- |
+| 0 | 1 | shift | `Mod_Shift` |
+| 1 | 2 | ctrl | `Mod_Ctrl` |
+| 2 | 4 | alt / option / meta | `Mod_Alt` |
+| 3 | 8 | super / command | `Mod_Super` |
+| 4 | 16 | keypad: the key is on the numeric keypad | `Mod_Keypad` |
+
+Buttons: `"left"`, `"middle"`, `"right"`, `"back"`, `"forward"`.
+
+```json
+{"type":"mouse","view":1,"kind":"down","x":120,"y":340,"button":"left",
+ "buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","view":1,"kind":"up","x":120,"y":340,"button":"left","buttons":[],
+ "modifiers":0,"clicks":1}
+{"type":"mouse","view":1,"kind":"move","x":121,"y":342,"buttons":[],"modifiers":0}
+{"type":"mouse","view":1,"kind":"wheel","x":121,"y":342,"dx":0,"dy":80,"modifiers":0,
+ "precise":true}
+{"type":"mouse","view":1,"kind":"leave"}
+```
+
+`clicks` (1, 2 or 3) is sent on `down` and repeated on the matching `up`; the server
+puts it in `MouseEvent::click_count`, as the Qt and terminal frontends do (Ladybird has
+no separate double-click event). `buttons` is the set held after the event. Wheel
+`dx`/`dy` are device pixels; positive `dy` scrolls the content down (the page moves up),
+positive `dx` scrolls right. `precise` is true for touchpad pixel deltas
+(`WheelDeltaPrecision::Precise`), absent or false for wheel notches. `kind:"leave"`
+tells the page the pointer left the view (hover state clears).
+
+```json
+{"type":"key","view":1,"kind":"down","key":"Return","code_point":10,"modifiers":0,"repeat":false}
+{"type":"key","view":1,"kind":"up","key":"Return","code_point":10,"modifiers":0}
+{"type":"text","view":1,"text":"héllo"}
+```
+
+`key` is the **enumerator name** of Ladybird's `Web::UIEvents::KeyCode` without the
+`Key_` prefix (`"A"`, `"Return"`, `"Escape"`, `"Left"`, `"F5"`, `"Backspace"`,
+`"ExclamationPoint"`, `"Space"`…), not the UI name that `key_code_from_string` parses.
+The server maps the string with a table generated from `ENUMERATE_KEY_CODES`; an unknown
+name maps to `Key_Invalid`, and `Key_Invalid` with a non-zero `code_point` still types
+that character. `code_point` is the Unicode scalar the key produces, 0 if none; the
+special keys use what Ladybird's terminal frontend sends: Return 10, Tab 9, Backspace 8,
+Escape 27, Delete 127. Emacs has no key-release events, so the client sends `up`
+immediately after `down` for every key, except that a held modifier sends nothing on its
+own.
+
+`text` inserts a string as typed text through the input-method commit path, for
+characters Emacs received that have no key code (non-ASCII, IME composition). `paste`
+(§6) is the clipboard paste operation and fires paste events on the page.
+
+The server answers input it has dispatched with nothing; the client does not wait.
+Commands are not ordered after input events still on their way to the page: a
+`request_selection` sent straight after a double click may answer with the old selection.
+
+## 6. Navigation and page commands
+
+| Client → server | Fields | Maps to |
+| --- | --- | --- |
+| `load` | `view`, `url` | `load()`; the server also accepts non-URL text and treats it as a search or hostname the way `load_from_user_input` does |
+| `load_html` | `view`, `html` | `load_html()` |
+| `reload` | `view`, `bypass_cache` | `reload()` |
+| `stop` | `view` | `stop_loading()` |
+| `history` | `view`, `delta` | `traverse_the_history_by_delta()`; −1 back, +1 forward |
+| `zoom` | `view`, `op`: `"in"`, `"out"`, `"reset"` | |
+| `find` | `view`, `query`, `case_sensitive`, `highlight_all` | `find_in_page()`; `query` empty ends the search |
+| `find_step` | `view`, `direction`: `"next"`, `"previous"` | |
+| `edit` | `view`, `op`: `"select_all"`, `"cut"`, `"undo"`, `"redo"` | `cut` makes the server send `clipboard` with the cut text |
+| `paste` | `view`, `text` | Paste `text` at the caret (Emacs owns the clipboard) |
+| `request_selection` | `view`, `request` | Server answers `selection` `{view, request, text}` |
+| `screenshot` | `view`, `request`, `kind`: `"visible"`, `"full"`, `path` (optional, server-side) | Server saves a PNG on its machine and answers `screenshot_saved` `{view, request, path}`; `path` in the answer is authoritative (without `path`: `/tmp/ladybird-emacs-<pid>-screenshot-<n>.png`, mode 0600) |
+| `set_console` | `view`, `enabled` | Turns `console` messages on or off |
+
+| Server → client | Fields | Meaning |
+| --- | --- | --- |
+| `cursor` | `view`, `cursor` | CSS cursor name (`"pointer"`, `"text"`, …) |
+| `link_hover` | `view`, `url` (null when unhovered) | |
+| `tooltip` | `view`, `text` (null when left) | |
+| `favicon` | `view`, `png` (base64) | |
+| `background_color` | `view`, `rgb` (`"#rrggbb"`) | For the canvas margin |
+| `find_result` | `view`, `query`, `index`, `total` | `index` is the current match counted from 1, 0 without a match; `total` is null when unknown. `query` lets the client drop stale results |
+| `ime` | `view`, `enabled`, `caret`: `{x,y,width,height}` or null | Where to put the Emacs cursor / IME candidate window |
+| `clipboard` | `view`, `text` | The page put text on the clipboard (cut, copy, `navigator.clipboard`); the client adds it to the kill ring |
+| `console` | `view`, `level`, `text` | Page console output, when enabled |
+| `error` | `view`, `message` | A command failed (bad URL, unknown view, unsupported in v1). Informational |
+
+`request_source` is **v2**: Ladybird's `get_source()` opens a view-source tab, which a
+headless view cannot show. v2 will define it as serialized DOM or page text.
+
+## 7. Dialogs and pickers
+
+Every request has an `id` the client echoes. The server leaves the page blocked until
+the answer, as Ladybird's dialogs do. Device pixels for `x`, `y`.
+
+| Server → client | Fields | Client → server |
+| --- | --- | --- |
+| `dialog` | `view`, `id`, `kind`: `"alert"`, `"confirm"`, `"prompt"`, `"beforeunload"`, `message`, `default`, `origin` | `dialog_closed` `{view, id, accepted, text}` |
+| `dialog_update` | `view`, `id`, `default` | The default text of an open prompt changed; the client may ignore it |
+| `select` | `view`, `id`, `x`, `y`, `min_width` (device px), `items`: `[{id,label,selected,disabled,group}]` or `{separator:true}` | `select_closed` `{view, id, item}` (item id or null) |
+| `file_picker` | `view`, `id`, `multiple`, `accept`, `directory` (hint, may be null) | `file_picker_closed` `{view, id, paths}` with paths on the server's machine; `[]` cancels. Uploading a local file first is v2 |
+| `color_picker` | `view`, `id`, `current` | `color_picker_closed` `{view, id, color}` or null |
+| `date_picker` | `view`, `id`, `input_type`, `value`, `min`, `max` | `date_picker_closed` `{view, id, value}` or null |
+| `permission` | `view`, `id`, `name` (`geolocation`, `microphone`, `notifications`), `origin`, `is_file` | `permission_closed` `{view, id, outcome}`: `"allow_once"`, `"allow_always"`, `"deny"`, `"dismiss"` |
+| `permission_cancelled` | `view`, `id` | The page withdrew the request (navigated away); the client closes its prompt |
+| `request_cancelled` | `view`, `id` | The server withdrew an open `dialog`, `select`, `file_picker`, `color_picker` or `date_picker` (WebContent crashed, another document became active, a newer request of the same kind replaced it, the view closed); the client closes its prompt and sends no answer. A withdrawn request is not sent again to a reconnecting client. An alert that blocks a pending `load` stays open: withdrawal happens when the new document is active |
+| `context_menu` | `view`, `x`, `y`, `kind`, `link_url`, `image_url`, `image_mime_type`, `media_url`, `media`: `{playing, muted, loop, controls}` or null, `selection`, `editable` | nothing; the client builds its own menu from these and sends ordinary commands. v2 adds `context_menu_action` for Ladybird-side actions such as inspect element |
+| `external_url` | `view`, `id`, `url`, `application` | `external_url_closed` `{view, id, open}`; `open` false denies |
+
+## 8. Errors and logging
+
+`error` (§6) reports a failed command; the connection stays up. Framing errors (§1)
+end the connection.
+
+Limits the server enforces: every string that comes from a page (title, URL, dialog and
+console text, tooltip, selection, clipboard, select labels) is cut to 1 MiB of UTF-8 and
+is always valid UTF-8 (a lone surrogate becomes U+FFFD); a favicon whose PNG is larger is
+sent with `png` null. Wheel deltas beyond ±1e6 or not finite, a `code_point` that is not a
+Unicode scalar value, and a history `delta` beyond ±10000 are answered with `error` and
+not forwarded. Downloads are refused with `error` "download blocked: NAME". A `create_view`
+with an unusable URL or `dpr` fails with `error` and creates no view. `reject` reasons are
+"the first message must be hello", "unsupported protocol version" and "framing error".
+A connection replaces the current client only once its `hello` is accepted; the old client
+then receives `replaced` followed by end of stream. A connection that negotiated zstd
+still receives raw frames when zstd cannot shrink the pixels.
+
+## 9. Versioning
+
+`protocol` is a single integer, bumped on any incompatible change. Additive changes
+(new message types, new optional fields) do not bump it.
+
+## 10. Reserved for v2
+
+Multiple clients on one view, popups as real views (`view_created` with `opener`),
+uploads for the file picker, `context_menu_action`, `request_source`/`source`,
+`request_history`/`history_list` (full session history with titles), video-codec frame
+encodings (`encoding` 3+), per-view `set_user_agent`, downloads (`download_*` events
+mirroring Ladybird's `DownloadState`), devtools port forwarding, TCP listener
+authentication via `hello.token`.
+
+## 11. Changes from the draft
+
+Made after the three component plans reviewed the draft. Plans 02, 03 and 04 were
+written against the draft; read their bodies with these corrections.
+
+1. Modifier bit 16 is `keypad` (`Mod_Keypad`), not altgr.
+2. `clicks` on `down` and `up` sets `click_count`; there is no double-click event. Wheel
+   has optional `precise`. The `leave` example is fixed.
+3. Special-key code points fixed: Return **10** (not 13), Tab 9, Backspace 8, Escape 27,
+   Delete 127. `Key_Invalid` with a code point still types.
+4. `key` names are enumerator names; stated explicitly.
+5. `text` vs `paste` defined; `edit cut` yields a `clipboard` message; new `clipboard`
+   message for page-initiated clipboard writes.
+6. `screenshot.path` optional, answer authoritative. `request_source` moved to v2.
+7. `select` gains separators and device-pixel `min_width`; `dialog` gains `origin`;
+   `dialog_update` added; `file_picker` gains `directory`; `permission` outcomes are
+   `allow_once`/`allow_always`/`deny`/`dismiss`, plus `permission_cancelled`;
+   `context_menu` gains `image_mime_type` and `media`.
+8. Popups: `popup_blocked` in v1; `view_created` is only the answer to `create_view` and
+   carries `title`, `width`, `height`, `dpr`.
+9. `welcome` gains `log`, per-view `width`/`height`/`dpr`; `welcome.shm` is a boolean,
+   segments are announced by the new `shm` message (§4.3), never resized.
+10. Frame header size stated (44 bytes); `seq` starts at 1 per view; zstd pledges the
+    content size; `more` flag and banding for frames above 64 MiB (§4.4); clients ack
+    every record; stale acks ignored; full frame after `welcome` only once available.
+11. `find_result` carries `query`. `hello` gains reserved `token`. `set_console` listed.
+12. Transport notes: stdio dies with its ssh session; macOS Unix sockets read in 8 KiB
+    chunks; framing errors require a reconnect.
+13. `shm_failed` (§4.3): fallback to stream encodings when the client cannot map the
+    announced segment, e.g. over a forwarded Unix socket.
+14. `length` counts the `kind` byte (§1); plans 02 and 03 had read it as the payload
+    length.
+15. From the server implementation: view ids are not reused; `view_created.url` is
+    `about:blank`; `popup_blocked` needs user activation and may have a null `url`; only
+    the first band of a full frame has `full`, zstd frames are banded too; commands are
+    not ordered after input; `shm.size` is the used size, the mapping may be larger.
+    The server re-sends open dialogs, pickers and permission requests to a reconnecting
+    client. `external_url` never fires in headless Ladybird.
+16. From the code reviews: `create_view.request`, echoed by `view_created` and `error`;
+    `request_cancelled`; the server truncates over-long page strings, sends valid UTF-8
+    only, answers out-of-range input numbers with `error`, refuses downloads with an
+    `error`, and replaces a client only after the new connection's `hello`.
