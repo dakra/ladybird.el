@@ -1,0 +1,67 @@
+{
+  "name": "size",
+  "comment": "The view follows the windows that show its buffer: one debounced set_viewport per change, the smallest window wins, the canvas is replaced by a frame of the new size, a grown mini-window does not resize the page, and visibility and focus are reported.",
+  "params": {"host": "stdio"},
+  "variants": {
+    "stdio": {"host": "stdio"},
+    "tcp": {"host": "tcp"}
+  },
+  "defaults": {"timeout": 15},
+  "session": {"ui": "tty", "size": "120x36", "eval_file": ["../lib/ladybird-setup.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(ladybird-elate-start '{{host}} \"--fps\" \"0\")"},
+    {"wait": "until", "pred": "(ladybird-elate-ready-p)"},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"set_focus\" 'focused t)"},
+    {"assert": {"eval": "(= 0 (ladybird-elate-count \"set_viewport\"))"}, "comment": "the view was created at the window's size"},
+    {"assert": {"eval": "(ladybird-elate-logged \"set_visibility\" 'visible t)"}},
+
+    {"group": "mini-window", "comment": "a mini-window that grows for a long prompt does not resize the page"},
+    {"eval": "(ladybird-elate-load (concat \"mock://\" (make-string 300 ?x)))"},
+    {"wait": "until", "pred": "(= 307 (length (ladybird-elate-state 'url)))"},
+    {"wait": "until", "pred": "(not (ladybird-elate-state 'loading))"},
+    {"keys": "l", "delivery": "events"},
+    {"wait": "prompt"},
+    {"wait": "idle", "min_idle": 0.5},
+    {"assert": {"eval": "(> (window-total-height (minibuffer-window)) 1)"}, "comment": "the prompt takes several lines"},
+    {"assert": {"eval": "(ladybird-elate-in-page (< (window-body-height (get-buffer-window) t) (cdr ladybird--canvas-size)))"}, "comment": "which the page's window lost"},
+    {"assert": {"eval": "(= 0 (ladybird-elate-count \"set_viewport\"))"}},
+    {"keys": "C-g", "delivery": "events"},
+    {"wait": "idle", "min_idle": 0.5},
+    {"assert": {"eval": "(= 1 (window-total-height (minibuffer-window)))"}},
+    {"assert": {"eval": "(= 0 (ladybird-elate-count \"set_viewport\"))"}},
+    {"assert": {"eval": "(ladybird-elate-in-page (= (window-body-height (get-buffer-window) t) (cdr ladybird--canvas-size)))"}},
+
+    {"group": "split", "comment": "a split sends one set_viewport with the smaller height"},
+    {"eval": "(ladybird-elate-in-page (setq ladybird-elate-canvas ladybird--canvas))"},
+    {"keys": "C-x 2"},
+    {"wait": "until", "pred": "(ladybird-elate-in-page (equal ladybird--canvas-size (cons 120 (apply #'min (mapcar (lambda (w) (window-body-height w t)) (get-buffer-window-list))))))"},
+    {"assert": {"eval": "(= 1 (ladybird-elate-count \"set_viewport\"))"}},
+    {"assert": {"eval": "(ladybird-elate-in-page (not (eq ladybird--canvas ladybird-elate-canvas)))"}, "comment": "a new canvas shows the frame of the new size"},
+    {"assert": {"eval": "(ladybird-elate-in-page (eq (get-text-property 1 'display) ladybird--canvas))"}},
+
+    {"group": "unsplit", "comment": "back to one window, back to its size"},
+    {"keys": "C-x 1"},
+    {"wait": "until", "pred": "(ladybird-elate-in-page (equal ladybird--canvas-size (cons 120 (window-body-height (get-buffer-window) t))))"},
+    {"assert": {"eval": "(= 2 (ladybird-elate-count \"set_viewport\"))"}},
+
+    {"group": "frame", "comment": "a resized frame resizes the view"},
+    {"resize": "100x30"},
+    {"wait": "until", "pred": "(ladybird-elate-in-page (equal ladybird--canvas-size (cons 100 (window-body-height (get-buffer-window) t))))"},
+    {"assert": {"eval": "(ladybird-elate-logged \"set_viewport\" 'width 100)"}},
+
+    {"group": "visibility", "comment": "a buffer no window shows is hidden and unfocused"},
+    {"eval": "(switch-to-buffer \"*scratch*\")"},
+    {"wait": "until", "pred": "(and (ladybird-elate-logged \"set_visibility\" 'visible nil) (ladybird-elate-logged \"set_focus\" 'focused nil))"},
+    {"assert": {"eval": "(null track-mouse)"}, "comment": "mouse tracking is back as it was"},
+    {"eval": "(setq ladybird-elate-viewports (ladybird-elate-count \"set_viewport\"))"},
+    {"eval": "(switch-to-buffer (ladybird-elate-buffer))"},
+    {"wait": "until", "pred": "(= 2 (ladybird-elate-count \"set_visibility\" 'visible t))"},
+    {"wait": "until", "pred": "(alist-get 'focused (ladybird-elate-logged \"set_focus\"))", "comment": "the last word on focus is that the page has it"},
+    {"assert": {"eval": "(= ladybird-elate-viewports (ladybird-elate-count \"set_viewport\"))"}, "comment": "the size did not change"},
+    {"assert": {"eval": "(eq track-mouse t)"}},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-elate-cleanup)"}
+  ]
+}

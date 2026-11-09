@@ -1,0 +1,89 @@
+{
+  "name": "limit",
+  "comment": "A server that shows one page: a second page loads in the first, and after the server refused once it is not asked again.",
+  "defaults": {
+    "timeout": 15
+  },
+  "session": {
+    "ui": "tty",
+    "size": "120x36",
+    "eval_file": [
+      "../lib/ladybird-setup.el"
+    ]
+  },
+  "steps": [
+    {
+      "group": "setup"
+    },
+    {
+      "eval": "(ladybird-elate-start 'stdio \"--fps\" \"0\" \"--max-views\" \"1\")"
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-elate-ready-p)"
+    },
+    {
+      "group": "refused",
+      "comment": "c asks for a second page, which the server refuses: its buffer goes and the URL loads in the first page"
+    },
+    {
+      "keys": "c"
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-elate-messages-p \"ladybird: mock opens no further page; mock://start loaded in\")"
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-elate-logged \"load\" 'url \"mock://start\")"
+    },
+    {
+      "assert": {
+        "eval": "(= 1 (length (ladybird--buffers)))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(= 2 (ladybird-elate-count \"create_view\"))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(eq (window-buffer) (ladybird-elate-buffer))"
+      },
+      "comment": "the page is shown where the new buffer was"
+    },
+    {
+      "wait": "until",
+      "pred": "(not (string-match-p \"\\\\[\" (ladybird-elate-header)))",
+      "comment": "no tag is left in the header line"
+    },
+    {
+      "group": "remembered",
+      "comment": "the next page is loaded without asking the server for a view"
+    },
+    {
+      "eval": "(ladybird \"mock://next\")"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-elate-state 'url) \"mock://next\")"
+    },
+    {
+      "assert": {
+        "eval": "(= 2 (ladybird-elate-count \"create_view\"))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(= 1 (length (ladybird--buffers)))"
+      }
+    },
+    {
+      "group": "cleanup"
+    },
+    {
+      "eval": "(ladybird-elate-cleanup)"
+    }
+  ]
+}

@@ -1,0 +1,317 @@
+#+TITLE: ladybird — Ladybird pages in an Emacs canvas
+
+=ladybird= shows web pages rendered by the [[https://ladybird.org][Ladybird]] browser in an Emacs buffer.  A Ladybird
+server process renders the page and sends the changed pixels; a native module paints
+them into an Emacs 32 canvas image; the mouse, the wheel and the keyboard go back to the
+page.  The server can run on this machine or on another one, and with a socket its pages
+outlive the Emacs that shows them.
+
+=ladybird= is a working name.
+
+* Status
+
+The Emacs side is in this repository: the Lisp package, the native module, a mock server
+and the tests.
+
+The Ladybird side, a headless mode =Ladybird --headless=emacs= that speaks the protocol
+of [[file:plans/01-protocol.md][plans/01-protocol.md]], is under development on a branch of Ladybird named
+=emacs-headless= and is in no Ladybird release.
+
+The two have been run together on one macOS machine: over standard input and output with
+frames in shared memory, and over a Unix socket, where a page was left on the server and
+attached again.  Not tested: a server on another machine (ssh, a forwarded socket, TCP),
+Linux on either side, and a device pixel ratio of 2.
+
+=tools/mock-server.py= stands in for the server in the tests: it draws a test gradient,
+marks mouse presses and typed keys, and answers the protocol's commands with canned
+data.
+
+The Ladybird server shows one page per server process.  A command that opens a second
+page on it (=c=, a second =M-x ladybird=, "Open Link in New Buffer",
+=ladybird-open-blocked-popup=) loads the URL in the page there is and says so.  The
+package itself handles several pages per server, each in its own buffer, and the mock
+server serves them.
+
+Not there yet: tabs and popups (a page that opens a window is reported, and
+=ladybird-open-blocked-popup= opens it), view source, uploads from this machine (the file
+picker returns paths on the server's machine), downloads, bookmarks and profiles.
+
+* Requirements
+
+- Emacs 32 with canvas images and dynamic modules.
+- The native module, built with Zig 0.17 (=make build=).
+- A server: Ladybird built from its =emacs-headless= branch, or the mock server, which
+  needs Python 3.11 or later.
+
+* Building
+
+#+begin_src sh
+make build      # ladybird-module.dylib or .so next to the Makefile
+make test       # Zig tests, module tests in Emacs, ERT tests of the package
+#+end_src
+
+Put =lisp/= on the =load-path=.  The module is looked for next to the Lisp files and in
+the directory above them; =ladybird-module-directory= names another place.
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "/path/to/ladybird/lisp")
+(require 'ladybird)
+#+end_src
+
+* Quick start
+
+With a Ladybird that has the headless mode:
+
+#+begin_src emacs-lisp
+(setq ladybird-program "/path/to/Ladybird")
+;; M-x ladybird RET https://ladybird.org RET
+#+end_src
+
+With the mock server:
+
+#+begin_src emacs-lisp
+(setq ladybird-hosts
+      '(("mock" :command ("python3" "-I" "/path/to/ladybird/tools/mock-server.py")))
+      ladybird-default-host "mock")
+;; M-x ladybird RET mock://start RET
+#+end_src
+
+To open links from other packages in ladybird:
+
+#+begin_src emacs-lisp
+(setq browse-url-browser-function #'ladybird-browse-url)
+;; or only some of them
+(add-to-list 'browse-url-handlers '("\\`https?://.*\\.internal/" . ladybird-browse-url))
+#+end_src
+
+=ladybird-browse-url= loads the URL in the page buffer used last, and opens a new one when
+there is none.
+
+* Hosts and transports
+
+=ladybird= starts =ladybird-program= as =PROGRAM --headless=emacs= and talks to it over its
+standard input and output.  Other servers are named in =ladybird-hosts=, an alist of a
+label and one or more endpoints, tried in order:
+
+| Endpoint                               | Connection                                     |
+|----------------------------------------+------------------------------------------------|
+| ="local"=                              | =ladybird-program= as a local process            |
+| ="ssh:HOST"=, ="ssh://USER@HOST:PORT"= | =ladybird-program= on HOST, run by =ssh -T=      |
+| ="/PATH"=, ="unix:///PATH"=            | a Unix socket                                  |
+| ="tcp://HOST:PORT"=                    | a TCP port, unauthenticated                    |
+| ="tls://HOST:PORT"=                    | a TCP port with TLS                            |
+| =(:ssh HOST :program P :args LIST)=    | ssh with another program or arguments          |
+| =(:command (PROGRAM ARG...))=          | that command as a local process                |
+| =(:kind unix :path PATH :shm nil)=     | a Unix socket, without shared memory           |
+
+#+begin_src emacs-lisp
+(setq ladybird-hosts '(("devbox" . "ssh://devbox")
+                     ("work" "/tmp/work.sock" "tcp://work.tailnet.example:7070")))
+#+end_src
+
+=M-x ladybird= opens on =ladybird-default-host=: the local server, a label, or =ask=.  With a
+prefix argument it asks.  =M-x ladybird-connect= connects without opening a page, gives
+every page the server has open a buffer and shows the first of them.
+
+A server on standard input and output lives as long as its connection, so its pages end
+with Emacs or with the ssh session.  A server that listens on a socket keeps its pages:
+kill the buffers with =ladybird-keep-view-on-kill= set, or quit Emacs, and the next
+connection shows them again.  To reach such a server on another machine, forward its
+socket:
+
+#+begin_src sh
+# on devbox
+Ladybird --headless=emacs --emacs-socket=/run/user/1000/ladybird.sock
+# here
+ssh -N -o StreamLocalBindUnlink=yes -L /tmp/devbox.sock:/run/user/1000/ladybird.sock devbox
+#+end_src
+
+#+begin_src emacs-lisp
+(setq ladybird-hosts '(("devbox" . "/tmp/devbox.sock")))
+#+end_src
+
+Local servers hand frames over in shared memory, one segment per page.  Over a forwarded
+socket the segment cannot be opened here; the server is told and sends the pixels in the
+stream, compressed with zstd.  The module maps a segment at the size it has then and
+trusts the server not to shrink it: reading from pages that are gone would kill Emacs.
+Only a server on this machine can hand over a segment, and one run by the same user can
+harm Emacs in other ways already; for a Unix socket of a server that is not, say so with
+=:shm nil= in its endpoint.
+
+A server reached through a Unix socket counts as being on this machine when its endpoint
+does not say =:shm nil=, its segments could be mapped and it names this machine as its
+host.  For any other server, file names are asked for as paths on the server's machine.
+
+A connection that is lost is dialled again after 1, 2, 4 and up to 30 seconds while it
+has page buffers (=ladybird-reconnect=); the header line says so.  The buffers keep their
+last frame and re-attach to their pages; a page the server no longer has is opened again
+with its URL, and so is every page when another server process answers.  A page whose
+buffer was killed meanwhile is closed once the connection is back.  The delays start at
+one second again after a connection has lasted ten seconds.  A local or ssh server that exited by itself is reported with its exit
+status and started again only with =ladybird-reconnect= set to =always=.  When another
+client takes the server over the buffers show =[detached]=, and =M-x ladybird-reconnect=
+takes it back.
+
+A server is pinged after =ladybird-keepalive-interval= seconds of silence and its
+connection dropped when no answer comes within =ladybird-ping-timeout=.
+
+* Keys
+
+The mouse and the wheel always act on the page.  Keys are Emacs commands:
+
+| Key                            | Command                                         |
+|--------------------------------+-------------------------------------------------|
+| =l=, =g=                       | =ladybird-goto-url=                               |
+| =r=, =R=                       | reload, reload without the cache                |
+| =s=                            | stop loading                                    |
+| =b=, =f=                       | back, forward                                   |
+| =n=, =p=, =<down>=, =<up>=     | scroll by =ladybird-scroll-step=                  |
+| =<left>=, =<right>=            | scroll sideways                                 |
+| =SPC=, =<next>=, =C-v=         | scroll a page down                              |
+| =DEL=, =S-SPC=, =<prior>=, =M-v= | scroll a page up                              |
+| =<=, =>=, =M-<=, =M->=         | top, bottom                                     |
+| =+=, ===, =-=, =0=             | zoom in, in, out, reset                         |
+| =C-s=, =C-r=                   | find in page                                    |
+| =M-s n=, =M-s p=               | next, previous match                            |
+| =i=, =RET=                     | =ladybird-insert-mode=: type into the page        |
+| =C-y=                          | paste the latest kill into the page             |
+| =M-w=                          | copy the page's selection                       |
+| =C-x h=                        | select all                                      |
+| =w=                            | copy the page's URL                             |
+| =c=                            | the same URL in a new buffer                    |
+| =S=                            | screenshot, saved on the server's machine       |
+| =C-c C-l=                      | page console output on or off                   |
+| =q=                            | bury the buffer; the page stays open            |
+| =Q=                            | close the page and kill the buffer              |
+
+In =ladybird-insert-mode= the keys that insert themselves, =RET=, =TAB=, =DEL= and the
+cursor and function keys with any modifiers go to the page as they are.  Everything else
+keeps its Emacs meaning, in particular =C-x=, =C-c=, =M-x=, =C-h=, =C-u= and =C-g=;
+=<escape>= is the page's cancel key in a graphical frame.  =C-y= pastes, =M-w= copies the
+page's selection, and =C-c C-c= or a click on =:Insert= in the mode line leaves the mode.
+With an input method the characters it produces are sent.
+
+The Emacs editing keys in =ladybird-insert-mode-forward-keys= edit the page's text field.
+A browser has other keys for what they do, and those differ between platforms, so each
+is translated for the platform the server runs on:
+
+| Key                                    | In the text field       | Sent to a macOS server    | Sent to another server    |
+|----------------------------------------+-------------------------+---------------------------+---------------------------|
+| =C-a=, =C-e=                           | start, end of the line  | Home, End                 | Home, End                 |
+| =C-d=                                  | delete a character      | Delete                    | Delete                    |
+| =C-k=                                  | delete to the line's end | Shift+End, Delete        | Shift+End, Delete         |
+| =M-b=, =M-f=                           | a word left, right      | Alt+Left, Alt+Right       | Ctrl+Left, Ctrl+Right     |
+| =M-d=                                  | delete a word forward   | Alt+Delete                | Ctrl+Delete               |
+| =M-DEL=, =M-<backspace>=, =C-<backspace>= | delete a word backward | Alt+Backspace           | Ctrl+Backspace            |
+| =C-z=, =C-/=, =C-_=                    | undo                    | the page's undo           | the page's undo           |
+| =C-?=                                  | redo                    | the page's redo           | the page's redo           |
+
+At the end of a line =C-k= removes the line break.  =C-b=, =C-f=, =C-p= and =C-n= (the
+cursor keys) and =C-M-_= and =C-S-z= (redo) are translated too once they are added to
+the option; other keys added to it are sent as they are.  With the option nil all of
+them stay Emacs commands.  The macOS column was tried against a Ladybird server; the
+other one was not.
+
+=C-s= reads the search string in the minibuffer.  The page shows the matches while the
+string is typed and the minibuffer shows their number; =C-s= and =C-r= move to the next
+and the previous match, =RET= leaves the matches highlighted, =C-g= ends the search.
+Ladybird turns the match the search ended on into the page's selection.
+
+What a page asks comes to the minibuffer: alerts (in the echo area; =ladybird-alert-style=
+makes them wait for a key), confirmations, prompts, the choices of a select element,
+files, colours, dates, permissions and URLs for other programs.  =C-g= declines, and so
+does any other way out of the prompt.  While the minibuffer is in use a question waits
+for it.  A question the server withdraws closes by itself.
+
+A permission and a URL for another program are answered with a word typed or completed in
+full (=allow once=, =allow always=, =deny=; =open on server=, =open here=, =deny=), and
+keys typed before the question appeared are discarded.  =open here= hands the URL to
+=browse-url-secondary-browser-function= and is offered for http, https and mailto URLs
+only.
+
+A right click pops up a menu for the link, image, selection or text field under the
+pointer.
+
+The header line shows the page's URL first, at least its scheme and host, then the
+title in the room that is left.
+
+* Display resolution
+
+=ladybird-device-pixel-ratio= is the number of device pixels the server renders per Emacs
+pixel.
+
+On macOS it is 1.0 by default: the page is rendered at one pixel per point and Emacs
+scales the canvas up on a Retina display, so text is less sharp than in the rest of the
+frame.  The NS port of Emacs draws a canvas without its image transform (=:scale=), so a
+page rendered at the display's resolution would show only its top left part.
+
+With =ladybird-device-pixel-ratio= set to nil the ratio is the frame's scale factor
+(=frame-scale-factor=) and the canvas is shown scaled down by it, one canvas pixel per
+device pixel.  On macOS that needs an Emacs built with
+=plans/emacs-canvas-ns-transform.patch=, which makes the NS port keep the transform.
+For Homebrew's emacs-plus the patch is registered in =~/.config/emacs-plus/build.yml=
+under the name =canvas-ns-transform=.  The patch and this setting have not been tested
+yet.
+
+Elsewhere the default is nil.
+
+* Options
+
+| Option                            | Default            | Meaning                                           |
+|-----------------------------------+--------------------+---------------------------------------------------|
+| =ladybird-program=                  | ="Ladybird"=       | the local server's program                        |
+| =ladybird-program-arguments=        | nil                | further arguments for it                          |
+| =ladybird-ssh-program=              | ="ssh"=            | program that runs a remote server                 |
+| =ladybird-hosts=                    | nil                | other servers                                     |
+| =ladybird-default-host=             | nil                | where =ladybird= opens pages                        |
+| =ladybird-home-url=                 | ="about:blank"=    | URL of =ladybird= without one                       |
+| =ladybird-module-directory=         | nil                | where the native module is                        |
+| =ladybird-device-pixel-ratio=       | 1.0 on macOS, else nil | see above                                     |
+| =ladybird-resize-delay=             | 0.05               | seconds a window change waits before the resize   |
+| =ladybird-track-hover=              | t                  | send mouse movement with no button held           |
+| =ladybird-hover-interval=           | 0.016              | least seconds between two movements               |
+| =ladybird-show-link-hover=          | t                  | hovered link in the echo area                     |
+| =ladybird-header-line=              | t                  | icon, URL and title in a header line              |
+| =ladybird-buffer-name-format=       | ="*ladybird: %t*"=   | =%t= title, =%u= URL, =%h= host                   |
+| =ladybird-alert-style=              | =echo=             | =echo= or =prompt=                                |
+| =ladybird-scroll-step=              | nil                | pixels per line scroll; nil is three text lines   |
+| =ladybird-insert-mode-forward-keys= | see above          | Emacs editing keys that edit the page's text field |
+| =ladybird-keep-view-on-kill=        | nil                | leave the page open when its buffer is killed     |
+| =ladybird-reconnect=                | t                  | nil, t or =always=                                |
+| =ladybird-keepalive-interval=       | 30                 | idle seconds before a ping                        |
+| =ladybird-ping-timeout=             | 10                 | seconds to wait for its answer                    |
+| =ladybird-connect-timeout=          | 10                 | seconds to wait for a connection and its welcome  |
+| =ladybird-console-buffer=           | ="*ladybird-console*"= | where console output goes                       |
+| =ladybird-console-max-lines=        | 10000              | lines of console output kept                      |
+
+=ladybird-track-hover= sets =track-mouse= and =mouse-fine-grained-tracking= while a page
+buffer's window is selected and restores them afterwards.
+
+The page has the size of the smallest window that shows its buffer.  It keeps that size
+while the minibuffer or the echo area grows beyond one line and borrows lines from the
+window.
+
+* Development
+
+#+begin_src sh
+make test                            # test-zig, test-native, test-elisp
+make byte-compile checkdoc           # warnings are errors
+make package-lint                    # installs package-lint under ~/.cache on first use
+make test-mock                       # ERT against tools/mock-server.py, fake module
+make test-mock-native                # the same with the native module
+test/elate/run.sh                    # end-to-end scenarios in sandboxed Emacs sessions
+python3 -I tools/mock-server.py --help
+#+end_src
+
+- =lisp/ladybird-keys.el= translates Emacs events into the protocol's key and mouse fields.
+- =lisp/ladybird-conn.el= has the hosts, the transports, the connection state machine and
+  the dispatch of incoming records.
+- =lisp/ladybird.el= has the major mode, the canvas and its sizing, input, the page's
+  dialogs and the commands.
+- =src/= is the native module: it parses the stream, decodes zstd and shared memory
+  frames and copies pixels into the canvas.
+- =test/ladybird-fake-module.el= implements the module's functions in Lisp; the ERT tests
+  of the package run with it.
+- =test/elate/= has scenarios for [[https://github.com/dakra/elate][elate]] that drive the package against the mock
+  server over standard input and output, a Unix socket and TCP.
+- =plans/= has the protocol and the design of each part.

@@ -1,0 +1,82 @@
+{
+  "name": "input",
+  "comment": "Keys reach the page: typing and function keys in insert mode with their key names, code points and modifiers, Emacs editing keys translated for the server's platform, non-ASCII text, paste and the selection, keys that stay with Emacs, and the scroll commands.",
+  "params": {"host": "stdio", "platform": "macos", "word": "4"},
+  "variants": {
+    "stdio": {"host": "stdio", "platform": "macos", "word": "4"},
+    "unix": {"host": "unix", "platform": "linux", "word": "2"}
+  },
+  "defaults": {"timeout": 15},
+  "session": {"ui": "tty", "size": "120x36", "eval_file": ["../lib/ladybird-setup.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(ladybird-elate-start '{{host}} \"--fps\" \"0\" \"--platform\" \"{{platform}}\")"},
+    {"wait": "until", "pred": "(ladybird-elate-ready-p)"},
+
+    {"group": "emacs-keys", "comment": "outside insert mode a letter is a command or an error, never sent"},
+    {"eval": "(ladybird-elate-in-page (setq ladybird-elate-binding (list (key-binding \"a\") (key-binding \"n\"))))"},
+    {"assert": {"eval": "(equal ladybird-elate-binding '(ladybird-self-insert-hint ladybird-scroll-down-line))"}},
+    {"assert": {"eval": "(null (ladybird-elate-log \"key\"))"}},
+
+    {"group": "typing", "comment": "insert mode sends typed keys with names, code points and modifiers"},
+    {"keys": "i"},
+    {"assert": {"eval": "(ladybird-elate-in-page ladybird-insert-mode)"}},
+    {"type": "Hello!"},
+    {"keys": "RET"},
+    {"wait": "until", "pred": "(equal (ladybird-elate-keys) '(\"H\" \"E\" \"L\" \"L\" \"O\" \"ExclamationPoint\" \"Return\"))"},
+    {"assert": {"eval": "(ladybird-elate-logged \"key\" 'kind \"down\" 'key \"H\" 'code_point 72 'modifiers 1)"}, "comment": "a capital carries shift"},
+    {"assert": {"eval": "(ladybird-elate-logged \"key\" 'kind \"down\" 'key \"E\" 'code_point 101 'modifiers 0)"}},
+    {"assert": {"eval": "(ladybird-elate-logged \"key\" 'kind \"down\" 'key \"ExclamationPoint\" 'code_point 33 'modifiers 0)"}},
+    {"assert": {"eval": "(ladybird-elate-logged \"key\" 'kind \"down\" 'key \"Return\" 'code_point 10)"}},
+    {"assert": {"eval": "(= (ladybird-elate-count \"key\" 'kind \"up\") 7)"}, "comment": "every press is released"},
+
+
+    {"group": "function-keys", "comment": "function keys go to the page as they are"},
+    {"keys": "DEL TAB <left> C-<right> S-<home>"},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"key\" 'kind \"down\" 'key \"Home\" 'modifiers 1)"},
+    {"assert": {"eval": "(ladybird-elate-logged \"key\" 'kind \"down\" 'key \"Backspace\" 'code_point 8 'modifiers 0)"}},
+    {"assert": {"eval": "(ladybird-elate-logged \"key\" 'kind \"down\" 'key \"Tab\" 'code_point 9)"}},
+    {"assert": {"eval": "(ladybird-elate-logged \"key\" 'kind \"down\" 'key \"Left\" 'modifiers 0)"}},
+    {"assert": {"eval": "(ladybird-elate-logged \"key\" 'kind \"down\" 'key \"Right\" 'modifiers 2)"}},
+
+    {"group": "editing", "comment": "Emacs editing keys are translated for the server's platform ({{platform}})"},
+    {"eval": "(setq ladybird-elate-key-count (length (ladybird-elate-keys)))"},
+    {"keys": "C-a C-e C-d C-k M-b M-f M-d M-DEL C-<backspace>"},
+    {"keys": "C-/ C-z"},
+    {"wait": "until", "pred": "(= 2 (ladybird-elate-count \"edit\" 'op \"undo\"))"},
+    {"assert": {"eval": "(equal (mapcar (lambda (m) (list (alist-get 'key m) (alist-get 'modifiers m))) (nthcdr ladybird-elate-key-count (seq-filter (lambda (m) (equal (alist-get 'kind m) \"down\")) (ladybird-elate-log \"key\")))) '((\"Home\" 0) (\"End\" 0) (\"Delete\" 0) (\"End\" 1) (\"Delete\" 0) (\"Left\" {{word}}) (\"Right\" {{word}}) (\"Delete\" {{word}}) (\"Backspace\" {{word}}) (\"Backspace\" {{word}})))"}},
+    {"assert": {"eval": "(equal (ladybird-elate-in-page (ladybird--platform)) (if (equal \"{{platform}}\" \"macos\") 'macos 'other))"}},
+
+    {"group": "text", "comment": "characters without a key go as text"},
+    {"type": "é日"},
+    {"wait": "until", "pred": "(and (ladybird-elate-logged \"text\" 'text \"é\") (ladybird-elate-logged \"text\" 'text \"日\"))"},
+
+    {"group": "paste", "comment": "C-y pastes the kill ring, M-w copies the page's selection"},
+    {"eval": "(kill-new \"pasted ✓\")"},
+    {"keys": "C-y"},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"paste\" 'text \"pasted ✓\")"},
+    {"keys": "M-w"},
+    {"wait": "until", "pred": "(equal (current-kill 0) \"mock selection\")"},
+
+    {"group": "emacs-keeps", "comment": "prefix and command keys keep their Emacs meaning in insert mode"},
+    {"eval": "(ladybird-elate-in-page (setq ladybird-elate-binding (mapcar (lambda (k) (key-binding (kbd k))) '(\"C-x C-f\" \"M-x\" \"C-g\" \"C-h k\" \"C-u\"))))"},
+    {"assert": {"eval": "(equal ladybird-elate-binding '(find-file execute-extended-command keyboard-quit describe-key universal-argument))"}},
+    {"eval": "(setq ladybird-elate-key-count (length (ladybird-elate-log \"key\")))"},
+    {"keys": "C-c C-c"},
+    {"assert": {"eval": "(ladybird-elate-in-page (not ladybird-insert-mode))"}},
+    {"assert": {"eval": "(= ladybird-elate-key-count (length (ladybird-elate-log \"key\")))"}},
+
+    {"group": "scroll", "comment": "n, p, SPC and DEL scroll by lines and pages at the middle of the canvas"},
+    {"keys": "n"},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"mouse\" 'kind \"wheel\" 'dy (* 3 (frame-char-height)) 'x 60)"},
+    {"keys": "p"},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"mouse\" 'kind \"wheel\" 'dy (* -3 (frame-char-height)))"},
+    {"keys": "SPC"},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"mouse\" 'kind \"wheel\" 'dy (ladybird-elate-in-page (- (window-body-height (get-buffer-window) t) (frame-char-height))))"},
+    {"keys": ">"},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"mouse\" 'kind \"wheel\" 'dy 1000000)"},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-elate-cleanup)"}
+  ]
+}

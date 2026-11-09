@@ -1,0 +1,41 @@
+{
+  "name": "mouse",
+  "comment": "The mouse and the wheel act on the page at the pointer's position; needs a graphical frame, as a terminal shows no canvas.",
+  "defaults": {"timeout": 15},
+  "session": {"ui": "gui", "size": "100x35", "eval_file": ["../lib/ladybird-setup.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(ladybird-elate-start 'stdio \"--fps\" \"0\")"},
+    {"wait": "until", "pred": "(ladybird-elate-ready-p)"},
+    {"assert": {"eval": "(ladybird-elate-in-page (equal (image-size ladybird--canvas t) (cons (window-body-width (get-buffer-window) t) (window-body-height (get-buffer-window) t))))"}, "comment": "the canvas fills the window body"},
+    {"eval": "(defun ladybird-elate-event (type x y &rest rest) (ladybird-elate-in-page (let ((posn (posn-at-x-y x (+ y (window-header-line-height (get-buffer-window))) (get-buffer-window)))) (setq unread-command-events (append unread-command-events (list (append (list type posn) rest)))))))"},
+
+    {"group": "click", "comment": "a press and its release arrive at the canvas position, scaled to device pixels"},
+    {"eval": "(ladybird-elate-event 'down-mouse-1 300 200)"},
+    {"eval": "(ladybird-elate-event 'mouse-1 300 200)"},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"mouse\" 'kind \"up\" 'button \"left\")"},
+    {"assert": {"eval": "(let ((dpr (ladybird-elate-in-page ladybird--dpr))) (ladybird-elate-logged \"mouse\" 'kind \"down\" 'x (round (* 300 dpr)) 'y (round (* 200 dpr)) 'button \"left\" 'buttons [\"left\"] 'clicks 1))"}},
+    {"assert": {"eval": "(ladybird-elate-logged \"mouse\" 'kind \"up\" 'buttons [] 'clicks 1)"}},
+
+    {"group": "double", "comment": "a double click carries its count, a right click its button"},
+    {"eval": "(ladybird-elate-event 'double-down-mouse-1 100 100 2)"},
+    {"eval": "(ladybird-elate-event 'double-mouse-1 100 100 2)"},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"mouse\" 'kind \"up\" 'clicks 2)"},
+    {"assert": {"eval": "(ladybird-elate-logged \"mouse\" 'kind \"down\" 'clicks 2)"}},
+
+    {"group": "wheel", "comment": "wheel events scroll by their pixel delta, or by lines"},
+    {"eval": "(ladybird-elate-event 'wheel-down 200 150 1 1 (cons 0.0 -24.0))"},
+    {"eval": "(ladybird-elate-event 'wheel-up 200 150 1 1 (cons 0.0 24.0))"},
+    {"eval": "(ladybird-elate-event 'wheel-down 200 150 1 2 nil)"},
+    {"wait": "until", "pred": "(= 3 (ladybird-elate-count \"mouse\" 'kind \"wheel\"))"},
+    {"assert": {"eval": "(let ((dpr (ladybird-elate-in-page ladybird--dpr))) (equal (mapcar (lambda (m) (list (alist-get 'dy m) (alist-get 'precise m))) (seq-filter (lambda (m) (equal (alist-get 'kind m) \"wheel\")) (ladybird-elate-log \"mouse\"))) (list (list (round (* 24 dpr)) t) (list (round (* -24 dpr)) t) (list (round (* 2 (default-line-height) dpr)) nil))))"}},
+
+    {"group": "tracking", "comment": "the selected page window reports mouse movement"},
+    {"wait": "until", "pred": "(eq track-mouse t)"},
+    {"eval": "(ladybird-elate-event 'mouse-movement 50 60)"},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"mouse\" 'kind \"move\" 'buttons [])"},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-elate-cleanup)"}
+  ]
+}
