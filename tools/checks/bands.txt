@@ -1,0 +1,7 @@
+# Banding: run with --url tall.html --viewport 4200x4100@1. A whole frame of 68.9 MB does not fit one record.
+expect-frame full=true more=true width=4200 height=4100 damage_height=3994
+expect-frame full=false more=false width=4200 height=4100 damage_height=106
+settle 0.5
+pixel 10 10 ff0000
+pixel 4190 2390 000000
+pixel 4190 4095 ffffff

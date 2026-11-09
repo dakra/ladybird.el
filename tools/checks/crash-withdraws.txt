@@ -1,0 +1,11 @@
+# Run with --url dialogs.html while something kills the page's WebContent process after a few seconds.
+# A request is withdrawn when the page that asked crashes.
+{"type":"set_focus","focused":true}
+settle 0.3
+{"type":"mouse","kind":"move","x":100,"y":220,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":220,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":220,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect select
+echo select is open
+expect request_cancelled id="$id" timeout=20
+expect crashed

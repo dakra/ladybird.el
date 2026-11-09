@@ -1,0 +1,7 @@
+# Reattach, first client: run with --url dialogs.html. It leaves with an alert open.
+{"type":"set_focus","focused":true}
+settle 0.3
+{"type":"mouse","kind":"move","x":100,"y":40,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":40,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":40,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect dialog kind=alert message=hello

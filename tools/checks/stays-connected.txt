@@ -1,0 +1,6 @@
+# Run with --no-view while other connections come and go without saying a valid hello.
+{"type":"ping","id":"before"}
+expect pong id=before
+sleep 3
+{"type":"ping","id":"after"}
+expect pong id=after

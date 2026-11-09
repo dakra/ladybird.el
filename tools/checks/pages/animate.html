@@ -1,0 +1,16 @@
+<!doctype html>
+<title>animate</title>
+<style>
+  body { margin: 0; background: #fff; }
+  #box { position: absolute; top: 100px; left: 0; width: 80px; height: 80px; background: #c03; }
+</style>
+<div id=box></div>
+<script>
+  let x = 0;
+  function step() {
+    x = (x + 4) % 600;
+    box.style.left = x + "px";
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+</script>

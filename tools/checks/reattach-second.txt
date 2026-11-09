@@ -1,0 +1,7 @@
+# Reattach, second client: run with --no-view. The view, its state, the open alert and a whole frame are there.
+expect welcome views.0.title=dialogs views.0.width=800 views.0.height=600
+expect state title=dialogs loading=false
+expect dialog kind=alert message=hello
+expect-frame full=true width=800 height=600
+{"type":"dialog_closed","id":"$id","accepted":true}
+expect state "title=after alert"

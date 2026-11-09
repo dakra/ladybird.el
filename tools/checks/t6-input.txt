@@ -1,0 +1,57 @@
+# T6: run with --url input.html --viewport 800x600@1.
+{"type":"set_focus","focused":true}
+{"type":"key","kind":"down","key":"H","code_point":104,"modifiers":0,"repeat":false}
+{"type":"key","kind":"up","key":"H","code_point":104,"modifiers":0}
+{"type":"key","kind":"down","key":"I","code_point":105,"modifiers":0,"repeat":false}
+{"type":"key","kind":"up","key":"I","code_point":105,"modifiers":0}
+expect state title=hi
+{"type":"text","text":"é"}
+expect state title=hié
+{"type":"paste","text":" pasted"}
+expect state "title=hié pasted"
+{"type":"key","kind":"down","key":"Backspace","code_point":8,"modifiers":0}
+{"type":"key","kind":"up","key":"Backspace","code_point":8,"modifiers":0}
+expect state "title=hié paste"
+# A key without a key code still types its character.
+{"type":"key","kind":"down","key":"Bogus","code_point":33,"modifiers":0}
+{"type":"key","kind":"up","key":"Bogus","code_point":33,"modifiers":0}
+expect state "title=hié paste!"
+{"type":"edit","op":"select_all"}
+{"type":"edit","op":"cut"}
+expect clipboard "text=hié paste!"
+# A page without a title is titled by its URL.
+expect state title~=input.html
+
+# Wheel: positive dy scrolls the content down.
+{"type":"load","url":"$pages/tall.html"}
+expect state title=tall loading=false
+settle 0.5
+pixel 10 10 ff0000
+{"type":"mouse","kind":"wheel","x":100,"y":100,"dx":0,"dy":400,"modifiers":0}
+settle 0.7
+pixel 10 10 00ff00
+{"type":"screenshot","kind":"visible","request":1,"path":"$tmp/visible.png"}
+expect screenshot_saved request=1 path~=visible.png
+{"type":"screenshot","kind":"full","request":2,"path":"$tmp/full.png"}
+expect screenshot_saved request=2 path~=full.png
+
+# A double click selects a word.
+{"type":"load","url":"$pages/text.html"}
+expect state title=text loading=false
+settle 0.5
+{"type":"mouse","kind":"move","x":60,"y":50,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":60,"y":50,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":60,"y":50,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"down","x":60,"y":50,"button":"left","buttons":["left"],"modifiers":0,"clicks":2}
+{"type":"mouse","kind":"up","x":60,"y":50,"button":"left","buttons":[],"modifiers":0,"clicks":2}
+# The selection is asked for on another path than input, so the input needs time to arrive first.
+sleep 0.3
+{"type":"request_selection","request":"word"}
+expect selection request=word text=ladybird
+
+# Hovering a link reports it, and leaving the view clears it.
+{"type":"mouse","kind":"move","x":100,"y":230,"buttons":[],"modifiers":0}
+expect link_hover url=https://example.org/target
+expect cursor cursor=pointer
+{"type":"mouse","kind":"leave"}
+expect link_hover url=null

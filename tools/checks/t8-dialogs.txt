@@ -1,0 +1,158 @@
+# T8: run with --url dialogs.html --viewport 800x600@1.
+{"type":"set_focus","focused":true}
+settle 0.3
+
+# alert blocks the page until it is closed.
+{"type":"mouse","kind":"move","x":100,"y":40,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":40,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":40,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect dialog kind=alert message=hello
+sleep 0.3
+{"type":"request_selection","request":"blocked"}
+{"type":"dialog_closed","id":"$id","accepted":true}
+expect state "title=after alert"
+
+# confirm and prompt return the client's answer.
+{"type":"mouse","kind":"move","x":100,"y":100,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":100,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":100,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect dialog kind=confirm message=sure?
+{"type":"dialog_closed","id":"$id","accepted":true}
+expect state title=confirm:true
+{"type":"mouse","kind":"move","x":100,"y":100,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":100,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":100,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect dialog kind=confirm
+{"type":"dialog_closed","id":"$id","accepted":false}
+expect state title=confirm:false
+{"type":"mouse","kind":"move","x":100,"y":160,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":160,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":160,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect dialog kind=prompt message=name? default=nobody
+{"type":"dialog_closed","id":"$id","accepted":true,"text":"emacs"}
+expect state title=prompt:emacs
+{"type":"mouse","kind":"move","x":100,"y":160,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":160,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":160,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect dialog kind=prompt
+{"type":"dialog_closed","id":"$id","accepted":false}
+expect state title=prompt:null
+
+# select: groups are flattened, separators are kept, min_width is in device pixels.
+{"type":"mouse","kind":"move","x":100,"y":220,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":220,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":220,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect select x=20 min_width=200 items.0.label=One items.0.selected=true items.1.group=Group items.2.disabled=true items.3.separator=true items.4.label=Four
+{"type":"select_closed","id":"$id","item":2}
+expect state title=select:two
+
+# file picker
+{"type":"mouse","kind":"move","x":100,"y":280,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":280,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":280,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect file_picker multiple=true accept.0=image/* accept.1=.txt
+{"type":"file_picker_closed","id":"$id","paths":["$dir/pages/text.html","$dir/pages/tall.html"]}
+expect state title=files:2
+
+# permission
+{"type":"mouse","kind":"move","x":100,"y":340,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":340,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":340,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect permission name=geolocation is_file=true
+{"type":"permission_closed","id":"$id","outcome":"deny"}
+expect state title=geo:error:1
+
+# popup
+{"type":"mouse","kind":"move","x":100,"y":400,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":400,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":400,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect popup_blocked url=https://example.org/popup
+
+# clipboard write by the page
+{"type":"mouse","kind":"move","x":100,"y":460,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":460,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":460,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect clipboard "text=copied text"
+expect state title=copied
+
+# color picker
+{"type":"mouse","kind":"move","x":100,"y":520,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":520,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":520,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+expect color_picker current=#336699
+{"type":"color_picker_closed","id":"$id","color":"#ff0000"}
+expect state title=color:#ff0000
+
+# context menus
+{"type":"load","url":"$pages/text.html"}
+expect state title=text loading=false
+settle 0.3
+{"type":"mouse","kind":"move","x":60,"y":50,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":60,"y":50,"button":"right","buttons":["right"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":60,"y":50,"button":"right","buttons":[],"modifiers":0,"clicks":1}
+expect context_menu kind=page x=60 y=50 editable=false
+{"type":"mouse","kind":"move","x":100,"y":230,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":230,"button":"right","buttons":["right"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":230,"button":"right","buttons":[],"modifiers":0,"clicks":1}
+expect context_menu kind=link link_url=https://example.org/target
+
+# A link opened in a new tab is reported instead.
+{"type":"mouse","kind":"move","x":100,"y":230,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":230,"button":"middle","buttons":["middle"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":230,"button":"middle","buttons":[],"modifiers":0,"clicks":1}
+expect popup_blocked url=https://example.org/target
+
+# beforeunload asks before the page is left, once the user has interacted with it.
+{"type":"load","url":"$pages/beforeunload.html"}
+expect state title=beforeunload loading=false
+settle 0.3
+{"type":"mouse","kind":"move","x":100,"y":35,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":100,"y":35,"button":"left","buttons":["left"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":100,"y":35,"button":"left","buttons":[],"modifiers":0,"clicks":1}
+{"type":"key","kind":"down","key":"X","code_point":120,"modifiers":0}
+{"type":"key","kind":"up","key":"X","code_point":120,"modifiers":0}
+sleep 0.3
+{"type":"load","url":"$pages/text.html"}
+expect dialog kind=beforeunload
+{"type":"dialog_closed","id":"$id","accepted":false}
+sleep 0.5
+{"type":"load","url":"$pages/text.html"}
+expect dialog kind=beforeunload
+{"type":"dialog_closed","id":"$id","accepted":true}
+expect state title=text loading=false
+
+# console output, when enabled
+{"type":"set_console","enabled":true}
+{"type":"load","url":"data:text/html,<script>console.log('hello', 42); console.warn('careful')</script>"}
+expect console level=log "text=hello 42"
+expect console level=warn text=careful
+
+# find in page
+{"type":"load","url":"$pages/text.html"}
+expect state title=text loading=false
+{"type":"find","query":"emacs","case_sensitive":false,"highlight_all":true}
+expect find_result query=emacs index=1 total=1
+{"type":"find","query":""}
+
+# zoom and history
+{"type":"zoom","op":"in"}
+expect state zoom=1.1
+{"type":"zoom","op":"reset"}
+expect state zoom=1
+{"type":"history","delta":-1}
+expect state can_go_forward=true loading=false
+
+# errors keep the connection
+{"type":"load","view":99,"url":"about:blank"}
+expect error view=99 "message=unknown view"
+{"type":"request_source"}
+expect error message~=request_source
+{"type":"ping","id":"still here"}
+expect pong "id=still here"
+
+# closing the view
+{"type":"close_view"}
+expect view_closed reason=client
+{"type":"create_view","width":640,"height":480,"dpr":1,"url":"$pages/text.html"}
+expect view_created width=640 height=480
+expect-frame full=true width=640 height=480

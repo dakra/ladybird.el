@@ -1,0 +1,7 @@
+# Run with --no-view --encodings raw against a server that has a view, while another client connects during the stall.
+# The client that is replaced reads the record it was in the middle of, then `replaced`, then the end of the stream.
+expect-frame full=true
+{"type":"set_viewport","width":2000,"height":1500,"dpr":1}
+stall 2
+expect replaced timeout=10
+expect-eof 5

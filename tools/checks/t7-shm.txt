@@ -1,0 +1,9 @@
+# T7: run with --shm --url text.html --viewport 800x600@1.
+# The segment is announced before the first frame that uses it, and a larger viewport gets a new one.
+expect shm
+expect-frame encoding=shm full=true width=800 height=600
+{"type":"set_viewport","width":1600,"height":1000,"dpr":2}
+expect shm
+expect-frame encoding=shm full=true width=1600 height=1000 dpr=2
+{"type":"set_viewport","width":800,"height":600,"dpr":1}
+expect-frame encoding=shm full=true width=800 height=600 dpr=1

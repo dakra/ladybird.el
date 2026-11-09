@@ -1,0 +1,23 @@
+<!doctype html>
+<title>dialogs</title>
+<style>
+  body { margin: 0; font: 16px sans-serif; }
+  button, select, input { position: absolute; left: 20px; width: 200px; height: 40px; }
+  #alert { top: 20px; } #confirm { top: 80px; } #prompt { top: 140px; }
+  #choice { top: 200px; } #file { top: 260px; } #geo { top: 320px; }
+  #popup { top: 380px; } #copy { top: 440px; } #color { top: 500px; }
+</style>
+<button id=alert onclick="alert('hello'); document.title = 'after alert'">alert</button>
+<button id=confirm onclick="document.title = 'confirm:' + confirm('sure?')">confirm</button>
+<button id=prompt onclick="document.title = 'prompt:' + prompt('name?', 'nobody')">prompt</button>
+<select id=choice onchange="document.title = 'select:' + this.value">
+  <option value=one>One</option>
+  <optgroup label="Group"><option value=two>Two</option><option value=three disabled>Three</option></optgroup>
+  <hr>
+  <option value=four>Four</option>
+</select>
+<input id=file type=file multiple accept="image/*,.txt" onchange="document.title = 'files:' + this.files.length">
+<button id=geo onclick="navigator.geolocation.getCurrentPosition(() => document.title = 'geo:ok', e => document.title = 'geo:error:' + e.code)">geolocation</button>
+<button id=popup onclick="window.open('https://example.org/popup')">popup</button>
+<button id=copy onclick="navigator.clipboard.writeText('copied text').then(() => document.title = 'copied', e => document.title = 'copy failed: ' + e)">copy</button>
+<input id=color type=color value="#336699" onchange="document.title = 'color:' + this.value">

@@ -1,0 +1,22 @@
+# T5: run with --url animate.html --viewport 800x600@1.
+# The first frame is whole; a resize gives a whole frame of the new size.
+expect-frame full=true width=800 height=600 dpr=1
+{"type":"set_viewport","width":1200,"height":800,"dpr":2}
+expect-frame full=true width=1200 height=800 dpr=2
+
+# One frame is in flight at a time: without acks exactly one more arrives.
+sleep 0.5
+ack off
+sleep 1.5
+frames 1
+ack on
+sleep 1
+frames 2 100000
+
+# A hidden view presents nothing.
+{"type":"set_visibility","visible":false}
+sleep 0.5
+expect-no-frame 1
+{"type":"set_visibility","visible":true}
+sleep 0.5
+frames 1 100000

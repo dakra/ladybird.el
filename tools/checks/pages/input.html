@@ -1,0 +1,8 @@
+<!doctype html>
+<title>input</title>
+<style>body { margin: 0; } input { position: absolute; left: 20px; top: 20px; width: 300px; height: 30px; }</style>
+<input id=i autofocus>
+<script>
+  i.oninput = () => document.title = i.value;
+  i.addEventListener("paste", () => document.body.dataset.pasted = "yes");
+</script>
