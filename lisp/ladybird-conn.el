@@ -134,6 +134,7 @@ server that exited is started again too."
   (ping-id 0) ping-timer
   (last-read 0.0)
   shm-failed                     ; non-nil once `shm_failed' was sent
+  stderr-start                   ; where the server's standard error begins
   input queue draining)          ; chunks not yet fed, events not yet handled
 
 (defvar ladybird--conns nil
@@ -259,11 +260,19 @@ left out."
                             (cons (car host) endpoints)))
                         ladybird-hosts))))
 
+(defvar ladybird--no-shm-endpoints nil
+  "Endpoints whose server announced shared memory this Emacs could not map.
+A Unix socket forwarded from another machine is one.")
+
 (defun ladybird--shm-p (endpoint)
-  "Return non-nil if a server at ENDPOINT may share memory with Emacs."
+  "Return non-nil if a server at ENDPOINT may share memory with Emacs.
+It may if it runs here or listens on a Unix socket, unless ENDPOINT
+says :shm nil or a segment of a server there could not be mapped
+before."
   (and (memq (plist-get endpoint :kind) '(local unix))
        (or (not (plist-member endpoint :shm))
-           (plist-get endpoint :shm))))
+           (plist-get endpoint :shm))
+       (not (member endpoint ladybird--no-shm-endpoints))))
 
 (defun ladybird--endpoint-name (endpoint)
   "Return a short description of ENDPOINT."
@@ -295,10 +304,13 @@ left out."
 
 ;;; Processes
 
+(defconst ladybird--stderr-buffer " *ladybird-stderr*"
+  "Name of the buffer that collects what servers write to standard error.")
+
 (defun ladybird--stderr-process ()
   "Return a pipe that collects a server's standard error."
   (make-pipe-process :name "ladybird stderr"
-                     :buffer (get-buffer-create " *ladybird-stderr*")
+                     :buffer (get-buffer-create ladybird--stderr-buffer)
                      :noquery t :sentinel #'ignore))
 
 (defun ladybird--server-command (endpoint)
@@ -330,6 +342,7 @@ Signal an error if the connection fails at once."
     (pcase (plist-get endpoint :kind)
       ((or 'local 'ssh)
        (let* ((stderr (ladybird--stderr-process))
+              (start (with-current-buffer (process-buffer stderr) (point-max)))
               (process (condition-case err
                            (make-process
                             :name name :buffer nil
@@ -339,6 +352,7 @@ Signal an error if the connection fails at once."
                          (error (delete-process stderr)
                                 (signal (car err) (cdr err))))))
          (process-put process :ladybird-stderr stderr)
+         (process-put process :ladybird-stderr-start start)
          process))
       ('unix
        (make-network-process :name name :buffer nil :family 'local
@@ -502,6 +516,8 @@ last error if none can be dialled."
         (ladybird-module-reset (ladybird--conn-decoder conn))
       (setf (ladybird--conn-decoder conn) (ladybird-module-create-session)))
     (setf (ladybird--conn-process conn) process
+          (ladybird--conn-stderr-start conn)
+          (process-get process :ladybird-stderr-start)
           (ladybird--conn-queue conn) nil
           (ladybird--conn-input conn) nil
           (ladybird--conn-shm-failed conn) nil
@@ -591,17 +607,26 @@ An ssh that exits with status 255 lost its connection instead."
          (memq (process-status process) '(exit signal))
          (not (and (eq kind 'ssh) (eql (process-exit-status process) 255))))))
 
-(defun ladybird--stderr-tail ()
-  "Return the last lines a server wrote to its standard error, or nil."
-  (when-let* ((buffer (get-buffer " *ladybird-stderr*")))
-    (with-current-buffer buffer
-      (let ((text (string-trim
-                   (buffer-substring-no-properties
-                    (save-excursion (goto-char (point-max))
-                                    (forward-line -5)
-                                    (point))
-                    (point-max)))))
-        (and (not (string-empty-p text)) text)))))
+(defun ladybird--stderr-summary (conn)
+  "Return what CONN's server last wrote to its standard error, for a message.
+This is the last line that is not empty, cut to a length that fits the
+echo area, with the name of the buffer that has all of it; or the
+empty string if the server of this dial wrote nothing."
+  (let ((line (when-let* ((buffer (get-buffer ladybird--stderr-buffer)))
+                (with-current-buffer buffer
+                  (let ((lines (split-string
+                                (buffer-substring-no-properties
+                                 (min (point-max)
+                                      (or (ladybird--conn-stderr-start conn)
+                                          (point-max)))
+                                 (point-max))
+                                "[\n\r]+" t "[ \t]+")))
+                    (car (last lines)))))))
+    (if line
+        (format ": %s (see buffer%s)"
+                (truncate-string-to-width line 200 nil nil t)
+                ladybird--stderr-buffer)
+      "")))
 
 (defun ladybird--on-close (conn &optional process)
   "Handle the loss of CONN's connection.
@@ -626,9 +651,7 @@ views, or buffers waiting for one, is dialled again as
     (when (and server-exit (memq state '(dialing hello ready)))
       (message "ladybird: the server on %s exited with status %s%s"
                (ladybird--conn-name conn) (process-exit-status process)
-               (if-let* ((tail (ladybird--stderr-tail)))
-                   (concat ":\n" tail)
-                 "")))
+               (ladybird--stderr-summary conn)))
     (pcase state
       ((or 'dialing 'hello)
        (let ((untried (ladybird--conn-untried conn)))
@@ -639,7 +662,8 @@ views, or buffers waiting for one, is dialled again as
            (if (ladybird--redial-p conn server-exit)
                (ladybird--reconnect conn)
              (when (ladybird--conn-on-ready conn)
-               (message "ladybird: cannot reach %s" (ladybird--conn-name conn)))
+               (message "ladybird: cannot reach %s%s" (ladybird--conn-name conn)
+                        (ladybird--stderr-summary conn)))
              (setf (ladybird--conn-on-ready conn) nil
                    (ladybird--conn-delay conn) nil)
              (ladybird--set-state conn 'closed)))))
@@ -859,9 +883,12 @@ The name of its log file has its process id."
 
 (defun ladybird--shm-failed (conn view)
   "Tell CONN's server once that its shared memory cannot be used.
-VIEW is the view whose segment or frame failed."
+VIEW is the view whose segment or frame failed.  The endpoint is
+remembered, so that later connections to it do not offer shared memory."
   (unless (ladybird--conn-shm-failed conn)
     (setf (ladybird--conn-shm-failed conn) t)
+    (cl-pushnew (ladybird--conn-dialed conn) ladybird--no-shm-endpoints
+                :test #'equal)
     (ladybird--send conn `((type . "shm_failed") (view . ,view)))))
 
 (ladybird--defhandler "shm" (conn msg)

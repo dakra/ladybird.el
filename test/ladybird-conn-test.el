@@ -98,6 +98,7 @@
          (ladybird--keepalive-timer nil)
          (ladybird-reconnect t)
          (ladybird-fake-module-shm-size nil)
+         (ladybird--no-shm-endpoints nil)
          (ladybird--handlers (copy-hash-table ladybird--handlers))
          (ladybird--frame-function #'ignore)
          (ladybird--welcome-function #'ignore)
@@ -967,7 +968,8 @@ session.  A canvas of the first frame's size is attached to view 1."
       (ladybird-test-receive conn shm)
       (should-not (ladybird-test-sent))
       ;; It maps smaller than announced.
-      (setf (ladybird--conn-shm-failed conn) nil)
+      (setf (ladybird--conn-shm-failed conn) nil
+            ladybird--no-shm-endpoints nil)
       (setq ladybird-fake-module-shm-size 2048)
       (ladybird-test-receive conn shm)
       (should (equal (ladybird-test-sent)
@@ -976,7 +978,8 @@ session.  A canvas of the first frame's size is attached to view 1."
                             :shm-size)
                  0))
       ;; It maps, rounded up to whole pages.
-      (setf (ladybird--conn-shm-failed conn) nil)
+      (setf (ladybird--conn-shm-failed conn) nil
+            ladybird--no-shm-endpoints nil)
       (setq ladybird-test-sent nil
             ladybird-fake-module-shm-size 16384)
       (ladybird-test-receive conn shm)
@@ -1001,6 +1004,84 @@ session.  A canvas of the first frame's size is attached to view 1."
       (should (= (plist-get (ladybird-module-stats (ladybird--conn-decoder conn))
                             :shm-size)
                  0)))))
+
+(ert-deftest ladybird-conn-test-shm-failure-remembered ()
+  ;; A socket forwarded from another machine announces shared memory
+  ;; that cannot be mapped.  That costs one frame; later connections to
+  ;; the endpoint do not offer shared memory.
+  (skip-unless (not ladybird-test-native))
+  (ladybird-test-with-env
+    (let* ((endpoint (cadr ladybird-test-host))
+           (conn (ladybird-test-connect)))
+      (ladybird-test-register conn 1)
+      (should (ladybird--shm-p endpoint))
+      (ladybird-test-receive conn '((type . "shm") (view . 1)
+                                    (name . "/ladybird-1-1") (size . 4096)))
+      (should (equal (ladybird-test-sent) '(((type . "shm_failed") (view . 1)))))
+      (should (equal ladybird--no-shm-endpoints (list endpoint)))
+      (should-not (ladybird--shm-p endpoint))
+      ;; The redial says so in its hello.
+      (ladybird--drop conn)
+      (setq ladybird-test-sent nil)
+      (ladybird-test-run-timer (ladybird--conn-timer conn))
+      (should (eq (alist-get 'shm (car (ladybird-test-sent "hello")) 'missing)
+                  nil))
+      ;; So does a new connection to the same endpoint; another endpoint
+      ;; still offers it.
+      (ladybird--disconnect conn)
+      (setq ladybird-test-sent nil)
+      (ladybird--connect ladybird-test-host #'ignore)
+      (should (eq (alist-get 'shm (car (ladybird-test-sent "hello")) 'missing)
+                  nil))
+      (setq ladybird-test-sent nil)
+      (ladybird--connect '("other" (:kind unix :path "/other")) #'ignore)
+      (should (eq (alist-get 'shm (car (ladybird-test-sent "hello"))) t)))))
+
+(defconst ladybird-test-real-open (symbol-function 'ladybird--open-process)
+  "The function that opens real processes, which the tests replace.")
+
+(ert-deftest ladybird-conn-test-stderr-in-message ()
+  ;; A server that cannot start says why on its standard error; the last
+  ;; line of that is in the message, on one line.
+  (ladybird-test-with-env
+    (let ((messages nil)
+          (stale (get-buffer-create ladybird--stderr-buffer)))
+      (with-current-buffer stale
+        (goto-char (point-max))
+        (insert "an old line of another server\n"))
+      (cl-letf (((symbol-function 'ladybird--open-process) ladybird-test-real-open)
+                ((symbol-function 'message)
+                 (lambda (format &rest args)
+                   (when format
+                     (push (apply #'format format args) messages)))))
+        (let ((conn (ladybird--connect
+                     `("far" (:kind local
+                              :command ("sh" "-c"
+                                        ,(concat "echo 'first line' >&2; "
+                                                 "echo 'ssh: Could not resolve"
+                                                 " hostname far' >&2; echo >&2;"
+                                                 " exit 255"))))
+                     #'ignore)))
+          (with-timeout (5 (ert-fail "the process did not exit"))
+            (while (not (eq (ladybird--conn-state conn) 'closed))
+              (accept-process-output nil 0.05)))))
+      (should (equal (reverse messages)
+                     (list (concat "ladybird: the server on far exited with status 255"
+                                   ": ssh: Could not resolve hostname far"
+                                   " (see buffer *ladybird-stderr*)")
+                           (concat "ladybird: cannot reach far"
+                                   ": ssh: Could not resolve hostname far"
+                                   " (see buffer *ladybird-stderr*)"))))
+      (should-not (string-search "\n" (car messages))))
+    ;; A server that wrote nothing: the old line of another one is not
+    ;; taken for its message, and a long line is cut.
+    (let ((conn (ladybird-test-connect)))
+      (should (equal (ladybird--stderr-summary conn) ""))
+      (with-current-buffer ladybird--stderr-buffer
+        (setf (ladybird--conn-stderr-start conn) (point-max))
+        (goto-char (point-max))
+        (insert (make-string 500 ?x) "\n"))
+      (should (< (length (ladybird--stderr-summary conn)) 260)))))
 
 (ert-deftest ladybird-conn-test-shm-frames ()
   (skip-unless (not ladybird-test-native))
@@ -1308,6 +1389,7 @@ the state messages received, newest first."
           (states nil)
           (ladybird--conns nil)
           (ladybird--keepalive-timer nil)
+          (ladybird--no-shm-endpoints nil)
           (ladybird--handlers (copy-hash-table ladybird--handlers))
           (ladybird--frame-function (lambda (_conn event) (push event frames)))
           (ladybird--welcome-function ladybird-test-mock-welcome)

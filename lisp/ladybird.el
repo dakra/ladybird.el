@@ -2053,8 +2053,8 @@ An item's group prefixes its label; equal labels are numbered."
   "Return non-nil if CONN's server sees this machine's files.
 A server started here does.  A Unix socket can be one forwarded from
 another machine: its server is local if the endpoint does not rule out
-shared memory, no segment has failed to map and the server names this
-machine as its host."
+shared memory, no segment of a server there has failed to map and the
+server names this machine as its host."
   (let* ((endpoint (or (ladybird--conn-endpoint conn) (ladybird--conn-dialed conn)))
          (host (alist-get 'hostname
                           (alist-get 'host (ladybird--conn-server-info conn)))))
