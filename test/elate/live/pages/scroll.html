@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>page=scroll</title>
+<style>
+html, body { margin: 0; }
+body { width: 3000px; height: 4000px; }
+.band { position: absolute; left: 0; width: 3000px; height: 500px; }
+#side { position: absolute; left: 1500px; top: 0; width: 1500px; height: 4000px;
+        background: #000000; }
+</style>
+<script src="/live.js"></script></head>
+<body>
+<div class="band" style="top: 0; background: #ff0000"></div>
+<div class="band" style="top: 500px; background: #00ff00"></div>
+<div class="band" style="top: 1000px; background: #0000ff"></div>
+<div class="band" style="top: 1500px; background: #ffff00"></div>
+<div class="band" style="top: 2000px; background: #ff00ff"></div>
+<div class="band" style="top: 2500px; background: #00ffff"></div>
+<div class="band" style="top: 3000px; background: #808080"></div>
+<div class="band" style="top: 3500px; background: #ffffff"></div>
+<div id="side"></div>
+<script>
+live.page = 'scroll';
+function update() {
+  live.scrollX = Math.round(scrollX); live.scrollY = Math.round(scrollY);
+  live.maxY = document.documentElement.scrollHeight - innerHeight;
+}
+</script>
+</body></html>

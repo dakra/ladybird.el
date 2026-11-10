@@ -1,0 +1,7 @@
+#!/bin/sh
+# ssh as the live scenarios run it: with the user's own home directory,
+# which an elate sandbox replaces, and without connection sharing, so
+# that every ssh process is a connection of its own and ends when it is
+# killed.
+HOME=${LADYBIRD_LIVE_HOME:-$HOME} exec ssh -o BatchMode=yes \
+    -o ControlMaster=no -o ControlPath=none "$@"

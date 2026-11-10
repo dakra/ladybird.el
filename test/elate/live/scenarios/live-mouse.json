@@ -1,0 +1,66 @@
+{
+  "name": "live-mouse",
+  "comment": "The mouse on a page: a click arrives where it was made, a double click selects a word and a drag a stretch of text, both copied with M-w; the pointer over a link shows its URL and a hand; a right click brings the page's context.",
+  "params": {"server": "stdio"},
+  "variants": {"stdio": {"server": "stdio"}, "socket": {"server": "socket"}, "ssh": {"server": "ssh"}, "forward": {"server": "forward"}},
+  "defaults": {"timeout": 20},
+  "session": {"ui": "gui", "size": "100x35", "eval_file": ["../lib/ladybird-live.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(progn (ladybird-live-start \"{{server}}\" \"mouse.html\") t)", "timeout": 120},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"mouse\")", "timeout": 60},
+
+    {"group": "click", "comment": "a click arrives at its position with press and release"},
+    {"mouse": "click", "x": 100, "y": 250, "button": 1},
+    {"wait": "until", "pred": "(= (ladybird-live-number \"clicks\") 1)"},
+    {"assert": {"eval": "(and (= (ladybird-live-number \"x\") 100) (= (ladybird-live-number \"y\") 250))"}},
+    {"assert": {"eval": "(and (= (ladybird-live-number \"down\") 1) (= (ladybird-live-number \"up\") 1) (= (ladybird-live-number \"button\") 0))"}},
+    {"assert": {"eval": "(ladybird-live-in-page (null ladybird--buttons))"}},
+
+    {"group": "double-click", "comment": "a double click counts as one and selects a word"},
+    {"mouse": "double", "x": 150, "y": 260},
+    {"wait": "until", "pred": "(= (ladybird-live-number \"dbl\") 1)"},
+    {"assert": {"eval": "(= (ladybird-live-number \"detail\") 2)"}},
+    {"mouse": "double", "x": 60, "y": 30},
+    {"wait": "until", "pred": "(equal (ladybird-live-field \"sel\") \"alpha\")"},
+    {"keys": "M-w"},
+    {"wait": "until", "pred": "(equal (ignore-errors (current-kill 0)) \"alpha\")", "comment": "M-w copies the page's selection"},
+
+    {"group": "drag", "comment": "a drag selects text"},
+    {"mouse": "click", "x": 600, "y": 400, "button": 1},
+    {"wait": "until", "pred": "(equal (ladybird-live-field \"sel\") \"\")"},
+    {"mouse": "drag", "x": 5, "y": 30, "to_x": 300, "to_y": 30, "steps": 4},
+    {"wait": "until", "pred": "(string-prefix-p \"alpha beta\" (ladybird-live-field \"sel\"))"},
+    {"assert": {"eval": "(ladybird-live-in-page (null ladybird--buttons))"}},
+    {"eval": "(setq ladybird-live-scratch (ladybird-live-field \"sel\"))"},
+    {"keys": "M-w"},
+    {"wait": "until", "pred": "(equal (ignore-errors (current-kill 0)) ladybird-live-scratch)"},
+
+    {"group": "hover", "comment": "the pointer over a link shows its URL, a hand and the tooltip"},
+    {"wait": "until", "pred": "(eq track-mouse t)", "comment": "the selected page window tracks the mouse"},
+    {"eval": "(ladybird-live-move 400 220)"},
+    {"wait": "until", "pred": "(equal (ladybird-live-field \"over\") \"link\")"},
+    {"wait": "until", "pred": "(ladybird-live-in-page (eq ladybird--cursor (quote hand)))"},
+    {"wait": "until", "pred": "(ladybird-live-in-page (equal ladybird--hover-url (ladybird-live-url \"second.html\")))"},
+    {"assert": {"eval": "(ladybird-live-in-page (eq (get-text-property 1 (quote pointer)) (quote hand)))"}},
+    {"wait": "until", "pred": "(ladybird-live-received \"tooltip\" (quote text) \"a tooltip\")"},
+    {"eval": "(ladybird-live-move 600 400)"},
+    {"wait": "until", "pred": "(ladybird-live-in-page (and (null ladybird--hover-url) (eq ladybird--cursor (quote arrow))))"},
+
+    {"group": "context-menu", "comment": "a right click on a link brings the link's context"},
+    {"eval": "(progn (advice-add (quote x-popup-menu) :override (lambda (&rest args) (setq ladybird-live-saved args) nil) (quote ((name . ladybird-live)))) t)", "comment": "the menu itself would wait for a choice"},
+    {"mouse": "click", "x": 400, "y": 220, "button": 3},
+    {"wait": "until", "pred": "(ladybird-live-received \"context_menu\" (quote link_url) (ladybird-live-url \"second.html\"))"},
+    {"wait": "until", "pred": "ladybird-live-saved", "comment": "the menu was popped up"},
+    {"assert": {"eval": "(equal (mapcar (function car) (cdr (cadr (cadr ladybird-live-saved)))) (quote (\"Open Link\" \"Open Link in New Buffer\" \"Copy Link\" \"Back\" \"Forward\" \"Reload\")))"}},
+    {"wait": "until", "pred": "(eql (ladybird-live-number \"menu\") 1)"},
+    {"assert": {"eval": "(ladybird-live-in-page (null ladybird--buttons))"}},
+
+    {"group": "health", "comment": "every frame was acknowledged and none dropped"},
+    {"eval": "(progn (sleep-for 0.5) t)"},
+    {"assert": {"eval": "(ladybird-live-healthy-p)"}},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-live-cleanup)", "timeout": 60}
+  ]
+}

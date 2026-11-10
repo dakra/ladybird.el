@@ -34,3 +34,87 @@ input and output, or started first and listening on a Unix socket or a TCP port.
 uvx elate start --name lady --ui gui --eval-file "$PWD/test/elate/lib/ladybird-setup.el"
 uvx elate -s lady eval "(ladybird-elate-start 'stdio)"
 ```
+
+# ladybird live scenarios
+
+`test/elate/live/scenarios` drives the package against a real Ladybird server, with
+pages that the test serves itself.  `test/elate/run-live.sh` (or `make live`) runs
+them:
+
+```sh
+test/elate/run-live.sh                                   # every scenario, every variant
+test/elate/run-live.sh -v stdio test/elate/live/scenarios/live-dialogs.json
+LADYBIRD_LIVE_SSH_HOST=devbox LADYBIRD_LIVE_REMOTE_PROGRAM=/opt/ladybird/bin/Ladybird \
+    test/elate/run-live.sh -v ssh,forward
+```
+
+It prints one line per scenario and variant, `PASS` or `FAIL` with the steps that
+failed, and exits non-zero when one failed.  Every scenario runs in a graphical elate
+session, because the page has the size of its window in pixels and the mouse acts on
+positions of the canvas; the sessions need no screenshot, so a locked screen is fine.
+Afterwards the runner stops the sessions, servers and ssh processes of its run and
+removes their sockets and temporary files, here and on the remote machine.
+
+A variant says where the server is:
+
+| Variant | Server | Frames |
+|---|---|---|
+| `stdio` | local, started by the connection | shared memory |
+| `socket` | local, listening on a Unix socket (`--emacs-socket`) | shared memory |
+| `ssh` | on another machine, started by `ssh HOST PROGRAM --headless=emacs` | in the stream |
+| `forward` | on another machine, on a Unix socket that `ssh -L` forwards | in the stream, after the fallback from shared memory |
+
+The local variants are skipped when the local server is missing, the remote ones when
+the variables below are unset or the server is not there.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `LADYBIRD_LIVE_PROGRAM` | the local server | the build in `/Users/daniel/src/ladybird` |
+| `LADYBIRD_LIVE_SSH_HOST` | ssh destination of the remote machine; it must take no password | unset: `ssh` and `forward` are skipped |
+| `LADYBIRD_LIVE_REMOTE_PROGRAM` | the server on that machine | unset |
+| `LADYBIRD_LIVE_REMOTE_PYTHON` | Python 3 on that machine | `python3` |
+| `LADYBIRD_LIVE_PYTHON` | Python 3 here | the first of the usual places |
+| `LADYBIRD_LIVE_HOME` | home directory for ssh, whose configuration the sandbox hides | `$HOME` |
+| `LADYBIRD_LIVE_LOGS` | where the output of each run goes | a directory under `$TMPDIR` |
+| `ELATE` | the elate command | `uvx elate` |
+
+## Pages
+
+The pages are in `live/pages`.  `live/serve.py` serves them over HTTP on the machine
+the server runs on, so every server loads `http://127.0.0.1:PORT/PAGE`: for the remote
+variants the pages and `serve.py` are copied to a temporary directory there and run
+with that machine's Python.  Besides the files it has a page that is slow to arrive, a
+download and an icon.
+
+A page reports what it knows in its title as `key=value;key=value` (`live.js`), which
+arrives in the buffer's state; the steps read it with `ladybird-live-field`.  What is
+drawn is checked on the canvas itself: the pages have blocks of one colour at known
+places, and `ladybird-live-color` reads a pixel through the module's test accessor
+(`make live` builds that module).
+
+## Scenarios
+
+| Scenario | Covers |
+|---|---|
+| `live-connect` | first frame's pixels, sizes, buffer name, header line, icon, shared memory or not |
+| `live-navigation` | link click, `l`, back and forward, reload, zoom, stop |
+| `live-scroll` | scroll keys, top and bottom, wheel; position and pixels |
+| `live-keyboard` | insert mode: letters, shift, text without a key, function keys, the Emacs editing keys, paste |
+| `live-mouse` | click, double click, drag selection and `M-w`, hover, context menu |
+| `live-dialogs` | alert, confirm, prompt, beforeunload, select, file, colour, date, a granted permission |
+| `live-permission` | a stray key, dismissal and refusal of a permission; geolocation |
+| `live-crash` | a prompt withdrawn by a crash, the crash message, the page coming back |
+| `live-find` | counting, stepping, case, the selection left by `C-g` |
+| `live-viewport` | split, frame resize, a growing minibuffer, visibility, focus |
+| `live-single` | a second page on a server that shows one |
+| `live-events` | console, blocked popup, refused download, clipboard, screenshot |
+| `live-socket` | a kept page found again, a second client, a server restart (`socket`, `forward`) |
+
+Every scenario ends with a check that each frame was acknowledged and none dropped.
+
+`live/lib/ladybird-live.el` has the helpers, also for a session started by hand:
+
+```sh
+uvx elate start --name live --ui gui --eval-file "$PWD/test/elate/live/lib/ladybird-live.el"
+uvx elate -s live eval '(ladybird-live-start "stdio" "form.html")'
+```

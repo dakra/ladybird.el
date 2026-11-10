@@ -1,0 +1,47 @@
+{
+  "name": "live-connect",
+  "comment": "A page opens on a real server: the first frame has the page's colours where the page puts them, the canvas and the page have the size of the window, the header line and the buffer are named after the page, its icon arrives, and frames travel as the transport should carry them: in shared memory from a local server, in the stream from a remote one.",
+  "params": {"server": "stdio"},
+  "variants": {"stdio": {"server": "stdio"}, "socket": {"server": "socket"}, "ssh": {"server": "ssh"}, "forward": {"server": "forward"}},
+  "defaults": {"timeout": 20},
+  "session": {"ui": "gui", "size": "100x35", "eval_file": ["../lib/ladybird-live.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(progn (ladybird-live-start \"{{server}}\" \"index.html\") t)", "timeout": 120},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"index\")", "timeout": 60},
+
+    {"group": "first-paint", "comment": "solid blocks of the page are where the page puts them"},
+    {"wait": "until", "pred": "(equal (ladybird-live-color 50 50) \"#ff0000\")"},
+    {"assert": {"eval": "(equal (ladybird-live-color 150 50) \"#00ff00\")"}},
+    {"assert": {"eval": "(equal (ladybird-live-color 50 150) \"#0000ff\")"}},
+    {"assert": {"eval": "(equal (ladybird-live-color 100 240) \"#ffff00\")"}},
+    {"assert": {"eval": "(equal (ladybird-live-color 300 150) \"#ffffff\")"}},
+
+    {"group": "size", "comment": "canvas, window and page agree on the size"},
+    {"assert": {"eval": "(ladybird-live-in-page (equal ladybird--canvas-size (cons (window-body-width (get-buffer-window (ladybird-live-buffer)) t) (window-body-height (get-buffer-window (ladybird-live-buffer)) t))))"}},
+    {"wait": "until", "pred": "(and (eql (ladybird-live-number \"w\") (window-body-width (get-buffer-window (ladybird-live-buffer)) t)) (eql (ladybird-live-number \"h\") (window-body-height (get-buffer-window (ladybird-live-buffer)) t)))", "comment": "innerWidth and innerHeight are the window's"},
+    {"assert": {"eval": "(= (ladybird-live-number \"dpr\") 1)"}},
+    {"assert": {"eval": "(ladybird-live-in-page (equal (image-size ladybird--canvas t) (cons (window-body-width (get-buffer-window (ladybird-live-buffer)) t) (window-body-height (get-buffer-window (ladybird-live-buffer)) t))))"}},
+
+    {"group": "names", "comment": "buffer name, header line and icon come from the page"},
+    {"assert": {"eval": "(string-prefix-p \"*ladybird: page=index\" (buffer-name (ladybird-live-buffer)))"}},
+    {"assert": {"eval": "(string-match-p (regexp-quote (concat (ladybird-live-url \"index.html\") \" — page=index\")) (ladybird-live-header))"}},
+    {"wait": "until", "pred": "(ladybird-live-in-page (eq (car-safe ladybird--favicon) (quote image)))", "comment": "the icon arrived"},
+    {"assert": {"eval": "(ladybird-live-in-page (get-text-property 1 (quote display) (ladybird--header-line)))"}, "comment": "and is in the header line"},
+    {"assert": {"eval": "(member (ladybird-live-platform) (quote (\"macos\" \"linux\")))"}},
+    {"assert": {"eval": "(eq (and (ladybird--local-server-p (ladybird-live-conn)) t) (not (ladybird-live-remote-p)))"}, "comment": "a server on this machine is known as one, a remote one as remote"},
+    {"assert": {"eval": "(equal (ladybird-live-state (quote url)) (ladybird-live-url \"index.html\"))"}},
+
+    {"group": "transport", "comment": "shared memory locally, the stream remotely"},
+    {"assert": {"eval": "(ladybird-live-shm-as-expected-p)"}},
+    {"assert": {"eval": "(= (ladybird-live-sent-count \"create_view\") 1)"}},
+    {"assert": {"eval": "(ladybird-live-in-page (= (hash-table-count (ladybird--conn-pending ladybird--conn)) 0))"}, "comment": "the create_view request was answered by its id"},
+
+    {"group": "health", "comment": "every frame was acknowledged and none dropped"},
+    {"eval": "(progn (sleep-for 0.5) t)"},
+    {"assert": {"eval": "(ladybird-live-healthy-p)"}},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-live-cleanup)", "timeout": 60}
+  ]
+}

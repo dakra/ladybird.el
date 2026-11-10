@@ -1,0 +1,60 @@
+{
+  "name": "live-find",
+  "comment": "Find in page: matches are counted while the string is typed, C-s and C-r step, the case of the string matters when it has a capital, RET keeps the matches and C-g ends the search.",
+  "params": {"server": "stdio"},
+  "variants": {"stdio": {"server": "stdio"}, "socket": {"server": "socket"}, "ssh": {"server": "ssh"}, "forward": {"server": "forward"}},
+  "defaults": {"timeout": 20},
+  "session": {"ui": "gui", "size": "100x35", "eval_file": ["../lib/ladybird-live.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(progn (ladybird-live-start \"{{server}}\" \"find.html\") t)", "timeout": 120},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"find\")", "timeout": 60},
+
+    {"group": "type", "comment": "the count follows what is typed"},
+    {"keys": "C-s", "delivery": "events"},
+    {"wait": "prompt"},
+    {"assert": {"eval": "(equal (minibuffer-prompt) \"Find in page: \")"}},
+    {"type": "needle"},
+    {"wait": "until", "pred": "(ladybird-live-in-page (equal ladybird--find-result (quote (1 . 3))))", "comment": "the first match is number 1"},
+    {"assert": {"eval": "(equal (overlay-get ladybird--find-overlay (quote after-string)) \" [1/3]\")"}},
+
+    {"group": "step", "comment": "C-s and C-r move between the matches"},
+    {"keys": "C-s", "delivery": "events"},
+    {"wait": "until", "pred": "(ladybird-live-in-page (equal ladybird--find-result (quote (2 . 3))))"},
+    {"keys": "C-s", "delivery": "events"},
+    {"wait": "until", "pred": "(ladybird-live-in-page (equal ladybird--find-result (quote (3 . 3))))"},
+    {"keys": "C-r", "delivery": "events"},
+    {"wait": "until", "pred": "(ladybird-live-in-page (equal ladybird--find-result (quote (2 . 3))))"},
+    {"keys": "RET", "delivery": "events"},
+    {"eval": "(progn (sleep-for 0.3) t)"},
+    {"keys": "M-s n"},
+    {"wait": "until", "pred": "(ladybird-live-in-page (equal ladybird--find-result (quote (3 . 3))))", "comment": "M-s n steps after the prompt is closed"},
+    {"keys": "M-s p"},
+    {"wait": "until", "pred": "(ladybird-live-in-page (equal ladybird--find-result (quote (2 . 3))))"},
+
+    {"group": "case", "comment": "a capital makes the search case sensitive"},
+    {"keys": "C-s", "delivery": "events"},
+    {"wait": "prompt"},
+    {"type": "Needle"},
+    {"wait": "until", "pred": "(ladybird-live-in-page (equal ladybird--find-result (quote (1 . 1))))"},
+    {"keys": "C-a C-k", "delivery": "events"},
+    {"type": "no such text"},
+    {"wait": "until", "pred": "(ladybird-live-in-page (equal ladybird--find-result (quote (0 . 0))))", "comment": "nothing found"},
+    {"assert": {"eval": "(equal (overlay-get ladybird--find-overlay (quote after-string)) \" [no match]\")"}},
+    {"keys": "C-a C-k", "delivery": "events"},
+    {"type": "Needle"},
+    {"wait": "until", "pred": "(ladybird-live-in-page (equal ladybird--find-result (quote (1 . 1))))"},
+
+    {"group": "end", "comment": "C-g ends the search; Ladybird leaves the match selected"},
+    {"keys": "C-g", "delivery": "events"},
+    {"wait": "until", "pred": "(equal (ladybird-live-field \"sel\") \"Needle\")"},
+    {"assert": {"eval": "(ladybird-live-in-page (null ladybird--find-string))"}},
+
+    {"group": "health", "comment": "every frame was acknowledged and none dropped"},
+    {"eval": "(progn (sleep-for 0.5) t)"},
+    {"assert": {"eval": "(ladybird-live-healthy-p)"}},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-live-cleanup)", "timeout": 60}
+  ]
+}

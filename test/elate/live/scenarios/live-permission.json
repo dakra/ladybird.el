@@ -1,0 +1,46 @@
+{
+  "name": "live-permission",
+  "comment": "A permission is not given by accident: a stray key does not answer, a quit dismisses, and a refusal is a word typed in full.  The page's position is asked for only by a server that can know it.",
+  "params": {"server": "stdio"},
+  "variants": {"stdio": {"server": "stdio"}, "socket": {"server": "socket"}, "ssh": {"server": "ssh"}, "forward": {"server": "forward"}},
+  "defaults": {"timeout": 20},
+  "session": {"ui": "gui", "size": "100x35", "eval_file": ["../lib/ladybird-live.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(progn (ladybird-live-start \"{{server}}\" \"dialogs.html\") t)", "timeout": 120},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"dialogs\")", "timeout": 60},
+
+    {"group": "dismiss", "comment": "a single key answers nothing, and a quit leaves the question open for the page"},
+    {"mouse": "click", "x": 60, "y": 320, "button": 1},
+    {"wait": "prompt"},
+    {"keys": "a RET", "delivery": "events"},
+    {"eval": "(progn (sleep-for 0.5) t)"},
+    {"assert": {"eval": "(= (ladybird-live-sent-count \"permission_closed\") 0)"}, "comment": "a single key does not answer"},
+    {"assert": {"eval": "(active-minibuffer-window)"}},
+    {"keys": "C-g", "delivery": "events"},
+    {"wait": "until", "pred": "(equal (ladybird-live-field \"notify\") \"default\")"},
+    {"assert": {"eval": "(= (ladybird-live-sent-count \"permission_closed\") 1)"}},
+
+    {"group": "deny", "comment": "the page asks again and is refused"},
+    {"mouse": "click", "x": 60, "y": 320, "button": 1},
+    {"wait": "prompt"},
+    {"keys": "C-a C-k", "delivery": "events"},
+    {"type": "deny"},
+    {"keys": "RET", "delivery": "events"},
+    {"wait": "until", "pred": "(equal (ladybird-live-field \"notify\") \"denied\")"},
+    {"assert": {"eval": "(= (ladybird-live-sent-count \"permission_closed\") 2)"}},
+
+    {"group": "geolocation", "comment": "the page's position is asked for where the server can know it"},
+    {"eval": "(progn (advice-add (quote ladybird--read-answer) :override (lambda (&rest _) \"deny\") (quote ((name . ladybird-live)))) t)", "comment": "a headless Linux server refuses by itself and asks nothing, so no key is typed here"},
+    {"mouse": "click", "x": 60, "y": 260, "button": 1},
+    {"wait": "until", "pred": "(equal (ladybird-live-field \"geo\") \"error1\")", "comment": "the page is refused"},
+    {"assert": {"eval": "(if (equal (ladybird-live-platform) \"linux\") (null (ladybird-live-received \"permission\" (quote name) \"geolocation\")) (ladybird-live-received \"permission\" (quote name) \"geolocation\"))"}, "comment": "a macOS server asked, a Linux server did not"},
+
+    {"group": "health", "comment": "every frame was acknowledged and none dropped"},
+    {"eval": "(progn (sleep-for 0.5) t)"},
+    {"assert": {"eval": "(ladybird-live-healthy-p)"}},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-live-cleanup)", "timeout": 60}
+  ]
+}

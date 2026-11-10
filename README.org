@@ -17,10 +17,11 @@ The Ladybird side, a headless mode =Ladybird --headless=emacs= that speaks the p
 of [[file:plans/01-protocol.md][plans/01-protocol.md]], is under development on a branch of Ladybird named
 =emacs-headless= and is in no Ladybird release.
 
-The two have been run together on one macOS machine: over standard input and output with
-frames in shared memory, and over a Unix socket, where a page was left on the server and
-attached again.  Not tested: a server on another machine (ssh, a forwarded socket, TCP),
-Linux on either side, and a device pixel ratio of 2.
+The two are run together by the live test matrix (see Testing): a macOS server on this
+machine over standard input and output and over a Unix socket, with frames in shared
+memory, and a Linux server in a virtual machine over ssh and over an ssh-forwarded
+socket, with frames in the stream.  Not tested: TCP, Emacs on Linux, a server on a
+machine across a real network, and a device pixel ratio of 2.
 
 =tools/mock-server.py= stands in for the server in the tests: it draws a test gradient,
 marks mouse presses and typed keys, and answers the protocol's commands with canned
@@ -128,11 +129,19 @@ ssh -N -o StreamLocalBindUnlink=yes -L /tmp/devbox.sock:/run/user/1000/ladybird.
 
 #+begin_src emacs-lisp
 (setq ladybird-hosts '(("devbox" . "/tmp/devbox.sock")))
+;; or, saying that the socket is forwarded:
+(setq ladybird-hosts '(("devbox" :kind unix :path "/tmp/devbox.sock" :shm nil)))
 #+end_src
+
+With =ControlMaster auto= in =~/.ssh/config=, =ssh -N -L= hands the forwarding to the
+shared connection and returns at once.  Either give the forwarding a connection of its
+own with =-o ControlMaster=no -o ControlPath=none=, or end it with =ssh -O exit devbox=.
 
 Local servers hand frames over in shared memory, one segment per page.  Over a forwarded
 socket the segment cannot be opened here; the server is told and sends the pixels in the
-stream, compressed with zstd.  The module maps a segment at the size it has then and
+stream, compressed with zstd.  That costs the first frame of the first connection; the
+endpoint is remembered for the rest of the Emacs session and not offered shared memory
+again.  =:shm nil= in the endpoint says it up front.  The module maps a segment at the size it has then and
 trusts the server not to shrink it: reading from pages that are gone would kill Emacs.
 Only a server on this machine can hand over a segment, and one run by the same user can
 harm Emacs in other ways already; for a Unix socket of a server that is not, say so with
@@ -154,6 +163,9 @@ takes it back.
 
 A server is pinged after =ladybird-keepalive-interval= seconds of silence and its
 connection dropped when no answer comes within =ladybird-ping-timeout=.
+
+When a local or ssh server cannot be started or exits, the message has the last line it
+or ssh wrote to standard error; the buffer =" *ladybird-stderr*"= has all of it.
 
 * Keys
 
@@ -291,7 +303,7 @@ The page has the size of the smallest window that shows its buffer.  It keeps th
 while the minibuffer or the echo area grows beyond one line and borrows lines from the
 window.
 
-* Development
+* Testing
 
 #+begin_src sh
 make test                            # test-zig, test-native, test-elisp
@@ -299,7 +311,35 @@ make byte-compile checkdoc           # warnings are errors
 make package-lint                    # installs package-lint under ~/.cache on first use
 make test-mock                       # ERT against tools/mock-server.py, fake module
 make test-mock-native                # the same with the native module
-test/elate/run.sh                    # end-to-end scenarios in sandboxed Emacs sessions
+test/elate/run.sh                    # the mock matrix
+test/elate/run-live.sh               # the live matrix; also make live
+#+end_src
+
+- The unit suites need nothing but Emacs, Zig and Python: =make test= runs the module's
+  Zig tests, its tests in Emacs against stream fixtures, and the ERT tests of the package
+  with a module written in Lisp.  =make test-mock= and =make test-mock-native= run the
+  package against =tools/mock-server.py=.
+- The mock matrix, =test/elate/run.sh=, drives the package in sandboxed Emacs sessions of
+  [[https://github.com/dakra/elate][elate]] against the mock server over standard input and output, a Unix socket and TCP.
+- The live matrix, =test/elate/run-live.sh=, does the same against a real Ladybird server
+  with pages it serves itself: over standard input and output and over a Unix socket on
+  this machine, and over ssh and an ssh-forwarded socket on another one.  It checks what
+  the page reports about itself and the colours on the canvas.
+
+The live matrix takes its servers from the environment:
+
+| Variable                       | Meaning                                              |
+|--------------------------------+------------------------------------------------------|
+| =LADYBIRD_LIVE_PROGRAM=        | the local server; without it the local variants are skipped |
+| =LADYBIRD_LIVE_SSH_HOST=       | ssh destination of a remote machine; without it the remote variants are skipped |
+| =LADYBIRD_LIVE_REMOTE_PROGRAM= | the server on that machine                           |
+
+[[file:test/elate/README.md][test/elate/README.md]] has the scenarios, the other variables and how the pages reach a
+remote server.
+
+* Development
+
+#+begin_src sh
 python3 -I tools/mock-server.py --help
 #+end_src
 
@@ -312,6 +352,6 @@ python3 -I tools/mock-server.py --help
   frames and copies pixels into the canvas.
 - =test/ladybird-fake-module.el= implements the module's functions in Lisp; the ERT tests
   of the package run with it.
-- =test/elate/= has scenarios for [[https://github.com/dakra/elate][elate]] that drive the package against the mock
-  server over standard input and output, a Unix socket and TCP.
+- =test/elate/= has the scenarios of the mock matrix and, under =live/=, those of the
+  live matrix with their pages.
 - =plans/= has the protocol and the design of each part.

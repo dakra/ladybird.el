@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>page=viewport</title>
+<style>
+html, body { margin: 0; background: #ffffff; }
+#corner { position: fixed; right: 0; bottom: 0; width: 50px; height: 50px; background: #ff0000; }
+</style>
+<script src="/live.js"></script></head>
+<body>
+<div id="corner"></div>
+<script>
+live.page = 'viewport';
+live.resizes = 0; live.hidden = 0; live.blurs = 0;
+addEventListener('resize', function () { live.resizes++; });
+document.addEventListener('visibilitychange', function () { if (document.hidden) live.hidden++; });
+addEventListener('blur', function () { live.blurs++; });
+function update() {
+  live.w = innerWidth; live.h = innerHeight;
+  live.vis = document.visibilityState; live.focus = document.hasFocus() ? 1 : 0;
+}
+</script>
+</body></html>

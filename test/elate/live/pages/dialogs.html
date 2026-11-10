@@ -1,0 +1,62 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>page=dialogs</title>
+<style>
+html, body { margin: 0; background: #ffffff; }
+select, input, button, div { position: absolute; left: 0; width: 300px; height: 40px; box-sizing: border-box; }
+#s { top: 0; } #f { top: 60px; } #c { top: 120px; } #d { top: 180px; }
+#geo { top: 240px; } #notify { top: 300px; } #touch { top: 360px; background: #c0ffc0; }
+#pick { top: 180px; left: 320px; width: 100px; }
+</style>
+<script src="/live.js"></script></head>
+<body>
+<select id="s">
+  <option value="one">One</option>
+  <option value="two" selected>Two</option>
+  <option value="off" disabled>Off</option>
+  <optgroup label="More"><option value="four">Four</option><option value="five">Five</option></optgroup>
+</select>
+<input type="file" id="f">
+<input type="color" id="c" value="#ff0000">
+<input type="date" id="d" value="2026-01-02">
+<button id="pick">pick date</button>
+<button id="geo">geolocation</button>
+<button id="notify">notifications</button>
+<div id="touch"></div>
+<script>
+live.page = 'dialogs';
+var what = new URLSearchParams(location.search).get('do');
+live.do = what || 'none';
+function later(f) { setTimeout(f, 400); }
+if (what === 'alert') later(function () { alert('hello from the page'); live.alert = 'done'; });
+if (what === 'confirm') later(function () { live.confirm = confirm('are you sure?'); });
+if (what === 'prompt') later(function () { live.prompt = prompt('your name?', 'anon'); });
+if (what === 'beforeunload')
+  addEventListener('beforeunload', function (e) { e.preventDefault(); e.returnValue = 'stay'; });
+document.getElementById('touch').addEventListener('click', function () { live.touched = (live.touched || 0) + 1; });
+document.getElementById('s').addEventListener('change', function (e) { live.select = e.target.value; });
+document.getElementById('f').addEventListener('change', function (e) {
+  var file = e.target.files[0];
+  live.file = file ? file.name + ':' + file.size : 'none';
+  live.files = e.target.files.length;
+});
+document.getElementById('f').addEventListener('cancel', function () { live.file = 'cancelled'; });
+document.getElementById('c').addEventListener('change', function (e) { live.color = e.target.value; });
+document.getElementById('c').addEventListener('input', function (e) { live.color = e.target.value; });
+document.getElementById('d').addEventListener('change', function (e) { live.date = e.target.value; });
+document.getElementById('d').addEventListener('input', function (e) { live.date = e.target.value; });
+document.getElementById('pick').addEventListener('click', function () {
+  try { document.getElementById('d').showPicker(); live.picker = 'shown'; }
+  catch (e) { live.picker = 'error:' + e.name; }
+});
+document.getElementById('geo').addEventListener('click', function () {
+  live.geo = 'asked';
+  navigator.geolocation.getCurrentPosition(
+    function () { live.geo = 'granted'; },
+    function (e) { live.geo = 'error' + e.code; });
+});
+document.getElementById('notify').addEventListener('click', function () {
+  live.notify = 'asked';
+  Notification.requestPermission().then(function (p) { live.notify = p; });
+});
+</script>
+</body></html>

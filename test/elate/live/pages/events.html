@@ -1,0 +1,35 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>page=events</title>
+<style>
+html, body { margin: 0; background: #ffffff; }
+button, a, p { position: absolute; left: 0; width: 300px; height: 40px; box-sizing: border-box; display: block; }
+#log { top: 0; } #popup { top: 60px; } #download { top: 120px; background: #ffff00; }
+#copy { top: 180px; } #text { top: 240px; font: 20px/40px monospace; margin: 0; }
+</style>
+<script src="/live.js"></script></head>
+<body>
+<button id="log">console</button>
+<button id="popup">popup</button>
+<a id="download" href="/download">download</a>
+<button id="copy">copy</button>
+<p id="text">selectable words here</p>
+<script>
+live.page = 'events';
+console.log('page loaded');
+document.getElementById('log').addEventListener('click', function () {
+  live.logged = (live.logged || 0) + 1;
+  console.log('clicked ' + live.logged);
+  console.warn('a warning');
+});
+document.getElementById('popup').addEventListener('click', function () {
+  var w = window.open('/second.html?popup=1');
+  live.popup = w ? 'opened' : 'blocked';
+});
+document.getElementById('copy').addEventListener('click', function () {
+  live.copy = 'asked';
+  navigator.clipboard.writeText('text from the page').then(
+    function () { live.copy = 'written'; },
+    function (e) { live.copy = 'refused:' + e.name; });
+});
+</script>
+</body></html>

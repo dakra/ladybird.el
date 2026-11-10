@@ -1,0 +1,48 @@
+{
+  "name": "live-crash",
+  "comment": "The page's process dies: an open prompt is withdrawn and closes unanswered, the crash is reported, and the page comes back.",
+  "params": {"server": "stdio"},
+  "variants": {"stdio": {"server": "stdio"}, "socket": {"server": "socket"}, "ssh": {"server": "ssh"}, "forward": {"server": "forward"}},
+  "defaults": {"timeout": 20},
+  "session": {"ui": "gui", "size": "100x35", "eval_file": ["../lib/ladybird-live.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(progn (ladybird-live-start \"{{server}}\" \"dialogs.html?do=prompt\") t)", "timeout": 120},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"dialogs\")", "timeout": 60},
+
+    {"group": "withdrawn", "comment": "a crash while a prompt is open closes the prompt without an answer"},
+    {"wait": "prompt"},
+    {"assert": {"eval": "(string-suffix-p \": your name?: \" (minibuffer-prompt))"}},
+    {"eval": "(progn (ladybird-live-crash) t)"},
+    {"wait": "until", "pred": "(ladybird-live-received \"request_cancelled\")"},
+    {"wait": "until", "pred": "(ladybird-live-received \"crashed\")"},
+    {"assert": {"eval": "(= (ladybird-live-sent-count \"dialog_closed\") 0)"}, "comment": "nothing was answered"},
+    {"assert": {"eval": "(ladybird-live-messages-p \"ladybird: the page in .* crashed\")"}},
+
+    {"group": "recovery", "comment": "the page is loaded again and asks again"},
+    {"wait": "until", "pred": "(and (null (ladybird-live-received \"request_cancelled\" (quote id) (alist-get (quote id) (ladybird-live-received \"dialog\")))) (active-minibuffer-window))", "timeout": 30, "comment": "the reloaded page opens its prompt again"},
+    {"type": " again"},
+    {"keys": "RET", "delivery": "events"},
+    {"wait": "until", "pred": "(equal (ladybird-live-field \"prompt\") \"anon again\")"},
+    {"assert": {"eval": "(= (ladybird-live-sent-count \"dialog_closed\") 1)"}},
+
+    {"group": "plain", "comment": "a crash of a page at rest: reported, and the page is back"},
+    {"eval": "(ladybird-live-load \"viewport.html\")"},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"viewport\")"},
+    {"keys": "C-x 2"},
+    {"wait": "until", "pred": "(eql (ladybird-live-number \"resizes\") 1)"},
+    {"eval": "(progn (setq ladybird-live-received nil) (ladybird-live-crash) t)"},
+    {"wait": "until", "pred": "(ladybird-live-received \"crashed\")"},
+    {"wait": "until", "pred": "(and (equal (ladybird-live-field \"page\") \"viewport\") (eql (ladybird-live-number \"resizes\") 0))", "timeout": 30, "comment": "a fresh copy of the page reports"},
+    {"wait": "until", "pred": "(eql (ladybird-live-number \"h\") (window-body-height (get-buffer-window (ladybird-live-buffer)) t))", "comment": "at the size of the window"},
+    {"keys": "C-x 1"},
+    {"wait": "until", "pred": "(eql (ladybird-live-number \"h\") (window-body-height (get-buffer-window (ladybird-live-buffer)) t))"},
+
+    {"group": "health", "comment": "every frame was acknowledged and none dropped"},
+    {"eval": "(progn (sleep-for 0.5) t)"},
+    {"assert": {"eval": "(ladybird-live-healthy-p)"}},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-live-cleanup)", "timeout": 60}
+  ]
+}

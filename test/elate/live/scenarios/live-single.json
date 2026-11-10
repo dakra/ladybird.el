@@ -1,0 +1,39 @@
+{
+  "name": "live-single",
+  "comment": "The server shows one page per process: a second page is loaded in the page there is.",
+  "params": {"server": "stdio"},
+  "variants": {"stdio": {"server": "stdio"}, "socket": {"server": "socket"}, "ssh": {"server": "ssh"}, "forward": {"server": "forward"}},
+  "defaults": {"timeout": 20},
+  "session": {"ui": "gui", "size": "100x35", "eval_file": ["../lib/ladybird-live.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(progn (ladybird-live-start \"{{server}}\" \"index.html\") t)", "timeout": 120},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"index\")", "timeout": 60},
+
+    {"group": "refused", "comment": "c asks for a second page; its buffer goes and the URL loads in the first"},
+    {"keys": "c"},
+    {"wait": "until", "pred": "(ladybird-live-messages-p \"ladybird: .* opens no further page; .*index.html loaded in\")"},
+    {"wait": "until", "pred": "(ladybird-live-received \"error\" (quote message) \"only one view is supported\")"},
+    {"assert": {"eval": "(= (length (ladybird--buffers)) 1)"}},
+    {"assert": {"eval": "(eq (window-buffer) (ladybird-live-buffer))"}, "comment": "the page is shown where the new buffer was"},
+    {"assert": {"eval": "(= (ladybird-live-sent-count \"create_view\") 2)"}},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"index\")"},
+    {"assert": {"eval": "(= (ladybird--conn-view-limit (ladybird-live-conn)) 1)"}},
+
+    {"group": "remembered", "comment": "the next page is loaded without asking for a view"},
+    {"eval": "(progn (ladybird (ladybird-live-url \"second.html\")) t)"},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"second\")"},
+    {"assert": {"eval": "(= (ladybird-live-sent-count \"create_view\") 2)"}},
+    {"assert": {"eval": "(= (length (ladybird--buffers)) 1)"}},
+    {"eval": "(progn (ladybird-browse-url (ladybird-live-url \"find.html\") t) t)"},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"find\")"},
+    {"assert": {"eval": "(= (length (ladybird--buffers)) 1)"}},
+
+    {"group": "health", "comment": "every frame was acknowledged and none dropped"},
+    {"eval": "(progn (sleep-for 0.5) t)"},
+    {"assert": {"eval": "(ladybird-live-healthy-p)"}},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-live-cleanup)", "timeout": 60}
+  ]
+}

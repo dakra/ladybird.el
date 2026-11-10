@@ -1,0 +1,61 @@
+{
+  "name": "live-events",
+  "comment": "What a page does by itself: console output, a window it tries to open, a download, text it puts on the clipboard; and a screenshot taken by the server.",
+  "params": {"server": "stdio"},
+  "variants": {"stdio": {"server": "stdio"}, "socket": {"server": "socket"}, "ssh": {"server": "ssh"}, "forward": {"server": "forward"}},
+  "defaults": {"timeout": 20},
+  "session": {"ui": "gui", "size": "100x35", "eval_file": ["../lib/ladybird-live.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(progn (ladybird-live-start \"{{server}}\" \"events.html\") t)", "timeout": 120},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"events\")", "timeout": 60},
+
+    {"group": "console", "comment": "console output is collected once it is turned on"},
+    {"keys": "C-c C-l"},
+    {"eval": "(progn (delete-other-windows (get-buffer-window (ladybird-live-buffer))) t)", "comment": "the console buffer was shown in a second window"},
+    {"wait": "until", "pred": "(eql (ladybird-live-in-page (cdr ladybird--canvas-size)) (window-body-height (get-buffer-window (ladybird-live-buffer)) t))"},
+    {"mouse": "click", "x": 60, "y": 20, "button": 1},
+    {"wait": "until", "pred": "(eql (ladybird-live-number \"logged\") 1)"},
+    {"wait": "text", "pattern": "\\[log\\] clicked 1\\n.*\\[warn\\] a warning", "buffer": "*ladybird-console*"},
+    {"keys": "C-c C-l"},
+    {"assert": {"eval": "(ladybird-live-in-page (not ladybird--console))"}},
+
+    {"group": "popup", "comment": "a window the page opens is blocked and remembered"},
+    {"mouse": "click", "x": 60, "y": 80, "button": 1},
+    {"wait": "until", "pred": "(ladybird-live-received \"popup_blocked\" (quote url) (ladybird-live-url \"second.html?popup=1\"))"},
+    {"assert": {"eval": "(ladybird-live-messages-p \"Popup blocked: http://127.0.0.1:[0-9]+/second.html\\\\?popup=1\")"}},
+    {"assert": {"eval": "(ladybird-live-in-page (equal ladybird--blocked-popup (ladybird-live-url \"second.html?popup=1\")))"}},
+
+    {"group": "download", "comment": "a download is refused with a message"},
+    {"mouse": "click", "x": 60, "y": 140, "button": 1},
+    {"wait": "until", "pred": "(ladybird-live-received \"error\" (quote message) \"download blocked: live-download.bin\")"},
+    {"assert": {"eval": "(ladybird-live-messages-p \"download blocked: live-download.bin\")"}},
+    {"assert": {"eval": "(equal (ladybird-live-field \"page\") \"events\")"}, "comment": "the page stays"},
+
+    {"group": "clipboard", "comment": "text the page copies goes to the kill ring"},
+    {"eval": "(kill-new \"before\")"},
+    {"mouse": "click", "x": 60, "y": 200, "button": 1},
+    {"wait": "until", "pred": "(equal (ladybird-live-field \"copy\") \"written\")"},
+    {"wait": "until", "pred": "(equal (current-kill 0) \"text from the page\")"},
+
+    {"group": "screenshot", "comment": "the server saves a screenshot on its machine"},
+    {"eval": "(progn (setq ladybird-live-scratch (ladybird-live-server-file \"shot.png\")) (ladybird-live-in-page (ladybird-screenshot ladybird-live-scratch \"visible\")) t)"},
+    {"wait": "until", "pred": "(ladybird-live-received \"screenshot_saved\" (quote path) ladybird-live-scratch)"},
+    {"assert": {"eval": "(ladybird-live-messages-p \"ladybird: screenshot saved on .* as \")"}},
+    {"wait": "until", "pred": "(> (or (ladybird-live-server-file-size ladybird-live-scratch) 0) 100)", "comment": "the file is there"},
+    {"eval": "(progn (setq ladybird-live-saved (ladybird-live-server-file \"full.png\")) (ladybird-live-in-page (ladybird-screenshot ladybird-live-saved \"full\")) t)"},
+    {"wait": "until", "pred": "(ladybird-live-received \"screenshot_saved\" (quote path) ladybird-live-saved)"},
+    {"wait": "until", "pred": "(> (or (ladybird-live-server-file-size ladybird-live-saved) 0) 100)"},
+
+    {"group": "opened", "comment": "the blocked window opens in the page there is"},
+    {"eval": "(progn (ladybird-live-in-page (ladybird-open-blocked-popup)) t)"},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"second\")"},
+
+    {"group": "health", "comment": "every frame was acknowledged and none dropped"},
+    {"eval": "(progn (sleep-for 0.5) t)"},
+    {"assert": {"eval": "(ladybird-live-healthy-p)"}},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-live-cleanup)", "timeout": 60}
+  ]
+}

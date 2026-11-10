@@ -1,0 +1,58 @@
+{
+  "name": "live-scroll",
+  "comment": "Scrolling with the keys and the wheel: the page reports where it is, and the colours of its bands arrive on the canvas.",
+  "params": {"server": "stdio"},
+  "variants": {"stdio": {"server": "stdio"}, "socket": {"server": "socket"}, "ssh": {"server": "ssh"}, "forward": {"server": "forward"}},
+  "defaults": {"timeout": 20},
+  "session": {"ui": "gui", "size": "100x35", "eval_file": ["../lib/ladybird-live.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(progn (ladybird-live-start \"{{server}}\" \"scroll.html\") t)", "timeout": 120},
+    {"wait": "until", "pred": "(ladybird-live-page-p \"scroll\")", "timeout": 60},
+
+    {"group": "keys", "comment": "n, p, SPC and DEL scroll by lines and pages"},
+    {"wait": "until", "pred": "(equal (ladybird-live-color 50 50) \"#ff0000\")"},
+    {"assert": {"eval": "(= (ladybird-live-number \"scrollY\") 0)"}},
+    {"keys": "n"},
+    {"wait": "until", "pred": "(= (ladybird-live-number \"scrollY\") (* 3 (frame-char-height)))"},
+    {"keys": "p"},
+    {"wait": "until", "pred": "(= (ladybird-live-number \"scrollY\") 0)"},
+    {"keys": "SPC"},
+    {"wait": "until", "pred": "(= (ladybird-live-number \"scrollY\") (- (window-body-height (get-buffer-window (ladybird-live-buffer)) t) (frame-char-height)))"},
+    {"keys": "DEL"},
+    {"wait": "until", "pred": "(= (ladybird-live-number \"scrollY\") 0)"},
+    {"keys": "<right>"},
+    {"wait": "until", "pred": "(= (ladybird-live-number \"scrollX\") (* 3 (frame-char-height)))"},
+    {"keys": "<left>"},
+    {"wait": "until", "pred": "(= (ladybird-live-number \"scrollX\") 0)"},
+
+    {"group": "ends", "comment": "> and < go to the bottom and the top"},
+    {"keys": ">"},
+    {"wait": "until", "pred": "(and (> (ladybird-live-number \"scrollY\") 0) (= (ladybird-live-number \"scrollY\") (ladybird-live-number \"maxY\")))"},
+    {"wait": "until", "pred": "(equal (ladybird-live-color 50 400) \"#ffffff\")", "comment": "the last band is on the canvas"},
+    {"keys": "<"},
+    {"wait": "until", "pred": "(= (ladybird-live-number \"scrollY\") 0)"},
+    {"wait": "until", "pred": "(equal (ladybird-live-color 50 50) \"#ff0000\")"},
+
+    {"group": "wheel", "comment": "the wheel scrolls by its pixels"},
+    {"eval": "(ladybird-live-wheel 100 100 520)"},
+    {"wait": "until", "pred": "(= (ladybird-live-number \"scrollY\") 520)"},
+    {"wait": "until", "pred": "(equal (ladybird-live-color 50 50) \"#00ff00\")", "comment": "the second band is on the canvas"},
+    {"wait": "until", "pred": "(equal (ladybird-live-color 50 300) \"#00ff00\")"},
+    {"eval": "(ladybird-live-wheel 100 100 1000)"},
+    {"wait": "until", "pred": "(= (ladybird-live-number \"scrollY\") 1520)"},
+    {"wait": "until", "pred": "(equal (ladybird-live-color 50 50) \"#ffff00\")"},
+    {"eval": "(ladybird-live-wheel 100 100 -1520)"},
+    {"wait": "until", "pred": "(= (ladybird-live-number \"scrollY\") 0)"},
+    {"wait": "until", "pred": "(equal (ladybird-live-color 50 50) \"#ff0000\")"},
+    {"mouse": "wheel", "x": 100, "y": 100, "direction": "down", "count": 1, "comment": "a wheel notch scrolls by lines"},
+    {"wait": "until", "pred": "(> (ladybird-live-number \"scrollY\") 0)"},
+
+    {"group": "health", "comment": "every frame was acknowledged and none dropped"},
+    {"eval": "(progn (sleep-for 0.5) t)"},
+    {"assert": {"eval": "(ladybird-live-healthy-p)"}},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-live-cleanup)", "timeout": 60}
+  ]
+}

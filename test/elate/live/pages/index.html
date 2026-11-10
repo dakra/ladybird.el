@@ -1,0 +1,22 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>page=index</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+<style>
+html, body { margin: 0; background: #ffffff; }
+.block { position: absolute; width: 100px; height: 100px; }
+#red { left: 0; top: 0; background: #ff0000; }
+#green { left: 100px; top: 0; background: #00ff00; }
+#blue { left: 0; top: 100px; background: #0000ff; }
+#next { position: absolute; left: 0; top: 220px; width: 200px; height: 40px;
+        background: #ffff00; display: block; }
+</style>
+<script src="/live.js"></script></head>
+<body>
+<div class="block" id="red"></div><div class="block" id="green"></div>
+<div class="block" id="blue"></div>
+<a id="next" href="/second.html">second</a>
+<script>
+live.page = 'index';
+function update() { live.w = innerWidth; live.h = innerHeight; live.dpr = devicePixelRatio; }
+</script>
+</body></html>

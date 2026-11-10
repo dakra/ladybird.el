@@ -17,7 +17,7 @@ ELISP_TEST_MODULE_DIR ?= $(CURDIR)/.build/test-module
 EXTRA_TEST_TARGETS += test-elisp
 
 .PHONY: byte-compile test-elisp test-mock test-mock-native checkdoc lint-elisp \
-        package-lint selftest-mock mock elate
+        package-lint selftest-mock mock elate live
 
 # The compiled files go to $(ELISP_ELC_DIR), so the tests load the sources.
 byte-compile:
@@ -103,6 +103,13 @@ MOCK_FLAGS  ?=
 mock:
 	$(PYTHON) -I tools/mock-server.py --socket $(MOCK_SOCKET) $(MOCK_FLAGS)
 
-# The end-to-end scenarios of test/elate, in sandboxed Emacs sessions.
+# The end-to-end scenarios of test/elate, in sandboxed Emacs sessions,
+# against the mock server.
 elate:
 	test/elate/run.sh
+
+# The scenarios of test/elate/live against a real Ladybird server; see
+# test/elate/README.md for the variables.  They read canvas pixels with
+# the module that has the test accessors.
+live: $(TEST_MODULE)
+	test/elate/run-live.sh

@@ -1,0 +1,31 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>page=form</title>
+<style>
+html, body { margin: 0; }
+#i { position: absolute; left: 10px; top: 10px; width: 400px; height: 30px; }
+#t { position: absolute; left: 10px; top: 60px; width: 400px; height: 120px; }
+</style>
+<script src="/live.js"></script></head>
+<body>
+<input id="i" autofocus>
+<textarea id="t"></textarea>
+<script>
+live.page = 'form';
+live.keys = 0; live.key = ''; live.mods = 0;
+document.addEventListener('keydown', function (e) {
+  live.keys++; live.key = e.key === ';' ? 'Semicolon' : e.key === '=' ? 'Equal' : e.key;
+  live.mods = (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+});
+document.addEventListener('paste', function () { live.pastes = (live.pastes || 0) + 1; });
+function update() {
+  var a = document.activeElement;
+  if (a && 'value' in a) {
+    live.focus = a.id;
+    live.value = a.value.replace(/\n/g, '¶');
+    live.sel = a.selectionStart + ',' + a.selectionEnd;
+  } else {
+    live.focus = 'none';
+  }
+}
+</script>
+</body></html>

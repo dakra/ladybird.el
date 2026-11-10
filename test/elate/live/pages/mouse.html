@@ -1,0 +1,31 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>page=mouse</title>
+<style>
+html, body { margin: 0; background: #ffffff; }
+#text { position: absolute; left: 0; top: 0; margin: 0; font: 40px/60px monospace;
+        white-space: nowrap; }
+#target { position: absolute; left: 0; top: 200px; width: 200px; height: 100px;
+          background: #c0c0ff; }
+#link { position: absolute; left: 300px; top: 200px; width: 200px; height: 40px;
+        background: #ffff00; display: block; }
+</style>
+<script src="/live.js"></script></head>
+<body>
+<p id="text">alpha beta gamma delta</p>
+<div id="target"></div>
+<a id="link" href="/second.html" title="a tooltip">second</a>
+<script>
+live.page = 'mouse';
+live.clicks = 0; live.dbl = 0; live.x = -1; live.y = -1; live.over = 'none';
+live.down = 0; live.up = 0; live.menu = 0; live.button = -1;
+var target = document.getElementById('target');
+target.addEventListener('mousedown', function (e) { live.down++; live.button = e.button; });
+target.addEventListener('mouseup', function () { live.up++; });
+target.addEventListener('click', function (e) { live.clicks++; live.x = e.clientX; live.y = e.clientY; live.detail = e.detail; });
+target.addEventListener('dblclick', function () { live.dbl++; });
+document.addEventListener('contextmenu', function () { live.menu++; });
+document.addEventListener('mouseover', function (e) { live.over = e.target.id || e.target.tagName; });
+document.addEventListener('mousemove', function (e) { live.mx = e.clientX; live.my = e.clientY; });
+function update() { live.sel = String(getSelection()); }
+</script>
+</body></html>
