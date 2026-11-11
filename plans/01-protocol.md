@@ -58,6 +58,7 @@ Client sends first:
  "viewport":{"width":1600,"height":1000,"dpr":2.0},
  "encodings":["zstd","raw"],
  "shm":true,
+ "popups":true,
  "token":null}
 ```
 
@@ -76,7 +77,7 @@ Server answers:
  "encoding":"zstd","shm":true,
  "log":"/tmp/ladybird-emacs-12345.log",
  "host":{"hostname":"devbox","platform":"linux"},
- "features":["hints"],
+ "features":["hints"],"max_views":16,
  "views":[{"view":1,"url":"https://…","title":"…","loading":false,
            "can_go_back":true,"can_go_forward":false,"zoom":1.0,
            "width":1600,"height":1000,"dpr":2.0}]}
@@ -86,7 +87,8 @@ Server answers:
 use shared memory (the segment itself is announced with `shm` messages, §4.3). `log` is
 the server's log file on its machine. `features` names the optional parts of the
 protocol the server implements (`"hints"`, §6.1); a server without any may leave it
-out. If `views` is empty the client sends `create_view`. On a protocol mismatch the server sends `{"type":"reject","reason":"…"}`
+out. `max_views` is the number of views the server can have at a time (§3). `popups` in
+`hello` says the client takes views that pages open (§3.1); it is false when left out. If `views` is empty the client sends `create_view`. On a protocol mismatch the server sends `{"type":"reject","reason":"…"}`
 and closes.
 
 After `welcome` the server sends, for every view, a `state` and, as soon as the
@@ -99,14 +101,23 @@ connection (rexel does the same).
 
 ## 3. Views
 
-A view is one Ladybird `HeadlessWebView` (one tab). v1 implements one view at a time
-but every message carries `view`, so tabs come later without a protocol change. View ids
-are never reused within a server process: a view created after `close_view` gets the
-next id.
+A view is one Ladybird `HeadlessWebView` (one page, with a WebContent process of its
+own). A server has up to `welcome.max_views` views at a time (an integer; a server that
+leaves it out has one). They share the server's cookies and storage. View ids are never
+reused within a server process: a view created after `close_view` gets the next id.
+
+Every view has its own frame sequence, flow control (§4.2) and shared memory segment
+(§4.3). Frames of several views share the connection; the bands of one frame (§4.4)
+follow each other with no other view's frame between them. A view the client has hidden
+with `set_visibility` sends no frames; when it becomes visible again its next frame is
+a full one. A new view is visible.
+
+A server keeps running without views: on a socket until it is stopped, on standard
+input and output until the client disconnects.
 
 | Client → server | Fields | Effect |
 | --- | --- | --- |
-| `create_view` | `url` (optional), `width`, `height`, `dpr`, `request` (optional integer) | Server creates a view and answers with `view_created` followed by `state` and a frame, or with an `error` when it cannot (the v1 server has one view per process). Both answers echo `request` |
+| `create_view` | `url` (optional), `width`, `height`, `dpr`, `request` (optional integer) | Server creates a view and answers with `view_created` followed by `state` and a frame, or with an `error` when it cannot (the server has `max_views` views already). Both answers echo `request` |
 | `close_view` | `view` | Closes it; server answers `view_closed` |
 | `set_viewport` | `view`, `width`, `height`, `dpr` | Device pixels. Server resizes the view; the next frame has the new size and the `full` flag. The server clamps each dimension to 16000 and the area to 64 000 000 pixels (reducing the height); a `dpr` outside 0.25–8 is answered with `error` and changes nothing |
 | `set_visibility` | `view`, `visible` | Maps to `set_system_visibility_state`; a hidden view stops presenting frames |
@@ -114,11 +125,26 @@ next id.
 
 | Server → client | Fields | Meaning |
 | --- | --- | --- |
-| `view_created` | `view`, `url`, `title`, `width`, `height`, `dpr` | Answer to `create_view`; `url` is `about:blank`, the `state` that follows has the requested URL with `loading` true. Popups opened by pages are not shown in v1; the server sends `popup_blocked` instead |
-| `popup_blocked` | `view`, `url` (null when unknown) | A page tried to open a window with user activation (also middle click and "open in new tab"); the client may offer to `create_view` with that URL. Ladybird drops popups without user activation silently |
+| `view_created` | `view`, `url`, `title`, `width`, `height`, `dpr`, `request` or `opener` | Answer to `create_view` (with its `request`); `url` is `about:blank`, the `state` that follows has the requested URL with `loading` true. With `opener`, the id of another view, it announces a view a page of that view opened (§3.1) |
+| `popup_blocked` | `view`, `url` (null when unknown) | A page tried to open a window with user activation (also middle click and "open in new tab") and the server made no view for it (§3.1); the client may offer to `create_view` with that URL. Ladybird drops popups without user activation silently |
 | `view_closed` | `view`, `reason` (`"closed"`, `"crashed"`, `"client"`) | |
 | `state` | `view`, `url`, `title`, `loading`, `can_go_back`, `can_go_forward`, `zoom` | Whole state, sent whenever any of it changes. Sending the whole thing keeps the client stateless |
 | `crashed` | `view`, `reason` | WebContent died; the view shows Ladybird's crash page and keeps working |
+
+### 3.1 Views opened by pages
+
+A page opens a window with `window.open`, a link with a `target` or a middle click.
+Ladybird lets it only after a user's action in the page. The server then makes a view
+for the window when the client's `hello` had `"popups": true` and there are fewer than
+`max_views` views, and sends `view_created` with `opener`, followed by `state` and a
+frame as for any new view. The view has the size and `dpr` of its opener until the
+client sends `set_viewport`. A client that does not want it sends `close_view`.
+
+Otherwise the server makes no view and sends `popup_blocked`.
+
+The opener's page holds a reference to the new one (`window.opener`, the value
+`window.open` returned), as in a browser. When a page closes its window
+(`window.close()`), the server sends `view_closed` with reason `"closed"`.
 
 ## 4. Frames
 
@@ -403,7 +429,7 @@ still receives raw frames when zstd cannot shrink the pixels.
 
 ## 10. Reserved for v2
 
-Multiple clients on one view, popups as real views (`view_created` with `opener`),
+Multiple clients on one view,
 uploads for the file picker, `context_menu_action`, `request_source`/`source`,
 `request_history`/`history_list` (full session history with titles), video-codec frame
 encodings (`encoding` 3+), per-view `set_user_agent`, downloads (`download_*` events
@@ -454,3 +480,6 @@ written against the draft; read their bodies with these corrections.
     `error`, and replaces a client only after the new connection's `hello`.
 17. Hints (§6.1): `hints`, `hints_narrow`, `hints_end`, `hints_list`, `hints_cancelled`,
     `welcome.features`, and `id` in an `error` that answers a hints message.
+18. Several views per server (§3): `welcome.max_views`, one frame flow and shared
+    memory segment per view. Views opened by pages (§3.1): `hello.popups` and
+    `view_created.opener`.
