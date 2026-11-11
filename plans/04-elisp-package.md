@@ -81,6 +81,7 @@ of a canvas, and tests substitute the fake module.
 | `ladybird-insert-mode-forward-keys` | see 5.3 | Additional keys the insert mode forwards. |
 | `ladybird-scroll-step` | `nil` | Pixels for `n`/`p`; `nil` = `(frame-char-height)` × 3. |
 | `ladybird-console-buffer` | `"*ladybird-console*"` | |
+| `ladybird-hint-alphabet` | `"asdfghjkl"` | Characters the server makes hint labels of (protocol §6.1): 2 to 36 different characters of `a`–`z`, `0`–`9`; `ladybird-follow-hint` refuses another value with a `user-error`. |
 
 ### 2.2 Commands
 
@@ -96,6 +97,7 @@ of a canvas, and tests substitute the fake module.
 | `ladybird-scroll-down-line` (`n`, `<down>`), `ladybird-scroll-up-line` (`p`, `<up>`), `ladybird-scroll-down-page` (`SPC`, `<next>`), `ladybird-scroll-up-page` (`DEL`, `S-SPC`, `<prior>`), `ladybird-scroll-left`/`-right` (`<left>`/`<right>`), `ladybird-scroll-top` (`<`, `M-<`), `ladybird-scroll-bottom` (`>`, `M->`) | Send `mouse wheel` at the canvas center with `dy`/`dx` in device pixels; a page is `(window-body-height win t)` − one line; top/bottom send ±10⁶. Also `[remap scroll-up-command]` etc. as `xwidget-webkit-mode-map` lines 218–234. |
 | `ladybird-zoom-in` (`+`, `=`), `ladybird-zoom-out` (`-`), `ladybird-zoom-reset` (`0`) | `zoom` op. |
 | `ladybird-find` (`C-s`), `ladybird-find-backward` (`C-r`) | Section 6.6. |
+| `ladybird-follow-hint` (`o`, `C-c C-o`, the latter also in insert mode) | Section 6, item 13. With a prefix argument a chosen link opens in a new buffer. |
 | `ladybird-insert-mode` (`i`, `RET`) | Enter insert mode; `C-c C-c` or the mode-line tag leaves it. |
 | `ladybird-copy-url` (`w`) | `kill-new` the URL, message it. |
 | `ladybird-copy-selection` (`M-w`, also in insert mode) | `request_selection` → `kill-new`. |
@@ -118,8 +120,14 @@ letters above plus every mouse event (section 5.1) and wheel event (5.2). `C-g`,
 `xwidget-webkit-edit-mode-map` (`xwidget.el` lines 968–1000):
 `(substitute-key-definition 'self-insert-command 'ladybird-insert-key map global-map)`
 so every self-inserting key becomes a page key; then the explicit list of 5.3; then
-`C-y` → `ladybird-yank`, `M-w` → `ladybird-copy-selection`, `C-c C-c` → `ladybird-insert-mode`
-(exit). Its lighter is a clickable `mode-line-process` tag `:Insert` like ghostel's.
+`C-y` → `ladybird-yank`, `M-w` → `ladybird-copy-selection`, `C-c C-o` →
+`ladybird-follow-hint`, `C-c C-c` → `ladybird-insert-mode` (exit). Its lighter is a
+clickable `mode-line-process` tag `:Insert` like ghostel's.
+
+`ladybird-hint-map` is in force only while `ladybird-follow-hint` reads a label (section 6,
+item 13): every character from `SPC` up → `ladybird-hint-add-char`, `DEL` and
+`<backspace>` → `ladybird-hint-delete-char`, `C-g` and `<escape>` → `ladybird-hint-quit`.
+`ESC` is not bound, so Meta keys typed on a terminal stay intact.
 
 ## 3. Connection layer (`ladybird-conn.el`)
 
@@ -580,6 +588,64 @@ All handlers below run via `ladybird--later` with an `on-quit` that cancels (3.8
     `view_closed`/`crashed`: `crashed` is a message (the view keeps working);
     `view_closed` with reason `closed`/`crashed` kills the buffer after a message, `client`
     is our own close.
+13. `ladybird-follow-hint` (protocol §6.1) is not a prompt of `ladybird--later`: the page
+    draws the labels into its frames, so nothing may hold up the process filter while the
+    user types, and the client draws nothing.
+    - It needs `"hints"` in `welcome.features` (a `user-error` otherwise, nothing sent) and
+      a valid `ladybird-hint-alphabet`. It ends a session in progress (`hints_end` null),
+      takes the next id of the connection's request counter (a non-negative integer, as the
+      protocol requires), sends `hints` and returns. The server ends a replaced session
+      silently, so the old one gets its `hints_end` null from the client first.
+    - The session is the global `ladybird--hint`, a `ladybird--hint` struct (connection,
+      view, buffer, id, alphabet, the prefix typed, the items once they arrive,
+      `truncated`, whether a link opens in a new buffer). `ladybird-hint-map` is in force
+      through `emulation-mode-map-alists`, keyed on `ladybird--hint`: exactly while a
+      session exists, whatever binds `overriding-terminal-local-map` meanwhile, and above
+      the insert mode's and the major mode's maps. `ladybird--hint-pre-command` on
+      `pre-command-hook` keeps the session for the map's own commands and for
+      `mouse-movement`; any other command ends it (`hints_end` null) and then runs as
+      usual, so a click, the wheel, `C-x b` or `C-c C-o` do what they do. The command
+      returns at once, the filter keeps feeding frames to the module, and no recursive
+      edit or minibuffer is open.
+    - A command of the map that finds no session drops its key. One that finds the
+      selected window showing another buffer ends the session and puts the key back on
+      `unread-command-events`, with the map already out of force.
+    - `hints_list` is checked: `items` an array of objects with an integer `index`, a
+      `label` of characters of the session's alphabet, and a `kind`, `text` and `url`
+      that are strings or null. Another list ends the session with `hints_end` null and
+      "the page sent unusable hints". An empty `items` ends it with "No hints in view"
+      and sends nothing. A `hints_list` whose connection, view or id is not the session's,
+      or that comes a second time, is ignored.
+    - Characters typed before the labels arrive are kept and taken up in order from a
+      timer, so a label they complete is activated outside the process filter. Each
+      character then either is refused (`ding`, nothing sent, nothing changes: no
+      remaining label has the longer prefix; upper case is taken as lower case),
+      completes a label (session ends, `hints_end` with the item's `index`), or narrows
+      (`hints_narrow` with the whole prefix). `DEL` sends the shorter prefix, the empty
+      string included.
+    - The echo area shows `Hint: PREFIX  [N left]` (`, more not labelled` when
+      `truncated`), the text or URL of a single remaining item, and `Hint (new buffer):`
+      with a prefix argument; it is cut to one line. While a session lasts
+      `ladybird--echo-free-p` is nil, so hover and find messages leave it alone.
+    - A chosen `"link"` with a URL and a prefix argument: `hints_end` with null, then
+      `ladybird--follow-link`, which opens http and https URLs, and file URLs from a page
+      whose own URL is a file URL, in a new buffer on the buffer's host, and refuses
+      others with "ladybird: not opening URL". The context menu's "Open Link" and "Open
+      Link in New Buffer" go through it too. A chosen `"input"` turns
+      `ladybird-insert-mode` on after `hints_end`.
+    - The session ends, sending nothing: on `hints_cancelled` naming its view and id,
+      also while it waits for the labels ("The page ended the hint session"; dialog
+      prompts are not touched, and `request_cancelled` does not end a session); on an
+      `error` naming its view and id, whose message is shown; and when the connection
+      leaves the `ready` state (`ladybird--on-conn-change`). It ends as well when its
+      buffer is killed (`hints_end` null before `close_view`) or loses its view
+      (`ladybird--forget-view`; nothing sent), and when a minibuffer opens
+      (`minibuffer-setup-hook`, `hints_end` null), so a page's prompt never reads keys
+      through the map.
+    - The connection keeps the view and id of the 16 sessions that ended last
+      (`hints-ended`); an `error` with one of them answers a `hints_narrow` or
+      `hints_end` that crossed the end and is ignored. An `error` with another id or none
+      is reported like any other.
 
 ## 7. Tasks in dependency order
 

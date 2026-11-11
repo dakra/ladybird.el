@@ -394,6 +394,12 @@ FIELDS is a property list of field symbols and values."
                             always (equal (alist-get key message) value))))
             ladybird-live-received))
 
+(defun ladybird-live-hint-values (field)
+  "Return FIELD of every item of the hint session, in the page's order."
+  (and ladybird--hint
+       (mapcar (lambda (item) (alist-get field item))
+               (ladybird--hint-items ladybird--hint))))
+
 (defun ladybird-live-sent-count (type)
   "Return the number of messages of TYPE sent."
   (seq-count (lambda (sent) (equal sent type)) ladybird-live-sent))

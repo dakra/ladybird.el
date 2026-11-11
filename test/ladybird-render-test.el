@@ -1291,7 +1291,7 @@ prompts, newest first."
 (ert-deftest ladybird-render-test-context-menu ()
   (ladybird-render-test-with-view
     (let ((menu '((type . "context_menu") (view . 1) (x . 1) (y . 2)
-                  (kind . "link") (link_url . "mock://linked")
+                  (kind . "link") (link_url . "https://example.org/linked")
                   (selection . "chosen words") (editable . t)))
           (shown nil))
       (should (equal (mapcar #'car (ladybird--context-menu-items menu))
@@ -1316,14 +1316,41 @@ prompts, newest first."
             (with-temp-buffer
               (ladybird-test-receive conn menu)))))
       (should (equal shown '(t "Page")))
-      (should (equal (current-kill 0) "mock://linked"))
+      (should (equal (current-kill 0) "https://example.org/linked"))
       (should (equal (ladybird-test-sent)
-                     '(((type . "load") (view . 1) (url . "mock://linked"))
+                     '(((type . "load") (view . 1) (url . "https://example.org/linked"))
                        ((type . "load") (view . 1) (url . "chosen words"))
-                       ((type . "paste") (view . 1) (text . "mock://linked"))
+                       ((type . "paste") (view . 1) (text . "https://example.org/linked"))
                        ((type . "edit") (view . 1) (op . "cut"))
                        ((type . "history") (view . 1) (delta . -1))
-                       ((type . "reload") (view . 1) (bypass_cache))))))))
+                       ((type . "reload") (view . 1) (bypass_cache))))))
+      ;; A link is loaded only with http or https, or with file from a file.
+      (ladybird-render-test-prompting
+        (dolist (case '(("file:///etc/passwd" "https://example.org/" nil)
+                        ("javascript:alert(1)" "https://example.org/" nil)
+                        ("mock://linked" "mock://one" nil)
+                        ("HTTP://example.org/" "about:blank" t)
+                        ("file:///tmp/b.html" "file:///tmp/a.html" t)))
+          (pcase-let ((`(,link ,page ,loaded) case))
+            (dolist (label '("Open Link" "Open Link in New Buffer"))
+              (ert-info ((format "%s %s from %s" label link page))
+                (setq ladybird-test-sent nil
+                      ladybird--state `((url . ,page)))
+                (let ((messages
+                       (ladybird-render-test-messages
+                         (cl-letf (((symbol-function 'x-popup-menu)
+                                    (lambda (_position menu)
+                                      (cdr (assoc label (cdr (cadr menu)))))))
+                           (ladybird-test-receive
+                            conn `((type . "context_menu") (view . 1) (x . 1) (y . 2)
+                                   (kind . "link") (link_url . ,link)))))))
+                  (if loaded
+                      (should (equal (alist-get 'url (car (ladybird-test-sent)))
+                                     link))
+                    (should-not (ladybird-test-sent))
+                    (should (equal messages
+                                   (list (concat "ladybird: not opening " link)))))
+                  (mapc #'kill-buffer (remq buffer (ladybird--buffers)))))))))))
 
 (ert-deftest ladybird-render-test-popup-blocked ()
   (ladybird-render-test-with-view
@@ -1654,6 +1681,722 @@ prompts, newest first."
                   #'ladybird-find-minibuffer-next))
       (should (eq (lookup-key ladybird--find-minibuffer-map (kbd "C-r"))
                   #'ladybird-find-minibuffer-previous)))))
+
+
+;;; Hints
+
+(defconst ladybird-render-test-hint-items
+  '(((index . 0) (label . "aa") (kind . "link") (text . "Home")
+     (url . "https://example.org/home"))
+    ((index . 1) (label . "as") (kind . "button") (text . "Send"))
+    ((index . 2) (label . "ad") (kind . "input") (text . "Name"))
+    ((index . 3) (label . "sa") (kind . "other") (text . ""))
+    ((index . 4) (label . "sd") (kind . "link") (text . "  ")
+     (url . "https://example.org/bare")))
+  "The items of the hint lists of the tests.")
+
+(defvar ladybird-render-test-beeps 0 "Number of times a test rang the bell.")
+
+(defmacro ladybird-render-test-with-hints (&rest body)
+  "Run BODY in a shown page buffer on a server that offers hints.
+The keys typed go through the command loop; `ding' counts in
+`ladybird-render-test-beeps'.  The hint session ends afterwards."
+  (declare (indent 0) (debug t))
+  `(ladybird-render-test-with-view
+     (let ((ladybird--hint nil)
+           (ladybird--hint-shown nil)
+           (ladybird-hint-alphabet "asdfghjkl")
+           (ladybird-render-test-beeps 0)
+           (minibuffer-setup-hook minibuffer-setup-hook)
+           (pre-command-hook pre-command-hook)
+           (emulation-mode-map-alists emulation-mode-map-alists))
+       (setf (ladybird--conn-server-info conn)
+             (append '((features . ["hints"])) (ladybird--conn-server-info conn)))
+       (ladybird-render-test-show)
+       (unwind-protect
+           (cl-letf (((symbol-function 'ding)
+                      (lambda (&rest _) (cl-incf ladybird-render-test-beeps))))
+             ,@body)
+         (ladybird--hint-stop)
+         (setq ladybird-insert-mode nil)))))
+
+(defmacro ladybird-render-test-hint-messages (&rest body)
+  "Run BODY and return the messages it showed that are not empty."
+  (declare (indent 0) (debug t))
+  `(remove "" (ladybird-render-test-messages ,@body)))
+
+(defun ladybird-render-test-keys (keys)
+  "Type KEYS, a string for `kbd' or a vector of events."
+  (execute-kbd-macro (if (stringp keys) (kbd keys) keys)))
+
+(defun ladybird-render-test-hint-id ()
+  "Return the id of the last `hints' sent."
+  (alist-get 'id (car (last (ladybird-test-sent "hints")))))
+
+(defun ladybird-render-test-hints-list (&optional id items truncated)
+  "Return a `hints_list' for view 1 with ID, ITEMS and TRUNCATED.
+ID defaults to the last one sent, ITEMS to the test items."
+  `((type . "hints_list") (view . 1)
+    (id . ,(or id (ladybird-render-test-hint-id)))
+    (items . ,(vconcat (or items ladybird-render-test-hint-items)))
+    (truncated . ,(ladybird--bool truncated))))
+
+(defun ladybird-render-test-hint-start (&optional keys)
+  "Start hints with KEYS, by default o, and answer them; return the id."
+  (ladybird-render-test-keys (or keys "o"))
+  (let ((id (ladybird-render-test-hint-id)))
+    (ladybird-test-receive ladybird--conn (ladybird-render-test-hints-list id))
+    (setq ladybird-test-sent nil)
+    id))
+
+(defun ladybird-render-test-take-up ()
+  "Run the timers that take up what was typed before the labels came."
+  (dolist (timer timer-list)
+    (when (eq (timer--function timer) #'ladybird--hint-take-up)
+      (cancel-timer timer)
+      (apply #'ladybird--hint-take-up (timer--args timer)))))
+
+(defun ladybird-render-test-hint-map-active-p ()
+  "Return non-nil if `ladybird-hint-map' is active."
+  (eq (key-binding "z") #'ladybird-hint-add-char))
+
+(ert-deftest ladybird-render-test-hint-bindings ()
+  (ladybird-render-test-with-view
+    (should (eq (key-binding "o") #'ladybird-follow-hint))
+    (should (eq (key-binding (kbd "C-c C-o")) #'ladybird-follow-hint))
+    (ladybird-insert-mode 1)
+    (should (eq (key-binding (kbd "C-c C-o")) #'ladybird-follow-hint))
+    (should (eq (key-binding "o") #'ladybird-insert-key))
+    (ladybird-insert-mode -1))
+  (dolist (key '("a" "z" "0" "A" "é" "SPC" "!"))
+    (should (eq (lookup-key ladybird-hint-map (kbd key)) #'ladybird-hint-add-char)))
+  (should (eq (lookup-key ladybird-hint-map (kbd "DEL")) #'ladybird-hint-delete-char))
+  (should (eq (lookup-key ladybird-hint-map [backspace]) #'ladybird-hint-delete-char))
+  (should (eq (lookup-key ladybird-hint-map (kbd "C-g")) #'ladybird-hint-quit))
+  (should (eq (lookup-key ladybird-hint-map [escape]) #'ladybird-hint-quit))
+  ;; Meta keys, ESC, control keys and mouse events are not the map's.
+  (dolist (key (list (kbd "M-x") (kbd "ESC") (kbd "C-x") (kbd "RET") [mouse-1]
+                     [wheel-down]))
+    (should-not (lookup-key ladybird-hint-map key)))
+  (should (equal (default-value 'ladybird-hint-alphabet) "asdfghjkl"))
+  (dolist (good '("asdfghjkl" "ab" "0123456789" "abcdefghijklmnopqrstuvwxyz0123456789"))
+    (should (ladybird--hint-alphabet-p good)))
+  (dolist (bad '("a" "" "aa" "aB" "AB" "a b" "ab-" "äb"
+                 "abcdefghijklmnopqrstuvwxyz0123456789x" nil ab))
+    (should-not (ladybird--hint-alphabet-p bad))))
+
+(ert-deftest ladybird-render-test-hint-narrow ()
+  (ladybird-render-test-with-hints
+    (let ((messages (ladybird-render-test-hint-messages (ladybird-render-test-keys "o"))))
+      (should (equal messages '("Hint:   [waiting for the labels]"))))
+    (let ((id (ladybird-render-test-hint-id)))
+      (should (equal (ladybird-test-sent)
+                     `(((type . "hints") (view . 1) (id . ,id)
+                        (alphabet . "asdfghjkl")))))
+      (should (ladybird-render-test-hint-map-active-p))
+      (setq ladybird-test-sent nil)
+      (should (equal (ladybird-render-test-hint-messages
+                       (ladybird-test-receive conn (ladybird-render-test-hints-list id)))
+                     '("Hint:   [5 left]")))
+      ;; Each character narrows.
+      (should (equal (ladybird-render-test-hint-messages (ladybird-render-test-keys "s"))
+                     '("Hint: s  [2 left]")))
+      (should (equal (ladybird-test-sent)
+                     `(((type . "hints_narrow") (view . 1) (id . ,id)
+                        (prefix . "s")))))
+      ;; A character in no remaining label is refused and changes nothing.
+      (setq ladybird-test-sent nil)
+      (dolist (key '("s" "x" "SPC" "é"))
+        (ladybird-render-test-keys key))
+      (should (= ladybird-render-test-beeps 4))
+      (should-not (ladybird-test-sent))
+      (should (equal (ladybird--hint-prefix ladybird--hint) "s"))
+      ;; DEL takes the last character back, and beeps with nothing to take.
+      (ladybird-render-test-keys "DEL")
+      (should (equal (ladybird-test-sent)
+                     `(((type . "hints_narrow") (view . 1) (id . ,id)
+                        (prefix . "")))))
+      (ladybird-render-test-keys "DEL")
+      (should (= ladybird-render-test-beeps 5))
+      (should (= (length (ladybird-test-sent)) 1))
+      ;; An upper case letter is taken as lower case; <backspace> is DEL.
+      (setq ladybird-test-sent nil)
+      (ladybird-render-test-keys "A")
+      (should (equal (ladybird--hint-prefix ladybird--hint) "a"))
+      (ladybird-render-test-keys "<backspace>")
+      (should (equal (mapcar (lambda (m) (alist-get 'prefix m)) (ladybird-test-sent))
+                     '("a" "")))
+      (should (equal (ladybird--hint-id ladybird--hint) id)))))
+
+(ert-deftest ladybird-render-test-hint-prompt ()
+  (ladybird-render-test-with-hints
+    (ladybird-render-test-hint-start)
+    (should (equal (ladybird-render-test-hint-messages (ladybird-render-test-keys "s"))
+                   '("Hint: s  [2 left]")))
+    (ladybird-render-test-keys "DEL")
+    (let ((ladybird-render-test-hint-items
+           (list (car ladybird-render-test-hint-items)
+                 (nth 4 ladybird-render-test-hint-items))))
+      (ladybird-render-test-keys "C-g")
+      (ladybird-render-test-keys "o")
+      (should (equal (ladybird-render-test-hint-messages
+                       (ladybird-test-receive conn (ladybird-render-test-hints-list))
+                       (ladybird-render-test-keys "s"))
+                     '("Hint:   [2 left]" "Hint: s  [1 left] https://example.org/bare")))
+      (ladybird-render-test-keys "DEL")
+      (should (equal (ladybird-render-test-hint-messages (ladybird-render-test-keys "a"))
+                     '("Hint: a  [1 left] Home"))))
+    ;; A list the server cut says so; a prefix argument says where links go.
+    (ladybird-render-test-keys "C-g")
+    (ladybird-render-test-keys "C-u o")
+    (should (equal (ladybird-render-test-hint-messages
+                     (ladybird-test-receive
+                      conn (ladybird-render-test-hints-list nil nil t)))
+                   '("Hint (new buffer):   [5 left, more not labelled]")))
+    ;; Hover and find messages leave the prompt alone.
+    (should-not (ladybird-render-test-hint-messages
+                  (ladybird-test-receive conn '((type . "link_hover") (view . 1)
+                                                (url . "mock://hovered")))))))
+
+(ert-deftest ladybird-render-test-hint-activate ()
+  (ladybird-render-test-with-hints
+    (let ((id (ladybird-render-test-hint-start)))
+      (ladybird-render-test-keys "a")
+      (should (equal (ladybird-test-sent)
+                     `(((type . "hints_narrow") (view . 1) (id . ,id)
+                        (prefix . "a")))))
+      (setq ladybird-test-sent nil)
+      (ladybird-render-test-keys "s")
+      (should (equal (ladybird-test-sent)
+                     `(((type . "hints_end") (view . 1) (id . ,id) (activate . 1)))))
+      (should-not ladybird--hint)
+      (should-not (ladybird-render-test-hint-map-active-p))
+      (should-not (memq #'ladybird--hint-minibuffer minibuffer-setup-hook))
+      (should-not ladybird-insert-mode)
+      ;; The keys are Emacs commands again.
+      (setq ladybird-test-sent nil)
+      (ladybird-render-test-keys "n")
+      (should (equal (alist-get 'kind (car (ladybird-test-sent))) "wheel")))
+    ;; Index 0 is activated as any other; a link loads in the page.
+    (let ((id (ladybird-render-test-hint-start)))
+      (ladybird-render-test-keys "aa")
+      (should (equal (ladybird-test-sent)
+                     `(((type . "hints_narrow") (view . 1) (id . ,id) (prefix . "a"))
+                       ((type . "hints_end") (view . 1) (id . ,id)
+                        (activate . 0))))))))
+
+(ert-deftest ladybird-render-test-hint-input ()
+  ;; A text field gets insert mode, also when it was started from there.
+  (ladybird-render-test-with-hints
+    (let ((id (ladybird-render-test-hint-start)))
+      (ladybird-render-test-keys "ad")
+      (should (equal (ladybird-test-sent)
+                     `(((type . "hints_narrow") (view . 1) (id . ,id) (prefix . "a"))
+                       ((type . "hints_end") (view . 1) (id . ,id) (activate . 2)))))
+      (should ladybird-insert-mode)
+      (setq ladybird-test-sent nil)
+      (ladybird-render-test-keys "x")
+      (should (equal (alist-get 'key (car (ladybird-test-sent))) "X")))
+    (setq ladybird-test-sent nil)
+    (let ((id (ladybird-render-test-hint-start "C-c C-o")))
+      ;; Characters are the label's, not the page's, until it is complete.
+      (ladybird-render-test-keys "sa")
+      (should (equal (ladybird-test-sent)
+                     `(((type . "hints_narrow") (view . 1) (id . ,id) (prefix . "s"))
+                       ((type . "hints_end") (view . 1) (id . ,id) (activate . 3)))))
+      (should ladybird-insert-mode))))
+
+(ert-deftest ladybird-render-test-hint-new-buffer ()
+  (ladybird-render-test-with-hints
+    (let ((id (ladybird-render-test-hint-start "C-u o")))
+      (ladybird-render-test-keys "aa")
+      (should (equal (ladybird-test-sent "hints_end")
+                     `(((type . "hints_end") (view . 1) (id . ,id) (activate)))))
+      (let ((create (car (ladybird-test-sent "create_view"))))
+        (should (equal (alist-get 'url create) "https://example.org/home")))
+      (should (= (length (ladybird--buffers conn)) 2))
+      (should-not (eq (window-buffer) buffer))
+      (set-window-buffer (selected-window) buffer))
+    ;; Anything but a link is activated in the page.
+    (setq ladybird-test-sent nil)
+    (let ((id (ladybird-render-test-hint-start "C-u o")))
+      (ladybird-render-test-keys "as")
+      (should (equal (ladybird-test-sent)
+                     `(((type . "hints_narrow") (view . 1) (id . ,id) (prefix . "a"))
+                       ((type . "hints_end") (view . 1) (id . ,id) (activate . 1)))))
+      (should-not (ladybird-test-sent "create_view")))))
+
+(ert-deftest ladybird-render-test-hint-cancel ()
+  (ladybird-render-test-with-hints
+    (dolist (key (list "C-g" [escape]))
+      (ert-info ((format "key %S" key))
+        (let ((id (ladybird-render-test-hint-start)))
+          (ladybird-render-test-keys "s")
+          (setq ladybird-test-sent nil)
+          (ladybird-render-test-keys key)
+          (should (equal (ladybird-test-sent)
+                         `(((type . "hints_end") (view . 1) (id . ,id)
+                            (activate)))))
+          (should-not ladybird--hint)
+          (should-not (ladybird-render-test-hint-map-active-p))
+          (setq ladybird-test-sent nil))))
+    ;; While the labels are awaited too.
+    (ladybird-render-test-keys "o")
+    (let ((id (ladybird-render-test-hint-id)))
+      (setq ladybird-test-sent nil)
+      (ladybird-render-test-keys "C-g")
+      (should (equal (ladybird-test-sent)
+                     `(((type . "hints_end") (view . 1) (id . ,id) (activate)))))
+      ;; Its list comes late and is ignored.
+      (ladybird-test-receive conn (ladybird-render-test-hints-list id))
+      (should-not ladybird--hint)
+      (should-not (ladybird-render-test-hint-map-active-p)))))
+
+(ert-deftest ladybird-render-test-hint-other-events ()
+  ;; A key or event that is not a character ends the hints and does what
+  ;; it does otherwise; mouse movement does not end them.
+  (ladybird-render-test-with-hints
+    (let ((id (ladybird-render-test-hint-start)))
+      (ladybird-render-test-keys
+       (vector (list 'mouse-movement (ladybird-render-test-posn 5 6))))
+      (should ladybird--hint)
+      (should (equal (mapcar (lambda (m) (alist-get 'kind m)) (ladybird-test-sent))
+                     '("move")))
+      (setq ladybird-test-sent nil)
+      (ladybird-render-test-keys
+       (vector (list 'wheel-down (ladybird-render-test-posn 5 6))))
+      (should-not ladybird--hint)
+      (should-not (ladybird-render-test-hint-map-active-p))
+      (should (equal (mapcar (lambda (m) (or (alist-get 'kind m) (alist-get 'type m)))
+                             (ladybird-test-sent))
+                     '("hints_end" "wheel")))
+      (should (equal (alist-get 'id (car (ladybird-test-sent))) id)))
+    (setq ladybird-test-sent nil)
+    (ladybird-render-test-hint-start)
+    (ladybird-render-test-keys
+     (vector (list 'down-mouse-1 (ladybird-render-test-posn 5 6))
+             (list 'mouse-1 (ladybird-render-test-posn 5 6))))
+    (should (equal (mapcar (lambda (m) (or (alist-get 'kind m) (alist-get 'type m)))
+                           (ladybird-test-sent))
+                   '("hints_end" "down" "up")))
+    (setq ladybird-test-sent nil
+          track-mouse nil)
+    ;; A control key: RET turns insert mode on.
+    (ladybird-render-test-hint-start)
+    (ladybird-render-test-keys "RET")
+    (should-not ladybird--hint)
+    (should ladybird-insert-mode)
+    (should (equal (mapcar (lambda (m) (alist-get 'type m)) (ladybird-test-sent))
+                   '("hints_end")))))
+
+(ert-deftest ladybird-render-test-hint-second ()
+  ;; A second `ladybird-follow-hint' ends the first session.
+  (ladybird-render-test-with-hints
+    (let ((first (ladybird-render-test-hint-start)))
+      (ladybird-render-test-keys "C-c C-o")
+      (let ((second (ladybird-render-test-hint-id)))
+        (should-not (equal first second))
+        (should (equal (ladybird-test-sent)
+                       `(((type . "hints_end") (view . 1) (id . ,first) (activate))
+                         ((type . "hints") (view . 1) (id . ,second)
+                          (alphabet . "asdfghjkl")))))
+        ;; A late answer for the first is ignored, the second's is taken.
+        (ladybird-test-receive conn (ladybird-render-test-hints-list first))
+        (should (ladybird--hint-waiting ladybird--hint))
+        (ladybird-test-receive conn (ladybird-render-test-hints-list second))
+        (should-not (ladybird--hint-waiting ladybird--hint))
+        (should (= (length (ladybird--hint-items ladybird--hint)) 5))
+        ;; Calling the command directly does the same.
+        (setq ladybird-test-sent nil)
+        (ladybird-follow-hint)
+        (should (equal (mapcar (lambda (m) (alist-get 'type m)) (ladybird-test-sent))
+                       '("hints_end" "hints")))
+        (should (equal (alist-get 'id (car (ladybird-test-sent))) second))
+        (should (= (seq-count (lambda (entry) (eq entry 'ladybird--hint-map-alist))
+                              emulation-mode-map-alists)
+                   1))))))
+
+(ert-deftest ladybird-render-test-hint-typed-ahead ()
+  ;; Characters typed before the labels arrive are taken up then.
+  (ladybird-render-test-with-hints
+    (ladybird-render-test-keys "o")
+    (let ((id (ladybird-render-test-hint-id)))
+      (setq ladybird-test-sent nil)
+      (should (equal (ladybird-render-test-hint-messages (ladybird-render-test-keys "a"))
+                     '("Hint: a  [waiting for the labels]")))
+      (ladybird-render-test-keys "DEL s x")
+      (should-not (ladybird-test-sent))
+      (should (equal (ladybird--hint-prefix ladybird--hint) "sx"))
+      (ladybird-test-receive conn (ladybird-render-test-hints-list id))
+      ;; They are taken up from a timer, not in the process filter.
+      (should-not (ladybird-test-sent))
+      (should (ladybird--hint-waiting ladybird--hint))
+      (ladybird-render-test-take-up)
+      (should (= ladybird-render-test-beeps 1))
+      (should (equal (ladybird-test-sent)
+                     `(((type . "hints_narrow") (view . 1) (id . ,id)
+                        (prefix . "s")))))
+      (should (equal (ladybird--hint-prefix ladybird--hint) "s"))
+      (setq ladybird-test-sent nil)
+      ;; Typed ahead in full, a label is activated at once.
+      (ladybird-render-test-keys "C-g o s d")
+      (let ((id (ladybird-render-test-hint-id)))
+        (setq ladybird-test-sent nil)
+        (ladybird-test-receive conn (ladybird-render-test-hints-list id))
+        (should-not (ladybird-test-sent))
+        (ladybird-render-test-take-up)
+        (should (equal (ladybird-test-sent)
+                       `(((type . "hints_narrow") (view . 1) (id . ,id) (prefix . "s"))
+                         ((type . "hints_end") (view . 1) (id . ,id)
+                          (activate . 4)))))
+        (should-not ladybird--hint)))))
+
+(ert-deftest ladybird-render-test-hint-empty ()
+  (ladybird-render-test-with-hints
+    (ladybird-render-test-keys "o")
+    (setq ladybird-test-sent nil)
+    (should (equal (ladybird-render-test-hint-messages
+                     (ladybird-test-receive
+                      conn `((type . "hints_list") (view . 1)
+                             (id . ,(ladybird--hint-id ladybird--hint))
+                             (items . []) (truncated . :false))))
+                   '("No hints in view")))
+    (should-not ladybird--hint)
+    (should-not (ladybird-render-test-hint-map-active-p))
+    ;; The session is over: nothing is sent.
+    (should-not (ladybird-test-sent))))
+
+(ert-deftest ladybird-render-test-hint-cancelled ()
+  (ladybird-render-test-with-hints
+    (let ((id (ladybird-render-test-hint-start)))
+      (ladybird-render-test-keys "a")
+      (setq ladybird-test-sent nil)
+      ;; Another view's or another id's end is not the session's, and
+      ;; `request_cancelled' is for prompts only.
+      (ladybird-test-receive conn `((type . "hints_cancelled") (view . 2)
+                                    (id . ,id)))
+      (ladybird-test-receive conn `((type . "hints_cancelled") (view . 1)
+                                    (id . ,(1+ id))))
+      (ladybird-test-receive conn `((type . "request_cancelled") (view . 1)
+                                    (id . ,id)))
+      (should ladybird--hint)
+      (should (ladybird-render-test-hint-map-active-p))
+      (should (equal (ladybird-render-test-hint-messages
+                       (ladybird-test-receive conn `((type . "hints_cancelled")
+                                                     (view . 1) (id . ,id))))
+                     '("The page ended the hint session")))
+      (should-not ladybird--hint)
+      (should-not (ladybird-render-test-hint-map-active-p))
+      (should-not (ladybird-test-sent))
+      ;; The keys are Emacs commands again.
+      (ladybird-render-test-keys "s")
+      (should (equal (ladybird-test-sent) '(((type . "stop") (view . 1))))))
+    ;; It can come in place of the labels.
+    (setq ladybird-test-sent nil)
+    (ladybird-render-test-keys "o")
+    (let ((id (ladybird-render-test-hint-id)))
+      (setq ladybird-test-sent nil)
+      (ladybird-test-receive conn `((type . "hints_cancelled") (view . 1)
+                                    (id . ,id)))
+      (should-not ladybird--hint)
+      (should-not (ladybird-render-test-hint-map-active-p))
+      (should-not (ladybird-test-sent))
+      ;; A dialog prompt with the same id is left alone.
+      (let ((ladybird--queued-prompts nil))
+        (ladybird-test-receive
+         conn `((type . "dialog") (view . 1) (id . ,id) (kind . "confirm")))
+        (ladybird-test-receive conn `((type . "hints_cancelled") (view . 1)
+                                      (id . ,id)))
+        (should (= (length ladybird--queued-prompts) 1))
+        (dolist (timer timer-list)
+          (when (memq (timer--function timer)
+                      '(ladybird--cancel-prompt ladybird--run-prompt))
+            (cancel-timer timer)))))))
+
+(ert-deftest ladybird-render-test-hint-error ()
+  ;; An error with the session's id ends it; others are only reported.
+  (ladybird-render-test-with-hints
+    (let ((id (ladybird-render-test-hint-start)))
+      (setq ladybird-test-sent nil)
+      (dolist (error `(((type . "error") (view . 1) (message . "other"))
+                       ((type . "error") (view . 1) (id . ,(1+ id))
+                        (message . "other id"))
+                       ((type . "error") (view . 2) (id . ,id)
+                        (message . "other view"))))
+        (should (equal (ladybird-render-test-hint-messages
+                         (ladybird-test-receive conn error))
+                       (list (concat "ladybird: test: "
+                                     (alist-get 'message error)))))
+        (should ladybird--hint))
+      (should (equal (ladybird-render-test-hint-messages
+                       (ladybird-test-receive
+                        conn `((type . "error") (view . 1) (id . ,id)
+                               (message . "not the view's hint session"))))
+                     '("ladybird: test: not the view's hint session")))
+      (should-not ladybird--hint)
+      (should-not (ladybird-render-test-hint-map-active-p))
+      (should-not (ladybird-test-sent)))
+    ;; Also while the labels are awaited.
+    (ladybird-render-test-keys "o")
+    (let ((id (ladybird-render-test-hint-id)))
+      (setq ladybird-test-sent nil)
+      (ladybird-test-receive conn `((type . "error") (view . 1) (id . ,id)
+                                    (message . "bad hint alphabet")))
+      (should-not ladybird--hint)
+      (should-not (ladybird-test-sent)))))
+
+(ert-deftest ladybird-render-test-hint-map-hidden ()
+  ;; A session that ends while a prompt hides the keymaps, as `read-key'
+  ;; does for an alert of `ladybird-alert-style' `prompt', leaves no
+  ;; keymap behind: the next key is an Emacs command again.
+  (dolist (end (list (lambda (id) `((type . "hints_cancelled") (view . 1) (id . ,id)))
+                     (lambda (id) `((type . "error") (view . 1) (id . ,id)
+                                    (message . "refused")))
+                     (lambda (id) `((type . "hints_list") (view . 1) (id . ,id)
+                                    (items . []) (truncated . :false)))
+                     (lambda (_) 'drop)))
+    (ladybird-render-test-with-hints
+     (ert-info ((format "ended by %S" (funcall end 1)))
+      (let ((ladybird-alert-style 'prompt)
+            (ladybird--queued-prompts nil)
+            (id nil))
+        (if (eq (funcall end 0) 'drop)
+            (ladybird-render-test-hint-start)
+          ;; The empty list has to be the first answer.
+          (ladybird-render-test-keys "o")
+          (unless (equal (alist-get 'type (funcall end 0)) "hints_list")
+            (ladybird-test-receive conn (ladybird-render-test-hints-list))))
+        (setq id (ladybird--hint-id ladybird--hint))
+        (ladybird-render-test-prompting
+          (cl-letf (((symbol-function 'read-key)
+                     (lambda (&rest _)
+                       (let ((overriding-terminal-local-map (make-sparse-keymap))
+                             (overriding-local-map (make-sparse-keymap)))
+                         (let ((msg (funcall end id)))
+                           (if (eq msg 'drop)
+                               (ladybird--drop conn)
+                             (ladybird-test-receive conn msg))))
+                       ?x)))
+            (ladybird-test-receive
+             conn '((type . "dialog") (view . 1) (id . 5) (kind . "alert")
+                    (message . "Hi")))))
+        (should-not ladybird--hint)
+        (should-not (ladybird-render-test-hint-map-active-p))
+        (unless (eq (funcall end 0) 'drop)
+          (setq ladybird-test-sent nil)
+          (ladybird-render-test-keys "n")
+          (should (equal (alist-get 'kind (car (ladybird-test-sent))) "wheel")))))))
+  ;; A command of the map that finds no session drops its key.
+  (ladybird-render-test-with-hints
+    (let ((unread-command-events nil))
+      (dolist (command '(ladybird-hint-add-char ladybird-hint-delete-char
+                         ladybird-hint-quit))
+        (let ((last-command-event ?a))
+          (funcall command)))
+      (should-not unread-command-events)
+      (should-not (ladybird-test-sent)))))
+
+(ert-deftest ladybird-render-test-hint-malformed ()
+  ;; A list the client cannot use ends the session with `hints_end'.
+  (ladybird-render-test-with-hints
+    (dolist (items `("aa" [1] [nil] [((index . 0) (kind . "link"))]
+                     [((index . 0) (label . "ax"))]
+                     [((index . 0) (label . ""))]
+                     [((index . 0) (label . 7))]
+                     [((index . 1.5) (label . "aa"))]
+                     [((label . "aa"))]
+                     [((index . 0) (label . "aa") (text . 5))]
+                     [((index . 0) (label . "aa") (url . ["x"]))]
+                     [((index . 0) (label . "aa") (kind . t))]
+                     ,(vconcat (append ladybird-render-test-hint-items
+                                       '(((index . 5) (label . "Sd")))))))
+      (ert-info ((format "items %S" items))
+        (ladybird-render-test-keys "o")
+        (let ((id (ladybird-render-test-hint-id)))
+          (setq ladybird-test-sent nil)
+          (should (equal (ladybird-render-test-hint-messages
+                           (ladybird-test-receive
+                            conn `((type . "hints_list") (view . 1) (id . ,id)
+                                   (items . ,items) (truncated . :false))))
+                         '("ladybird: the page sent unusable hints")))
+          (should-not ladybird--hint)
+          (should-not (ladybird-render-test-hint-map-active-p))
+          (should (equal (ladybird-test-sent)
+                         `(((type . "hints_end") (view . 1) (id . ,id)
+                            (activate))))))))
+    ;; Nulls are fine, and so is a label of another session's alphabet's
+    ;; characters as long as this one's has them.
+    (ladybird-render-test-keys "o")
+    (ladybird-test-receive
+     conn (ladybird-render-test-hints-list
+           nil '(((index . 0) (label . "aa") (kind) (text) (url)))))
+    (should (= (length (ladybird--hint-items ladybird--hint)) 1))))
+
+(ert-deftest ladybird-render-test-hint-crossing ()
+  ;; An error with the id of a session that is over is not shown.
+  (ladybird-render-test-with-hints
+    (let ((first (ladybird-render-test-hint-start)))
+      (ladybird-render-test-keys "a")
+      (ladybird-test-receive conn `((type . "hints_cancelled") (view . 1)
+                                    (id . ,first)))
+      (let ((second (ladybird-render-test-hint-start)))
+        (ladybird-render-test-keys "as")
+        (should-not ladybird--hint)
+        (should-not (ladybird-render-test-hint-messages
+                      (dolist (id (list first second))
+                        (ladybird-test-receive
+                         conn `((type . "error") (view . 1) (id . ,id)
+                                (message . "not the view's hint session"))))))
+        ;; Another id, or another view, is reported.
+        (should (equal (ladybird-render-test-hint-messages
+                         (ladybird-test-receive
+                          conn `((type . "error") (view . 1) (id . ,(+ second 50))
+                                 (message . "late")))
+                         (ladybird-test-receive
+                          conn `((type . "error") (view . 2) (id . ,first)
+                                 (message . "elsewhere"))))
+                       '("ladybird: test: late" "ladybird: test: elsewhere")))
+        ;; The connection keeps the last 16.
+        (dotimes (_ 20)
+          (ladybird-render-test-keys "o C-g"))
+        (should (= (length (ladybird--conn-hints-ended conn)) 16))
+        (should-not (member (cons 1 first) (ladybird--conn-hints-ended conn)))))))
+
+(ert-deftest ladybird-render-test-hint-link-schemes ()
+  ;; With a prefix argument a link opens in a new buffer only with http
+  ;; or https, or with file from a page that is a file.
+  (ladybird-render-test-with-hints
+    (dolist (case '(("file:///etc/passwd" "https://example.org/" nil)
+                    ("javascript:alert(1)" "https://example.org/" nil)
+                    ("mock://x" "https://example.org/" nil)
+                    ("http://example.org/a" "https://example.org/" t)
+                    ("file:///tmp/b.html" "file:///tmp/a.html" t)))
+      (pcase-let ((`(,url ,page ,opened) case))
+        (ert-info ((format "%s from %s" url page))
+          (setq ladybird--state `((url . ,page)))
+          (ladybird-render-test-keys "C-u o")
+          (let ((id (ladybird-render-test-hint-id)))
+            (ladybird-test-receive
+             conn (ladybird-render-test-hints-list
+                   id `(((index . 0) (label . "aa") (kind . "link") (text . "x")
+                         (url . ,url))
+                        ((index . 1) (label . "as") (kind . "button")))))
+            (setq ladybird-test-sent nil)
+            (let ((messages (ladybird-render-test-hint-messages
+                              (ladybird-render-test-keys "aa"))))
+              (should (equal (car (ladybird-test-sent "hints_end"))
+                             `((type . "hints_end") (view . 1) (id . ,id)
+                               (activate))))
+              (if opened
+                  (should (equal (alist-get 'url (car (ladybird-test-sent
+                                                       "create_view")))
+                                 url))
+                (should-not (ladybird-test-sent "create_view"))
+                (should (equal (car (last messages))
+                             (concat "ladybird: not opening " url)))))
+            (mapc #'kill-buffer (remq buffer (ladybird--buffers)))
+            (set-window-buffer (selected-window) buffer)))))))
+
+(ert-deftest ladybird-render-test-hint-no-feature ()
+  (ladybird-render-test-with-hints
+    (setf (ladybird--conn-server-info conn)
+          (assq-delete-all 'features (copy-sequence
+                                      (ladybird--conn-server-info conn))))
+    (should (equal (cadr (should-error (ladybird-follow-hint) :type 'user-error))
+                   "The server on test does not offer hints"))
+    (setf (ladybird--conn-server-info conn)
+          (cons '(features . ["other"]) (ladybird--conn-server-info conn)))
+    (should-error (ladybird-follow-hint) :type 'user-error)
+    (should-not (ladybird-test-sent))
+    (should-not ladybird--hint)
+    (should-not (ladybird-render-test-hint-map-active-p))))
+
+(ert-deftest ladybird-render-test-hint-bad-alphabet ()
+  (ladybird-render-test-with-hints
+    (dolist (alphabet '("a" "aa" "Ab" "a-b" ""))
+      (let ((ladybird-hint-alphabet alphabet))
+        (should-error (ladybird-follow-hint) :type 'user-error)))
+    (should-not (ladybird-test-sent))
+    (should-not ladybird--hint)
+    (let ((ladybird-hint-alphabet "ab"))
+      (ladybird-follow-hint)
+      (should (equal (alist-get 'alphabet (car (ladybird-test-sent))) "ab")))))
+
+(ert-deftest ladybird-render-test-hint-connection-lost ()
+  (ladybird-render-test-with-hints
+    (ladybird-render-test-hint-start)
+    (ladybird--drop conn)
+    (should-not ladybird--hint)
+    (should-not (ladybird-render-test-hint-map-active-p))
+    (should-not (ladybird-test-sent "hints_end"))
+    (should-error (ladybird-follow-hint) :type 'user-error))
+  ;; A second client replacing this one ends it too.
+  (ladybird-render-test-with-hints
+    (ladybird-render-test-hint-start)
+    (ladybird-test-receive conn '((type . "replaced")))
+    (should-not ladybird--hint)
+    (should-not (ladybird-test-sent "hints_end"))))
+
+(ert-deftest ladybird-render-test-hint-kill ()
+  (ladybird-render-test-with-hints
+    (let ((id (ladybird-render-test-hint-start))
+          (other (ladybird--make-view-buffer conn 2 "mock://2")))
+      ;; Another page buffer's death leaves the session alone.
+      (kill-buffer other)
+      (should ladybird--hint)
+      (setq ladybird-test-sent nil)
+      (kill-buffer buffer)
+      (should (equal (mapcar (lambda (m) (alist-get 'type m)) (ladybird-test-sent))
+                     '("hints_end" "close_view")))
+      (should (equal (alist-get 'id (car (ladybird-test-sent))) id))
+      (should-not ladybird--hint)
+      (should-not (ladybird-render-test-hint-map-active-p))))
+  ;; A view the server closed gets no `hints_end'.
+  (ladybird-render-test-with-hints
+    (ladybird-render-test-hint-start)
+    (ladybird-test-receive conn '((type . "view_closed") (view . 1)
+                                  (reason . "closed")))
+    (should-not (buffer-live-p buffer))
+    (should-not ladybird--hint)
+    (should-not (ladybird-test-sent "hints_end"))))
+
+(ert-deftest ladybird-render-test-hint-elsewhere ()
+  ;; A window that shows another buffer, or the minibuffer, ends the hints.
+  (ladybird-render-test-with-hints
+    (ladybird-render-test-hint-start)
+    (with-temp-buffer
+      (let ((other (current-buffer)))
+        (set-window-buffer (selected-window) other)
+        (ladybird-render-test-keys "a")
+        (should-not ladybird--hint)
+        (should (equal (mapcar (lambda (m) (alist-get 'type m))
+                               (ladybird-test-sent))
+                       '("hints_end")))
+        ;; The key went to the buffer the window shows.
+        (should (equal (with-current-buffer other (buffer-string)) "a"))
+        (set-window-buffer (selected-window) buffer)))
+    (setq ladybird-test-sent nil)
+    (ladybird-render-test-hint-start)
+    (run-hooks 'minibuffer-setup-hook)
+    (should-not ladybird--hint)
+    (should-not (ladybird-render-test-hint-map-active-p))
+    (should (equal (mapcar (lambda (m) (alist-get 'type m)) (ladybird-test-sent))
+                   '("hints_end")))))
+
+(ert-deftest ladybird-render-test-hint-frames ()
+  ;; Frames are painted while a label is typed.
+  (ladybird-render-test-with-hints
+    (ladybird-render-test-hint-start)
+    (ladybird-render-test-keys "a")
+    (setq ladybird-test-sent nil)
+    (let ((canvas ladybird--canvas))
+      (ladybird-test-receive conn (ladybird-test-frame 2 1 40 30 '(0 0 4 4) 3))
+      (should (equal (ladybird-test-sent "frame_ack")
+                     '(((type . "frame_ack") (view . 1) (seq . 2)))))
+      (should (eq ladybird--canvas canvas))
+      (should (= ladybird--dropped-frames 0))
+      (should ladybird--hint)
+      (should (equal (ladybird--hint-prefix ladybird--hint) "a")))))
 
 
 ;;; D3: lifecycle
@@ -2337,6 +3080,145 @@ loaded in *ladybird: mock://one*")))
                                    (lambda (_) (setq returned 'selection))))
               (ladybird-test-wait conn (lambda () (eq returned 'selection)))
               (should-not (funcall logged "dialog_closed"))))
+        (mapc #'kill-buffer (ladybird--buffers))
+        (delete-file log)))))
+
+(ert-deftest ladybird-mock-test-hints ()
+  ;; Keys typed through the command loop choose what the mock server's
+  ;; page labels; the labels arrive as frames while they are typed.
+  :tags '(mock)
+  (skip-unless (executable-find "python3"))
+  (let* ((log (make-temp-file "ladybird-mock" nil ".log"))
+         (ladybird--conns nil)
+         (ladybird--keepalive-timer nil)
+         (ladybird--last-buffer nil)
+         (ladybird--hint nil)
+         (ladybird-hint-alphabet "asdfghjkl")
+         (ladybird-device-pixel-ratio 1.0)
+         (inhibit-message t)
+         (logged (lambda (type &rest fields)
+                   (seq-find (lambda (m)
+                               (and (equal (alist-get 'type m) type)
+                                    (cl-loop for (key value) on fields by #'cddr
+                                             always (equal (alist-get key m)
+                                                           value))))
+                             (reverse (ladybird-test-log log)))))
+         (label-pixel (lambda ()
+                        ;; Inside the box of the first item's label.
+                        (ladybird-module-canvas-pixel ladybird--canvas 3 3)))
+         buffer)
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (setq buffer (ladybird "mock://one" (ladybird-test-mock-host log)))
+            (with-current-buffer buffer
+              (let ((conn ladybird--conn))
+                (ladybird-test-wait conn (lambda () ladybird--canvas))
+                (should-not (= (funcall label-pixel) #xffffffff))
+                (execute-kbd-macro "o")
+                (ladybird-test-wait conn (lambda () (and ladybird--hint
+                                                         (ladybird--hint-items
+                                                          ladybird--hint))))
+                (should (= (length (ladybird--hint-items ladybird--hint)) 12))
+                (ladybird-test-wait
+                 conn (lambda () (= (funcall label-pixel) #xffffffff)))
+                ;; Narrowing to s hides the label of the first item.
+                (execute-kbd-macro "s")
+                (ladybird-test-wait
+                 conn (lambda () (funcall logged "hints_narrow" 'prefix "s")))
+                (ladybird-test-wait
+                 conn (lambda () (/= (funcall label-pixel) #xffffffff)))
+                (should ladybird--hint)
+                (execute-kbd-macro "a")
+                (ladybird-test-wait
+                 conn (lambda () (funcall logged "_hint_activated"
+                                          'index 9 'kind "button")))
+                ;; A link loads in the page.
+                (execute-kbd-macro "oaa")
+                (ladybird-test-wait
+                 conn (lambda () (equal (alist-get 'url ladybird--state)
+                                        "https://mock.invalid/link/1")))
+                ;; With a prefix argument it opens in a new buffer.
+                (execute-kbd-macro (kbd "C-u o a g"))
+                (ladybird-test-wait
+                 conn (lambda () (funcall logged "create_view"
+                                          'url "https://mock.invalid/link/5")))
+                (should (funcall logged "hints_end" 'activate nil))
+                (should (= (length (ladybird--buffers conn)) 2))
+                (set-window-buffer (selected-window) buffer)
+                ;; A field gets insert mode.
+                (execute-kbd-macro "oad")
+                (ladybird-test-wait
+                 conn (lambda () (funcall logged "_hint_activated" 'index 2)))
+                (should ladybird-insert-mode)
+                (ladybird-insert-mode -1)
+                ;; The server ends a session through the real timers.
+                (ladybird-goto-url "mock://hints-expire")
+                (ladybird-test-wait
+                 conn (lambda () (equal (alist-get 'url ladybird--state)
+                                        "mock://hints-expire")))
+                (execute-kbd-macro "o")
+                (ladybird-test-wait conn (lambda () (and ladybird--hint
+                                                         (ladybird--hint-items
+                                                          ladybird--hint))))
+                (let ((id (ladybird--hint-id ladybird--hint)))
+                  (execute-kbd-macro "a")
+                  (ladybird-test-wait conn (lambda () (null ladybird--hint)))
+                  (should-not (funcall logged "hints_end" 'id id)))
+                ;; A page that does not answer in time ends it before the
+                ;; labels arrive.
+                (ladybird-goto-url "mock://hints-timeout")
+                (ladybird-test-wait
+                 conn (lambda () (equal (alist-get 'url ladybird--state)
+                                        "mock://hints-timeout")))
+                (execute-kbd-macro "o")
+                (should (ladybird--hint-waiting ladybird--hint))
+                (let ((id (ladybird--hint-id ladybird--hint)))
+                  (ladybird-test-wait conn (lambda () (null ladybird--hint)))
+                  (should-not (funcall logged "hints_end" 'id id)))
+                ;; The server refuses a session: its error ends it.
+                (cl-letf (((symbol-function 'ladybird--hint-alphabet-p) #'always))
+                  (let ((ladybird-hint-alphabet "aa"))
+                    (execute-kbd-macro "o")))
+                (let ((id (ladybird--hint-id ladybird--hint)))
+                  (ladybird-test-wait conn (lambda () (null ladybird--hint)))
+                  (should (funcall logged "hints" 'id id 'alphabet "aa"))
+                  (should-not (funcall logged "hints_end" 'id id)))
+                (should-not (eq (key-binding "z") #'ladybird-hint-add-char))
+                (should-not (funcall logged "error")))))
+        (ladybird--hint-stop)
+        (mapc #'kill-buffer (ladybird--buffers))
+        (delete-file log)))))
+
+(ert-deftest ladybird-mock-test-no-hints ()
+  ;; A server whose welcome lacks the feature gets nothing.
+  :tags '(mock)
+  (skip-unless (executable-find "python3"))
+  (let* ((log (make-temp-file "ladybird-mock" nil ".log"))
+         (ladybird--conns nil)
+         (ladybird--keepalive-timer nil)
+         (ladybird--last-buffer nil)
+         (ladybird-device-pixel-ratio 1.0)
+         (inhibit-message t)
+         buffer)
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (setq buffer (ladybird "mock://one"
+                                   (ladybird-test-mock-host log "--no-hints")))
+            (with-current-buffer buffer
+              (ladybird-test-wait ladybird--conn (lambda () ladybird--canvas))
+              (should-error (ladybird-follow-hint) :type 'user-error)
+              (should-not ladybird--hint)
+              (ladybird--request ladybird--conn "request_selection"
+                                 `((view . ,ladybird--view)) #'ignore)
+              (ladybird-test-wait
+               ladybird--conn
+               (lambda () (seq-find (lambda (m) (equal (alist-get 'type m)
+                                                       "request_selection"))
+                                    (ladybird-test-log log))))
+              (should-not (seq-find (lambda (m) (equal (alist-get 'type m) "hints"))
+                                    (ladybird-test-log log)))))
         (mapc #'kill-buffer (ladybird--buffers))
         (delete-file log)))))
 

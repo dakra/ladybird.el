@@ -1,0 +1,256 @@
+{
+  "name": "live-hints",
+  "comment": "Following hints on a real server: the page's elements are listed and labelled in its frames, C-g takes the labels away, and a typed label presses a button with a click of the user, focuses a text field, toggles a checkbox and follows a link.",
+  "params": {
+    "server": "stdio"
+  },
+  "variants": {
+    "stdio": {
+      "server": "stdio"
+    },
+    "socket": {
+      "server": "socket"
+    },
+    "ssh": {
+      "server": "ssh"
+    },
+    "forward": {
+      "server": "forward"
+    }
+  },
+  "defaults": {
+    "timeout": 20
+  },
+  "session": {
+    "ui": "gui",
+    "size": "100x35",
+    "eval_file": [
+      "../lib/ladybird-live.el"
+    ]
+  },
+  "steps": [
+    {
+      "group": "setup"
+    },
+    {
+      "eval": "(progn (ladybird-live-start \"{{server}}\" \"hints.html\") t)",
+      "timeout": 120
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-live-page-p \"hints\")",
+      "timeout": 60
+    },
+    {
+      "assert": {
+        "eval": "(ladybird-live-in-page (seq-contains-p (alist-get 'features (ladybird--conn-server-info ladybird--conn)) \"hints\"))"
+      },
+      "comment": "the server says it has hints"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-color 11 11) \"#ffffff\")",
+      "comment": "the page is painted; this pixel is under the first label"
+    },
+    {
+      "group": "list",
+      "comment": "the page's four elements are listed in document order and labelled"
+    },
+    {
+      "keys": "C-c C-o"
+    },
+    {
+      "wait": "until",
+      "pred": "(and ladybird--hint (not (ladybird--hint-waiting ladybird--hint)))"
+    },
+    {
+      "assert": {
+        "eval": "(equal (ladybird-live-hint-values 'label) '(\"a\" \"s\" \"d\" \"f\"))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(equal (seq-take (ladybird-live-hint-values 'kind) 3) '(\"link\" \"button\" \"input\"))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(equal (seq-take (ladybird-live-hint-values 'text) 2) '(\"second\" \"Press\"))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(equal (car (ladybird-live-hint-values 'url)) (ladybird-live-url \"second.html\"))"
+      }
+    },
+    {
+      "wait": "until",
+      "pred": "(not (equal (ladybird-live-color 11 11) \"#ffffff\"))",
+      "comment": "the labels arrive as frames"
+    },
+    {
+      "group": "cancel",
+      "comment": "C-g removes the labels and activates nothing"
+    },
+    {
+      "keys": "C-g"
+    },
+    {
+      "wait": "until",
+      "pred": "(null ladybird--hint)"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-color 11 11) \"#ffffff\")"
+    },
+    {
+      "assert": {
+        "eval": "(equal (ladybird-live-field \"clicked\") \"none\")"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(ladybird-live-page-p \"hints\")"
+      }
+    },
+    {
+      "group": "button",
+      "comment": "a button gets a click the page takes for the user's"
+    },
+    {
+      "keys": "C-c C-o"
+    },
+    {
+      "wait": "until",
+      "pred": "(and ladybird--hint (not (ladybird--hint-waiting ladybird--hint)))"
+    },
+    {
+      "keys": "s"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-field \"clicked\") \"b\")"
+    },
+    {
+      "assert": {
+        "eval": "(equal (ladybird-live-field \"trusted\") \"true\")"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(null ladybird--hint)"
+      }
+    },
+    {
+      "group": "field",
+      "comment": "a text field gets the focus and insert mode types into it"
+    },
+    {
+      "keys": "C-c C-o"
+    },
+    {
+      "wait": "until",
+      "pred": "(and ladybird--hint (not (ladybird--hint-waiting ladybird--hint)))"
+    },
+    {
+      "keys": "d"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-field \"focus\") \"i\")"
+    },
+    {
+      "assert": {
+        "eval": "(ladybird-live-in-page ladybird-insert-mode)"
+      }
+    },
+    {
+      "type": "hi"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-field \"value\") \"hi\")"
+    },
+    {
+      "keys": "C-c C-o",
+      "comment": "C-c C-o works in insert mode"
+    },
+    {
+      "wait": "until",
+      "pred": "(and ladybird--hint (not (ladybird--hint-waiting ladybird--hint)))"
+    },
+    {
+      "group": "checkbox",
+      "comment": "a checkbox is toggled"
+    },
+    {
+      "keys": "f"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-field \"checked\") \"true\")"
+    },
+    {
+      "assert": {
+        "eval": "(equal (ladybird-live-field \"value\") \"hi\")"
+      },
+      "comment": "the label was not typed into the field"
+    },
+    {
+      "keys": "C-c C-c"
+    },
+    {
+      "assert": {
+        "eval": "(ladybird-live-in-page (not ladybird-insert-mode))"
+      }
+    },
+    {
+      "group": "link",
+      "comment": "a link is followed"
+    },
+    {
+      "keys": "C-c C-o"
+    },
+    {
+      "wait": "until",
+      "pred": "(and ladybird--hint (not (ladybird--hint-waiting ladybird--hint)))"
+    },
+    {
+      "keys": "a"
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-live-page-p \"second\")",
+      "timeout": 60
+    },
+    {
+      "assert": {
+        "eval": "(null ladybird--hint)"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(null (ladybird-live-received \"error\"))"
+      }
+    },
+    {
+      "group": "health",
+      "comment": "every frame was acknowledged and none dropped"
+    },
+    {
+      "eval": "(progn (sleep-for 0.5) t)"
+    },
+    {
+      "assert": {
+        "eval": "(ladybird-live-healthy-p)"
+      }
+    },
+    {
+      "group": "cleanup"
+    },
+    {
+      "eval": "(ladybird-live-cleanup)",
+      "timeout": 60
+    }
+  ]
+}

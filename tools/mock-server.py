@@ -27,6 +27,8 @@ Usage: python3 -I tools/mock-server.py [OPTIONS]
                       (default: this machine's)
   --hostname NAME     host name in the welcome (default: this machine's)
   --max-views N       answer a create_view beyond N views with an error
+  --no-hints          leave "hints" out of the welcome's features (there are
+                      none then) and answer hints with an error
   --selftest          run an in-process client against the server
 
 Loading a mock:// URL makes the server emit a request or event:
@@ -36,6 +38,22 @@ hover, favicon, console, clipboard, background, error, close.
 mock://cancel-NAME emits the request of mock://NAME and withdraws it
 half a second later with request_cancelled; mock://disconnect drops the
 client and keeps the views.
+
+Hints (protocol section 6.1): a page has 12 items, kinds link, button,
+input and other in turn, with the texts "Link 1", "Button 2", "Field 3",
+"Other 4", "Link 5"...; a link's URL is https://mock.invalid/link/N.  The labels are
+drawn into the frames at the items' rectangles.  mock://hints-N has N
+items (mock://hints-0 none), mock://hints-truncated 1000 items and
+truncated true.  The first hints_narrow of a session makes
+mock://hints-expire end it with hints_cancelled, mock://hints-confirm
+open a confirm dialog and mock://hints-alert open an alert and end the
+session 0.3 seconds later.  mock://hints-timeout answers hints with
+hints_cancelled 3 seconds later instead of hints_list.  Loading another
+page or the page closing its view ends a session with hints_cancelled; a
+close_view ends it without one.  An error that answers a hints message
+carries its id.  An activated item is logged as
+{"type":"_hint_activated","view","id","index","kind","label"}, and an
+activated link loads its URL.
 """
 
 import argparse
@@ -87,6 +105,55 @@ def glyph_rows(char):
     return [int(code[i:i + 2], 16) for i in range(0, 14, 2)]
 
 
+HINT_KINDS = ("link", "button", "input", "other")
+HINT_TEXTS = {"link": "Link", "button": "Button", "input": "Field",
+              "other": "Other"}
+HINT_COLUMNS = 4
+
+
+def hint_alphabet_ok(alphabet):
+    """Whether ALPHABET is 2 to 36 distinct characters of a-z and 0-9."""
+    return (isinstance(alphabet, str) and 2 <= len(alphabet) <= 36
+            and len(set(alphabet)) == len(alphabet)
+            and all(c in "abcdefghijklmnopqrstuvwxyz0123456789" for c in alphabet))
+
+
+def hint_labels(count, alphabet):
+    """Return COUNT labels of one length, the shortest that tells them apart."""
+    base, length = len(alphabet), 1
+    while base ** length < count:
+        length += 1
+    labels = []
+    for n in range(count):
+        digits = []
+        for _ in range(length):
+            n, digit = divmod(n, base)
+            digits.append(alphabet[digit])
+        labels.append("".join(reversed(digits)))
+    return labels
+
+
+def hint_items(url, alphabet):
+    """Return the hint items of the page at URL and whether they were cut."""
+    name = url[len("mock://hints-"):] if url.startswith("mock://hints-") else ""
+    count, truncated = 12, False
+    if name == "truncated":
+        count, truncated = 1000, True
+    elif name.isdigit():
+        count = int(name)
+    items = []
+    for index, label in enumerate(hint_labels(count, alphabet)):
+        kind = HINT_KINDS[index % len(HINT_KINDS)]
+        items.append({
+            "index": index, "label": label, "kind": kind,
+            "text": f"{HINT_TEXTS[kind]} {index + 1}",
+            "url": f"https://mock.invalid/link/{index + 1}" if kind == "link" else None,
+            "x": 2 + (index % HINT_COLUMNS) * 96,
+            "y": 2 + (index // HINT_COLUMNS) * 24,
+            "width": 80, "height": 18})
+    return items, truncated
+
+
 class Gradient:
     """Rows of the synthetic frame of one size."""
 
@@ -135,6 +202,7 @@ class View:
         self.shm = None
         self.old_shm = None
         self.shm_announced = False
+        self.hints = None  # {"id", "items", "prefix"} of the hint session
         self.resize(width, height, dpr)
 
     def resize(self, width, height, dpr):
@@ -184,17 +252,27 @@ class View:
         if self.text:
             cell = 6 * TEXT_SCALE
             columns = max(1, (self.width - 2 * TEXT_MARGIN) // cell)
-            text = self.text[-columns:]
-            self.fill(TEXT_MARGIN - 2, TEXT_MARGIN - 2, len(text) * cell + 4,
-                      7 * TEXT_SCALE + 4, WHITE)
-            for column, char in enumerate(text):
-                for line, bits in enumerate(glyph_rows(char)):
-                    for bit in range(5):
-                        if bits & (0x10 >> bit):
-                            self.fill(TEXT_MARGIN + column * cell + bit * TEXT_SCALE,
-                                      TEXT_MARGIN + line * TEXT_SCALE,
-                                      TEXT_SCALE, TEXT_SCALE, BLACK)
+            self.draw_text(TEXT_MARGIN, TEXT_MARGIN, self.text[-columns:])
+        if self.hints:
+            prefix = self.hints["prefix"]
+            for item in self.hints["items"]:
+                x, y = int(item["x"] * self.dpr), int(item["y"] * self.dpr)
+                if (item["label"].startswith(prefix)
+                        and x < self.width and y < self.height):
+                    self.draw_text(x + 2, y + 2, item["label"])
         self.dirty = False
+
+    def draw_text(self, x, y, text):
+        """Draw TEXT in black on white with its top left glyph at X, Y."""
+        cell = 6 * TEXT_SCALE
+        self.fill(x - 2, y - 2, len(text) * cell + 4, 7 * TEXT_SCALE + 4, WHITE)
+        for column, char in enumerate(text):
+            for line, bits in enumerate(glyph_rows(char)):
+                for bit in range(5):
+                    if bits & (0x10 >> bit):
+                        self.fill(x + column * cell + bit * TEXT_SCALE,
+                                  y + line * TEXT_SCALE,
+                                  TEXT_SCALE, TEXT_SCALE, BLACK)
 
     def rect_bytes(self, x, y, w, h):
         if (x, y, w, h) == (0, 0, self.width, self.height):
@@ -290,6 +368,11 @@ class Server:
         for view in self.views.values():
             view.in_flight = None
             view.shm_announced = False
+            # A client that goes away ends its hint sessions.
+            if view.hints:
+                view.hints = None
+                view.dirty = True
+                view.damage_all()
         self.log({"type": "_disconnected"})
 
     def hang_up(self):
@@ -501,6 +584,7 @@ class Server:
         return self.next_id - 1
 
     def navigate(self, view, url):
+        self.cancel_hints(view)
         view.url = url
         view.title = "Mock: " + url
         view.loading = True
@@ -593,12 +677,13 @@ class Server:
         elif name == "error":
             self.tell({"type": "error", "view": v, "message": "mock error"})
         elif name == "close":
+            self.cancel_hints(view)
             del self.views[v]
             self.tell({"type": "view_closed", "view": v, "reason": "closed"})
 
     def context_menu(self, view, x, y):
         self.tell({"type": "context_menu", "view": view.id, "x": x, "y": y,
-                   "kind": "link", "link_url": "mock://linked", "image_url": None,
+                   "kind": "link", "link_url": "https://mock.invalid/linked", "image_url": None,
                    "image_mime_type": None, "media_url": None, "media": None,
                    "selection": "mock selection", "editable": True})
 
@@ -629,6 +714,7 @@ class Server:
             client.encoding = "zstd"
         client.shm = bool(self.args.shm and m.get("shm"))
         client.ready = True
+        features = {} if self.args.no_hints else {"features": ["hints"]}
         self.send(client, {
             "type": "welcome", "protocol": lp.PROTOCOL_VERSION,
             "server": f"ladybird mock server ({os.getpid()})",
@@ -636,6 +722,7 @@ class Server:
             "shm": client.shm, "log": self.args.log,
             "host": {"hostname": self.args.hostname or socket.gethostname(),
                      "platform": self.args.platform},
+            **features,
             "views": [view.describe() for view in self.views.values()]})
         for view in list(self.views.values()):
             self.send_state(view)
@@ -671,6 +758,7 @@ class Server:
     def on_close_view(self, _client, m):
         view = self.view_of(m)
         if view:
+            view.hints = None
             del self.views[view.id]
             for segment in (view.shm, view.old_shm):
                 self.release(segment)
@@ -834,6 +922,117 @@ class Server:
             self.tell({"type": "console", "view": view.id, "level": "log",
                        "text": "console enabled"})
 
+    # Hints
+
+    def redraw_hints(self, view):
+        view.dirty = True
+        view.damage_all()
+        self.pump(view)
+
+    def cancel_hints(self, view):
+        """End VIEW's hint session, if it has one, with hints_cancelled."""
+        if view.hints:
+            session, view.hints = view.hints, None
+            self.tell({"type": "hints_cancelled", "view": view.id,
+                       "id": session["id"]})
+            self.redraw_hints(view)
+
+    def hint_error(self, view, m, message):
+        self.tell({"type": "error", "view": view.id, "id": m.get("id"),
+                   "message": message})
+
+    def hint_session(self, m):
+        """Return the view of M if M names its hint session, else None."""
+        view = self.view_of(m)
+        if not view:
+            return None
+        if not view.hints or view.hints["id"] != m.get("id"):
+            self.hint_error(view, m, "not the view's hint session")
+            return None
+        return view
+
+    def on_hints(self, _client, m):
+        view = self.view_of(m)
+        if not view:
+            return
+        if self.args.no_hints:
+            self.hint_error(view, m, "hints are not supported")
+            return
+        session = m.get("id")
+        if (not isinstance(session, int) or isinstance(session, bool)
+                or not 0 <= session < 2 ** 53):
+            self.hint_error(view, m, f"bad hint id {session!r}")
+            return
+        alphabet = m.get("alphabet")
+        if not hint_alphabet_ok(alphabet):
+            self.hint_error(view, m, f"bad hint alphabet {alphabet!r}")
+            return
+        items, truncated = hint_items(view.url, alphabet)
+        # A new session ends the one before it without a message.
+        view.hints = None
+        if view.url == "mock://hints-timeout":
+            view.hints = {"id": session, "items": [], "prefix": "",
+                          "alphabet": alphabet, "narrowed": False}
+            pending = view.hints
+
+            def timeout():
+                if self.views.get(view.id) is view and view.hints is pending:
+                    self.cancel_hints(view)
+            self.after(3, timeout)
+            return
+        if items:
+            view.hints = {"id": session, "items": items, "prefix": "",
+                          "alphabet": alphabet, "narrowed": False}
+        self.tell({"type": "hints_list", "view": view.id, "id": session,
+                   "items": items, "truncated": truncated})
+        self.redraw_hints(view)
+
+    def on_hints_narrow(self, _client, m):
+        view = self.hint_session(m)
+        if not view:
+            return
+        session = view.hints
+        prefix = m.get("prefix")
+        longest = max((len(item["label"]) for item in session["items"]),
+                      default=None)
+        if (not isinstance(prefix, str)
+                or any(c not in session["alphabet"] for c in prefix)
+                or (longest is not None and len(prefix) > longest)):
+            self.hint_error(view, m, f"bad hint prefix {prefix!r}")
+            return
+        session["prefix"] = prefix
+        self.redraw_hints(view)
+        if session["narrowed"]:
+            return
+        session["narrowed"] = True
+        if view.url == "mock://hints-expire":
+            self.cancel_hints(view)
+        elif view.url == "mock://hints-confirm":
+            self.emit(view, "confirm")
+        elif view.url == "mock://hints-alert":
+            self.emit(view, "alert")
+
+            def later():
+                if view.hints is session:
+                    self.cancel_hints(view)
+            self.after(0.3, later)
+
+    def on_hints_end(self, _client, m):
+        view = self.hint_session(m)
+        if not view:
+            return
+        session, view.hints = view.hints, None
+        self.redraw_hints(view)
+        index = m.get("activate")
+        item = next((item for item in session["items"]
+                     if index is not None and item["index"] == index), None)
+        if item:
+            self.log({"type": "_hint_activated", "view": view.id,
+                      "id": session["id"], "index": index, "kind": item["kind"],
+                      "label": item["label"]})
+            if item["kind"] == "link":
+                self.navigate(view, item["url"])
+
 
 class SelftestClient:
     def __init__(self, sock):
@@ -879,6 +1078,30 @@ class SelftestClient:
 
     def ack(self, header):
         self.send({"type": "frame_ack", "view": header.view, "seq": header.seq})
+
+    def control(self, message_type, timeout=5):
+        """Return the next control message of MESSAGE_TYPE.
+        Frames on the way are acknowledged; another control message is an
+        error."""
+        while True:
+            record = self.receive(timeout)
+            if isinstance(record, tuple):
+                self.ack(record[0])
+                continue
+            assert record["type"] == message_type, record
+            return record
+
+    def settle(self):
+        """Acknowledge frames until the server is quiet; return the last."""
+        last = None
+        try:
+            while True:
+                record = self.receive(0.3)
+                assert isinstance(record, tuple), record
+                self.ack(record[0])
+                last = record
+        except TimeoutError:
+            return last
 
 
 def selftest():
@@ -1042,7 +1265,172 @@ def selftest():
     client.send(hello)
     assert client.expect("reject")["reason"]
     thread.join(5)
+
+    selftest_hints(serve, hello)
     print("ok" + "".join(f" ({note})" for note in notes))
+
+
+def selftest_hints(serve, hello):
+    assert hint_labels(3, "ab") == ["aa", "ab", "ba"]
+    assert hint_labels(2, "ab") == ["a", "b"]
+    assert hint_labels(1, "ab") == ["a"]
+    for bad in ("a", "aa", "aB", "a-", "abcdefghijklmnopqrstuvwxyz0123456789x", 7):
+        assert not hint_alphabet_ok(bad), bad
+
+    client, thread = serve("--views", "1")
+    client.send({**hello, "viewport": {"width": 400, "height": 200, "dpr": 1.0}})
+    welcome = client.expect("welcome")
+    assert welcome["features"] == ["hints"]
+    view = welcome["views"][0]["view"]
+    client.expect("state")
+    client.send({"type": "set_viewport", "view": view, "width": 400,
+                 "height": 200, "dpr": 1.0})
+    before = client.settle()
+
+    def hints(session, alphabet="asdfghjkl"):
+        client.send({"type": "hints", "view": view, "id": session,
+                     "alphabet": alphabet})
+
+    def refused(session):
+        error = client.control("error")
+        assert error["id"] == session, error
+        return error["message"]
+
+    # A bad alphabet or id is refused and changes nothing; the error has
+    # the id of what it answers.
+    hints(1, "aa")
+    assert "alphabet" in refused(1)
+    for bad in (-1, 2 ** 53, 1.5, "1", None, True):
+        hints(bad)
+        assert "bad hint id" in refused(bad)
+    client.send({"type": "hints_narrow", "view": view, "id": 1, "prefix": ""})
+    assert refused(1) == "not the view's hint session"
+
+    hints(2)
+    listed = client.control("hints_list")
+    assert listed["id"] == 2 and listed["truncated"] is False
+    items = listed["items"]
+    assert len(items) == 12 and [i["index"] for i in items] == list(range(12))
+    assert {i["kind"] for i in items} == set(HINT_KINDS)
+    assert {len(i["label"]) for i in items} == {2}
+    assert items[0]["label"] == "aa" and items[11]["label"] == "sd"
+    assert items[0]["url"] == "https://mock.invalid/link/1" and items[1]["url"] is None
+    # The labels are drawn into the frames.
+    labelled = client.settle()
+    assert labelled and labelled[1] != before[1]
+    client.send({"type": "hints_narrow", "view": view, "id": 2, "prefix": "s"})
+    narrowed = client.settle()
+    assert narrowed and narrowed[1] != labelled[1]
+    # Another id is refused; an index that is no item's activates nothing.
+    client.send({"type": "hints_end", "view": view, "id": 3, "activate": 0})
+    assert refused(3) == "not the view's hint session"
+    client.send({"type": "hints_end", "view": view, "id": 2, "activate": 99})
+    client.settle()
+    client.send({"type": "hints_end", "view": view, "id": 2, "activate": None})
+    assert refused(2) == "not the view's hint session"
+
+    # A new session ends the one before it without a message; activating a
+    # link loads it.
+    hints(4)
+    client.control("hints_list")
+    hints(5)
+    assert client.control("hints_list")["id"] == 5
+    client.send({"type": "hints_end", "view": view, "id": 4, "activate": 0})
+    assert refused(4) == "not the view's hint session"
+    client.send({"type": "hints_end", "view": view, "id": 5, "activate": 4})
+    state = client.control("state")
+    assert state["url"] == "https://mock.invalid/link/5" and state["loading"] is True
+    assert client.control("state")["loading"] is False
+
+    # Loading another page ends the session.
+    hints(6)
+    client.control("hints_list")
+    client.send({"type": "load", "view": view, "url": "mock://hints-0"})
+    assert client.control("hints_cancelled") == {
+        "type": "hints_cancelled", "view": view, "id": 6}
+    client.control("state")
+    client.control("state")
+    # No items: the session is over at once.
+    hints(7)
+    listed = client.control("hints_list")
+    assert listed["items"] == [] and listed["truncated"] is False
+    client.send({"type": "hints_end", "view": view, "id": 7, "activate": None})
+    assert refused(7) == "not the view's hint session"
+
+    client.send({"type": "load", "view": view, "url": "mock://hints-truncated"})
+    client.control("state")
+    client.control("state")
+    hints(8)
+    listed = client.control("hints_list")
+    assert len(listed["items"]) == 1000 and listed["truncated"] is True
+    assert {len(i["label"]) for i in listed["items"]} == {4}
+    hints(9, "ab")
+    listed = client.control("hints_list")
+    assert {len(i["label"]) for i in listed["items"]} == {10}
+
+    client.send({"type": "load", "view": view, "url": "mock://hints-expire"})
+    assert client.control("hints_cancelled")["id"] == 9
+    client.control("state")
+    client.control("state")
+    hints(10)
+    client.control("hints_list")
+    # A prefix must be of the alphabet and no longer than the labels.
+    for bad in ("x", "aaa", 3, None):
+        client.send({"type": "hints_narrow", "view": view, "id": 10, "prefix": bad})
+        assert "bad hint prefix" in refused(10)
+    client.send({"type": "hints_narrow", "view": view, "id": 10, "prefix": "a"})
+    assert client.control("hints_cancelled") == {
+        "type": "hints_cancelled", "view": view, "id": 10}
+    # A narrowing that crosses it is refused with the old id.
+    client.send({"type": "hints_narrow", "view": view, "id": 10, "prefix": ""})
+    assert refused(10) == "not the view's hint session"
+    client.send({"type": "load", "view": view, "url": "mock://hints-confirm"})
+    client.control("state")
+    client.control("state")
+    hints(12)
+    client.control("hints_list")
+    client.send({"type": "hints_narrow", "view": view, "id": 12, "prefix": "s"})
+    assert client.control("dialog")["kind"] == "confirm"
+    client.send({"type": "hints_narrow", "view": view, "id": 12, "prefix": ""})
+    client.send({"type": "load", "view": view, "url": "mock://hints-alert"})
+    client.control("hints_cancelled")
+    client.control("state")
+    client.control("state")
+    hints(13)
+    client.control("hints_list")
+    client.send({"type": "hints_narrow", "view": view, "id": 13, "prefix": "s"})
+    assert client.control("dialog")["kind"] == "alert"
+    assert client.control("hints_cancelled", 2)["id"] == 13
+    # A page that does not answer in time: hints_cancelled, no hints_list.
+    client.send({"type": "load", "view": view, "url": "mock://hints-timeout"})
+    client.control("state")
+    client.control("state")
+    hints(11)
+    assert client.control("hints_cancelled", 5) == {
+        "type": "hints_cancelled", "view": view, "id": 11}
+    # A close_view ends a session with view_closed alone.
+    client.send({"type": "load", "view": view, "url": "mock://one"})
+    client.control("state")
+    client.control("state")
+    hints(14)
+    client.control("hints_list")
+    client.send({"type": "close_view", "view": view})
+    assert client.control("view_closed")["reason"] == "client"
+    client.sock.close()
+    thread.join(5)
+
+    client, thread = serve("--no-hints", "--views", "1")
+    client.send(hello)
+    welcome = client.expect("welcome")
+    assert "features" not in welcome
+    view = welcome["views"][0]["view"]
+    client.control("state")
+    client.send({"type": "hints", "view": view, "id": 1, "alphabet": "ab"})
+    error = client.control("error")
+    assert error == {"type": "error", "view": view, "id": 1,
+                     "message": "hints are not supported"}, error
+    client.sock.close()
+    thread.join(5)
 
 
 def parse_arguments(argv):
@@ -1061,6 +1449,7 @@ def parse_arguments(argv):
     parser.add_argument("--shm", action="store_true")
     parser.add_argument("--max-views", type=int, metavar="N")
     parser.add_argument("--hostname", metavar="NAME")
+    parser.add_argument("--no-hints", action="store_true")
     parser.add_argument("--platform", default=(
         "macos" if sys.platform == "darwin" else
         "linux" if sys.platform.startswith("linux") else "unknown"))

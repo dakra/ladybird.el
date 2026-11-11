@@ -24,6 +24,7 @@ native module from the checkout and fall back to `test/ladybird-fake-module.el`.
 | `ui` | stdio, unix | dialogs, pickers, permissions, withdrawn requests, a prompt that waits for the minibuffer, page events, find |
 | `reconnect` | unix, tcp | a lost connection, another server process, a second client, server exit |
 | `limit` | stdio | a server that shows one page: a second page loads in the first |
+| `hints` | stdio | following links by their labels: narrowing, refusal, `DEL`, buttons, links, `C-u`, fields, `C-g`, `<escape>`, `ESC x` on the terminal, wheel and mouse movement, a session the server ends, before or after its labels, a page's question and an alert that waits for a key during the hints, no labels |
 | `mouse` | (graphical frame) | clicks, wheel and movement at canvas positions |
 
 A variant is how the mock server is reached: started by the connection on standard
@@ -105,6 +106,7 @@ places, and `ladybird-live-color` reads a pixel through the module's test access
 | `live-permission` | a stray key, dismissal and refusal of a permission; geolocation |
 | `live-crash` | a prompt withdrawn by a crash, the crash message, the page coming back |
 | `live-find` | counting, stepping, case, the selection left by `C-g` |
+| `live-hints` | the list and its labels in the frames, cancelling, a button, a text field, a checkbox, a link |
 | `live-viewport` | split, frame resize, a growing minibuffer, visibility, focus |
 | `live-single` | a second page on a server that shows one |
 | `live-events` | console, blocked popup, refused download, clipboard, screenshot |

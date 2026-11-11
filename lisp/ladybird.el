@@ -21,7 +21,8 @@
 ;; `ladybird-module' paints them into the buffer's canvas.
 ;;
 ;; In a page buffer the keys are Emacs commands: n and p scroll, SPC and
-;; DEL page, q buries the buffer, Q closes the page.  `ladybird-insert-mode'
+;; DEL page, o activates a link, button or field by the label the page
+;; puts on it, q buries the buffer, Q closes the page.  `ladybird-insert-mode'
 ;; (i or RET) sends typed keys to the page; C-c C-c leaves it.  The mouse
 ;; and the wheel always go to the page.
 
@@ -143,6 +144,13 @@ that outlives its clients."
   :type 'boolean
   :group 'ladybird)
 
+(defcustom ladybird-hint-alphabet "asdfghjkl"
+  "Characters the labels of `ladybird-follow-hint' are made of.
+These are 2 to 36 different characters, each a lower case letter from
+a to z or a digit."
+  :type 'string
+  :group 'ladybird)
+
 
 ;;; State
 
@@ -204,6 +212,19 @@ has them set for a selected page window or a drag; else nil.")
 (defvar ladybird--find-timer nil "Timer that sends the search string typed.")
 (defvar ladybird--find-overlay nil
   "Overlay that shows the match count in the minibuffer.")
+
+(cl-defstruct (ladybird--hint (:constructor ladybird--make-hint) (:copier nil))
+  "A hint session: the page labels what can be activated, the user types a label."
+  conn view buffer id alphabet
+  new-buffer                     ; non-nil: a chosen link opens in a new buffer
+  (waiting t)                    ; non-nil until the labels are taken up
+  items                          ; the items of `hints_list'
+  truncated                      ; non-nil when the page has more than it labelled
+  (prefix ""))                   ; what has been typed of a label
+
+(defvar ladybird--hint nil
+  "The hint session of `ladybird-follow-hint' in progress, or nil.")
+(defvar ladybird--hint-shown nil "The hint prompt last shown in the echo area.")
 
 (defvar ladybird-insert-mode)
 
@@ -602,7 +623,11 @@ is then loaded in a page it has, shown where BUFFER was."
 
 (defun ladybird--forget-view ()
   "Detach the current buffer from its view without closing the view.
-The module drops the view's frame, canvas and shared memory."
+The module drops the view's frame, canvas and shared memory.  A hint
+session of the buffer ends."
+  (when (and ladybird--hint (eq (ladybird--hint-buffer ladybird--hint)
+                                (current-buffer)))
+    (ladybird--hint-stop))
   (when (and ladybird--conn ladybird--view)
     (remhash ladybird--view (ladybird--conn-views ladybird--conn))
     (when-let* ((decoder (ladybird--conn-decoder ladybird--conn)))
@@ -699,7 +724,11 @@ the wait."
     (ladybird--disconnect conn)))
 
 (defun ladybird--on-conn-change (conn)
-  "Show CONN's new state in its page buffers."
+  "Show CONN's new state in its page buffers.
+A hint session on CONN ends when CONN is no longer ready."
+  (when (and ladybird--hint (eq (ladybird--hint-conn ladybird--hint) conn)
+             (not (ladybird--ready-p conn)))
+    (ladybird--hint-stop))
   (dolist (buffer (ladybird--buffers conn))
     (with-current-buffer buffer
       (force-mode-line-update))))
@@ -747,9 +776,14 @@ This handles a `view_created' that does not name its request."
 
 (defun ladybird--kill ()
   "Close the view of the page buffer being killed.
-An error is reported and does not keep the buffer from being killed."
+Its hint session ends.  An error is reported and does not keep the
+buffer from being killed."
   (condition-case err
-      (ladybird--kill-view)
+      (progn
+        (when (and ladybird--hint (eq (ladybird--hint-buffer ladybird--hint)
+                                      (current-buffer)))
+          (ladybird--hint-stop t))
+        (ladybird--kill-view))
     (error (message "ladybird: closing %s: %S" (buffer-name) err))))
 
 (defun ladybird--kill-view ()
@@ -1282,6 +1316,7 @@ page; `ladybird-insert-mode-forward-keys' edit its text field."
     (define-key map (kbd "C-y") #'ladybird-yank)
     (define-key map (kbd "M-w") #'ladybird-copy-selection)
     (define-key map (kbd "C-c C-c") #'ladybird-insert-mode)
+    (define-key map (kbd "C-c C-o") #'ladybird-follow-hint)
     (define-key map [xterm-paste] #'ladybird-xterm-paste)
     map))
 
@@ -1299,7 +1334,8 @@ Keys that insert themselves, the function keys and
 `ladybird-insert-mode-forward-keys' act on the page; other keys, such as
 \\`C-x', \\`C-c', \\`M-x' and \\`C-g', keep their Emacs meaning.
 \\<ladybird-insert-mode-map>\\[ladybird-yank] pastes the latest kill, \
-\\[ladybird-copy-selection] copies the page's selection
+\\[ladybird-copy-selection] copies the page's selection,
+\\[ladybird-follow-hint] activates a link, button or field by its label
 and \\[ladybird-insert-mode] leaves the mode."
   :lighter nil
   :keymap ladybird-insert-mode-map
@@ -1370,6 +1406,8 @@ and \\[ladybird-insert-mode] leaves the mode."
     (define-key map "w" #'ladybird-copy-url)
     (define-key map "c" #'ladybird-new-buffer)
     (define-key map "S" #'ladybird-screenshot)
+    (define-key map "o" #'ladybird-follow-hint)
+    (define-key map (kbd "C-c C-o") #'ladybird-follow-hint)
     (define-key map (kbd "C-c C-l") #'ladybird-toggle-console)
     (define-key map (kbd "C-s") #'ladybird-find)
     (define-key map (kbd "C-r") #'ladybird-find-backward)
@@ -1834,6 +1872,327 @@ another string than the one searched for is dropped."
             (message "Find %s: %s" ladybird--find-string text)))))))
 
 
+;;; Hints
+
+(defvar ladybird-hint-map
+  (let ((map (make-keymap)))
+    (set-char-table-range (nth 1 map) (cons ?\s (max-char))
+                          #'ladybird-hint-add-char)
+    (define-key map (kbd "DEL") #'ladybird-hint-delete-char)
+    (define-key map [backspace] #'ladybird-hint-delete-char)
+    (define-key map (kbd "C-g") #'ladybird-hint-quit)
+    (define-key map [escape] #'ladybird-hint-quit)
+    map)
+  "Keymap in force while `ladybird-follow-hint' reads a label.
+Characters add to the label.  A key this map does not bind ends the
+hints and then does what it does otherwise.")
+
+(defvar ladybird--hint-map-alist (list (cons 'ladybird--hint ladybird-hint-map))
+  "Entry of `emulation-mode-map-alists' for `ladybird-hint-map'.
+The map is in force exactly while `ladybird--hint' is non-nil, in
+every buffer and above the minor and major modes' maps.")
+
+(defun ladybird--hint-alphabet-p (alphabet)
+  "Return non-nil if ALPHABET is a string the server makes labels of."
+  (let ((case-fold-search nil))
+    (and (stringp alphabet)
+         (<= 2 (length alphabet) 36)
+         (string-match-p "\\`[a-z0-9]*\\'" alphabet)
+         (= (length (delete-dups (string-to-list alphabet))) (length alphabet)))))
+
+(defun ladybird--hint-of-p (conn msg)
+  "Return non-nil if MSG on CONN names the hint session in progress."
+  (and ladybird--hint
+       (eq (ladybird--hint-conn ladybird--hint) conn)
+       (equal (alist-get 'view msg) (ladybird--hint-view ladybird--hint))
+       (equal (alist-get 'id msg) (ladybird--hint-id ladybird--hint))))
+
+(defun ladybird--hint-ended-p (conn msg)
+  "Return non-nil if MSG on CONN names a hint session that is over."
+  (and (alist-get 'id msg)
+       (member (cons (alist-get 'view msg) (alist-get 'id msg))
+               (ladybird--conn-hints-ended conn))))
+
+(defun ladybird--hint-send (hint type &rest fields)
+  "Send a message of TYPE with the alist FIELDS about the session HINT.
+Nothing is sent on a connection that is not ready.  Return non-nil if
+it was sent."
+  (let ((conn (ladybird--hint-conn hint)))
+    (and (ladybird--ready-p conn)
+         (ladybird--send conn `((type . ,type) (view . ,(ladybird--hint-view hint))
+                                (id . ,(ladybird--hint-id hint)) ,@fields)))))
+
+(defun ladybird--hint-stop (&optional tell)
+  "End the hint session in progress, if there is one.
+`ladybird-hint-map' goes out of force with it.  The connection keeps
+the session's view and id among the 16 that ended last.  With TELL the
+server gets a `hints_end' that activates nothing."
+  (when-let* ((hint ladybird--hint))
+    (setq ladybird--hint nil)
+    (remove-hook 'pre-command-hook #'ladybird--hint-pre-command)
+    (remove-hook 'minibuffer-setup-hook #'ladybird--hint-minibuffer)
+    (let ((conn (ladybird--hint-conn hint)))
+      (setf (ladybird--conn-hints-ended conn)
+            (take 16 (cons (cons (ladybird--hint-view hint) (ladybird--hint-id hint))
+                           (ladybird--conn-hints-ended conn)))))
+    (when tell
+      (ladybird--hint-send hint "hints_end" '(activate . :null)))
+    (when (and ladybird--hint-shown (equal (current-message) ladybird--hint-shown))
+      (message nil))
+    (setq ladybird--hint-shown nil)))
+
+(defun ladybird--hint-keep-p ()
+  "Return non-nil if the command about to run continues the hints.
+The commands of `ladybird-hint-map' and mouse movement do."
+  (or (mouse-movement-p last-command-event)
+      (let ((command (lookup-key ladybird-hint-map (this-command-keys-vector))))
+        (and command (eq command this-command)))))
+
+(defun ladybird--hint-pre-command ()
+  "End the hints before a command that does not continue them."
+  (when (and ladybird--hint (not (ladybird--hint-keep-p)))
+    (with-demoted-errors "ladybird: ending the hints: %S"
+      (ladybird--hint-stop t))))
+
+(defun ladybird--hint-minibuffer ()
+  "End the hints as the minibuffer opens."
+  (ladybird--hint-stop t))
+
+(defun ladybird--hint-here-p ()
+  "Return non-nil if a session's selected window shows its page.
+In another buffer the hints end and the keys of the current command
+are read again, with `ladybird-hint-map' out of force.  Without a
+session the keys are dropped."
+  (cond
+   ((null ladybird--hint) nil)
+   ((eq (window-buffer (selected-window)) (ladybird--hint-buffer ladybird--hint)) t)
+   (t (ladybird--hint-stop t)
+      (setq unread-command-events (append (this-command-keys-vector)
+                                          unread-command-events))
+      nil)))
+
+(defun ladybird--hint-remaining (hint &optional prefix)
+  "Return the items of HINT whose label starts with PREFIX.
+PREFIX defaults to what has been typed."
+  (let ((prefix (or prefix (ladybird--hint-prefix hint))))
+    (seq-filter (lambda (item) (string-prefix-p prefix (alist-get 'label item)))
+                (ladybird--hint-items hint))))
+
+(defun ladybird--hint-describe (item)
+  "Return the text of the hint ITEM, or its URL if it has no text."
+  (let ((text (string-trim (or (alist-get 'text item) ""))))
+    (if (string-empty-p text)
+        (or (alist-get 'url item) (alist-get 'kind item) "")
+      text)))
+
+(defun ladybird--hint-prompt ()
+  "Show what has been typed of a label and how many items remain."
+  (when-let* ((hint ladybird--hint))
+    (let* ((remaining (ladybird--hint-remaining hint))
+           (text (ladybird--echo-line
+                  (concat
+                   (if (ladybird--hint-new-buffer hint) "Hint (new buffer): " "Hint: ")
+                   (ladybird--hint-prefix hint)
+                   (cond ((ladybird--hint-waiting hint) "  [waiting for the labels]")
+                         (t (format "  [%d left%s]" (length remaining)
+                                    (if (ladybird--hint-truncated hint)
+                                        ", more not labelled"
+                                      ""))))
+                   (and (not (ladybird--hint-waiting hint))
+                        (= (length remaining) 1)
+                        (concat " " (ladybird--hint-describe (car remaining)))))))
+           (message-log-max nil))
+      (setq ladybird--hint-shown text)
+      (message "%s" text))))
+
+(defun ladybird--hint-items-p (items alphabet)
+  "Return non-nil if ITEMS is a usable `items' field of a `hints_list'.
+It is an array of objects, each with an integer `index', a `label' of
+the characters of ALPHABET, and a `kind', `text' and `url' that are
+strings or null."
+  (and (vectorp items)
+       (seq-every-p
+        (lambda (item)
+          (and (consp item) (proper-list-p item) (seq-every-p #'consp item)
+               (integerp (alist-get 'index item))
+               (let ((label (alist-get 'label item)))
+                 (and (stringp label) (not (string-empty-p label))
+                      (seq-every-p (lambda (char) (seq-contains-p alphabet char))
+                                   label)))
+               (seq-every-p (lambda (key)
+                              (let ((value (alist-get key item)))
+                                (or (null value) (stringp value))))
+                            '(kind text url))))
+        items)))
+
+(defun ladybird--link-url-p (url page-url)
+  "Return non-nil if URL, a link of the page at PAGE-URL, may be loaded.
+The page names URL: http and https are loaded, file only from a page
+that is a file itself."
+  (let ((case-fold-search t))
+    (and (stringp url)
+         (or (string-match-p "\\`https?:" url)
+             (and (string-match-p "\\`file:" url)
+                  (stringp page-url)
+                  (string-match-p "\\`file:" page-url))))))
+
+(defun ladybird--follow-link (url &optional new-buffer)
+  "Load URL, a link of the current page, in the page.
+With NEW-BUFFER it opens in a new page buffer.  A URL that
+`ladybird--link-url-p' does not accept is refused with a message."
+  (cond
+   ((not (ladybird--link-url-p url (ladybird--url)))
+    (message "ladybird: not opening %s" (ladybird--echo-line (format "%s" url))))
+   (new-buffer (ladybird--open url ladybird--host))
+   (t (ladybird--send-view "load" `(url . ,url)))))
+
+(defun ladybird--hint-choose (hint item)
+  "End the session HINT by activating ITEM.
+With HINT's prefix argument a link opens in a new buffer instead, as
+`ladybird--follow-link' allows; a text field gets the focus and
+`ladybird-insert-mode'."
+  (let* ((url (alist-get 'url item))
+         (kind (alist-get 'kind item))
+         (open (and (ladybird--hint-new-buffer hint) (equal kind "link")
+                    url (not (string-empty-p url))))
+         (buffer (ladybird--hint-buffer hint)))
+    (ladybird--hint-stop)
+    (ladybird--hint-send hint "hints_end"
+                         `(activate . ,(if open :null (alist-get 'index item))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (cond (open (ladybird--follow-link url t))
+              ((equal kind "input") (ladybird-insert-mode 1)))))))
+
+(defun ladybird--hint-add (char)
+  "Add CHAR to the label typed in the hint session in progress.
+Before the labels arrive it is kept; then a character that continues
+no label is refused, and one that completes a label activates its
+item."
+  (let* ((hint ladybird--hint)
+         (prefix (concat (ladybird--hint-prefix hint) (string char))))
+    (if (ladybird--hint-waiting hint)
+        (setf (ladybird--hint-prefix hint) prefix)
+      (let* ((remaining (ladybird--hint-remaining hint prefix))
+             (chosen (seq-find (lambda (item)
+                                 (equal (alist-get 'label item) prefix))
+                               remaining)))
+        (cond
+         ((null remaining) (ding))
+         (chosen (ladybird--hint-choose hint chosen))
+         (t (setf (ladybird--hint-prefix hint) prefix)
+            (ladybird--hint-send hint "hints_narrow" `(prefix . ,prefix))))))
+    (ladybird--hint-prompt)))
+
+(defun ladybird--hint-take-up (hint)
+  "Take up the characters typed in HINT before its labels arrived.
+This runs from a timer: a completed label is activated outside the
+process filter."
+  (when (and (eq ladybird--hint hint) (ladybird--hint-waiting hint))
+    (let ((typed (ladybird--hint-prefix hint)))
+      (setf (ladybird--hint-waiting hint) nil
+            (ladybird--hint-prefix hint) "")
+      (seq-doseq (char typed)
+        (when (eq ladybird--hint hint)
+          (ladybird--hint-add char)))
+      (ladybird--hint-prompt))))
+
+(defun ladybird-follow-hint (&optional new-buffer)
+  "Activate a link, a button or a field of the page by typing its label.
+The page labels what can be activated in its window with strings of
+the characters of `ladybird-hint-alphabet'.  Each character typed
+narrows the labels shown, and completing a label activates its
+element: a link or button is clicked, a text field gets the focus and
+`ladybird-insert-mode' turns on.  \\<ladybird-hint-map>\
+\\[ladybird-hint-delete-char] deletes the last character
+and \\[ladybird-hint-quit] ends the hints; a key that is not a character ends them
+and does what it does otherwise.
+
+With a prefix argument NEW-BUFFER a link opens in a new page buffer,
+if it is an http or https URL, or a file URL of a page that is a file."
+  (interactive "P" ladybird-mode)
+  (ladybird--check-view)
+  (unless (ladybird--hint-alphabet-p ladybird-hint-alphabet)
+    (user-error "`ladybird-hint-alphabet' needs 2 to 36 different characters \
+of a-z and 0-9"))
+  (unless (seq-contains-p (alist-get 'features
+                                     (ladybird--conn-server-info ladybird--conn))
+                          "hints")
+    (user-error "The server on %s does not offer hints"
+                (ladybird--conn-name ladybird--conn)))
+  (ladybird--hint-stop t)
+  (let* ((conn ladybird--conn)
+         (hint (ladybird--make-hint
+                :conn conn :view ladybird--view :buffer (current-buffer)
+                :id (cl-incf (ladybird--conn-next-request conn))
+                :alphabet ladybird-hint-alphabet
+                :new-buffer (and new-buffer t))))
+    (when (ladybird--hint-send hint "hints" `(alphabet . ,ladybird-hint-alphabet))
+      (add-to-list 'emulation-mode-map-alists 'ladybird--hint-map-alist)
+      (setq ladybird--hint hint
+            ladybird--last-buffer (current-buffer))
+      (add-hook 'pre-command-hook #'ladybird--hint-pre-command)
+      (add-hook 'minibuffer-setup-hook #'ladybird--hint-minibuffer)
+      (ladybird--hint-prompt))))
+
+(defun ladybird-hint-add-char ()
+  "Add the character typed to the label of `ladybird-follow-hint'.
+A character that continues no label is refused."
+  (interactive nil ladybird-mode)
+  (when (ladybird--hint-here-p)
+    (ladybird--hint-add (downcase last-command-event))))
+
+(defun ladybird-hint-delete-char ()
+  "Delete the last character typed of the label of `ladybird-follow-hint'."
+  (interactive nil ladybird-mode)
+  (when (ladybird--hint-here-p)
+    (let* ((hint ladybird--hint)
+           (prefix (ladybird--hint-prefix hint)))
+      (if (string-empty-p prefix)
+          (ding)
+        (setq prefix (substring prefix 0 -1))
+        (setf (ladybird--hint-prefix hint) prefix)
+        (unless (ladybird--hint-waiting hint)
+          (ladybird--hint-send hint "hints_narrow" `(prefix . ,prefix))))
+      (ladybird--hint-prompt))))
+
+(defun ladybird-hint-quit ()
+  "End `ladybird-follow-hint' without activating anything."
+  (interactive nil ladybird-mode)
+  (ladybird--hint-stop t))
+
+(ladybird--defhandler "hints_cancelled" (conn msg)
+  "End the hint session the server on CONN ended; nothing is sent.
+A message for another session is ignored."
+  (when (ladybird--hint-of-p conn msg)
+    (ladybird--hint-stop)
+    (message "The page ended the hint session")))
+
+(ladybird--defhandler "hints_list" (conn msg)
+  "Take the labels a page on CONN shows for the hint session in progress.
+A list for another session is ignored; an empty one ends the session,
+and one that is unusable ends it with a `hints_end'.  The characters
+typed while the labels were awaited are taken up from a timer."
+  (let ((hint ladybird--hint)
+        (items (alist-get 'items msg)))
+    (when (and (ladybird--hint-of-p conn msg) (ladybird--hint-waiting hint)
+               (null (ladybird--hint-items hint)))
+      (cond
+       ((not (ladybird--hint-items-p items (ladybird--hint-alphabet hint)))
+        (ladybird--hint-stop t)
+        (message "ladybird: the page sent unusable hints"))
+       ((seq-empty-p items)
+        (ladybird--hint-stop)
+        (message "No hints in view"))
+       (t
+        (setf (ladybird--hint-items hint) (append items nil)
+              (ladybird--hint-truncated hint) (alist-get 'truncated msg))
+        (if (string-empty-p (ladybird--hint-prefix hint))
+            (progn (setf (ladybird--hint-waiting hint) nil)
+                   (ladybird--hint-prompt))
+          (run-at-time 0 nil #'ladybird--hint-take-up hint)))))))
+
+
 ;;; Page events
 
 (ladybird--defhandler "cursor" (conn msg)
@@ -1845,8 +2204,9 @@ another string than the one searched for is dropped."
         (put-text-property 1 2 'pointer ladybird--cursor)))))
 
 (defun ladybird--echo-free-p ()
-  "Return non-nil when the echo area may be used for a hover message."
-  (not (or (active-minibuffer-window) cursor-in-echo-area)))
+  "Return non-nil when the echo area may be used for a hover message.
+It is not while it shows a prompt."
+  (not (or (active-minibuffer-window) cursor-in-echo-area ladybird--hint)))
 
 (defun ladybird--echo-line (text)
   "Return TEXT cut to one line of the echo area.
@@ -1931,14 +2291,22 @@ A longer message would grow the echo area and with it resize the page."
 
 (ladybird--defhandler "error" (conn msg)
   "Report a command the server on CONN could not carry out.
+An error with the id of the hint session in progress ends the session;
+one with the id of a session that is over is ignored.
 An error that names neither a request nor a view, while a buffer waits
 for a view, is the answer to the oldest `create_view' of a server that
 does not name the request."
-  (if (and (ladybird--conn-creating conn) (null (alist-get 'view msg)))
-      (ladybird--create-failed conn (ladybird--pop-creating conn)
-                               (alist-get 'message msg))
+  (cond
+   ((ladybird--hint-of-p conn msg)
+    (ladybird--hint-stop)
     (message "ladybird: %s: %s" (ladybird--conn-name conn)
-             (alist-get 'message msg))))
+             (alist-get 'message msg)))
+   ((ladybird--hint-ended-p conn msg))
+   ((and (ladybird--conn-creating conn) (null (alist-get 'view msg)))
+    (ladybird--create-failed conn (ladybird--pop-creating conn)
+                             (alist-get 'message msg)))
+   (t (message "ladybird: %s: %s" (ladybird--conn-name conn)
+               (alist-get 'message msg)))))
 
 (ladybird--defhandler "popup_blocked" (conn msg)
   "Remember the window a page on CONN tried to open."
@@ -2227,8 +2595,8 @@ The functions run in the page's buffer."
         (edit (lambda (op) (lambda () (ladybird--send-view "edit" `(op . ,op))))))
     (append
      (when link
-       `(("Open Link" . ,(funcall load link))
-         ("Open Link in New Buffer" . ,(lambda () (ladybird--open link ladybird--host)))
+       `(("Open Link" . ,(lambda () (ladybird--follow-link link)))
+         ("Open Link in New Buffer" . ,(lambda () (ladybird--follow-link link t)))
          ("Copy Link" . ,(funcall copy link))))
      (when image
        `(("Open Image" . ,(funcall load image))

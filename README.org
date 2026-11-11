@@ -20,12 +20,13 @@ of [[file:plans/01-protocol.md][plans/01-protocol.md]], is under development on 
 The two are run together by the live test matrix (see Testing): a macOS server on this
 machine over standard input and output and over a Unix socket, with frames in shared
 memory, and a Linux server in a virtual machine over ssh and over an ssh-forwarded
-socket, with frames in the stream.  Not tested: TCP, Emacs on Linux, a server on a
-machine across a real network, and a device pixel ratio of 2.
+socket, with frames in the stream.  The matrix runs at a device pixel ratio of 1; a
+ratio of 2 is checked by hand on a Retina display.  Not tested: TCP, Emacs on Linux and
+a server on a machine across a real network.
 
 =tools/mock-server.py= stands in for the server in the tests: it draws a test gradient,
-marks mouse presses and typed keys, and answers the protocol's commands with canned
-data.
+marks mouse presses and typed keys, draws hint labels, and answers the protocol's
+commands with canned data.
 
 The Ladybird server shows one page per server process.  A command that opens a second
 page on it (=c=, a second =M-x ladybird=, "Open Link in New Buffer",
@@ -185,6 +186,7 @@ The mouse and the wheel always act on the page.  Keys are Emacs commands:
 | =+=, ===, =-=, =0=             | zoom in, in, out, reset                         |
 | =C-s=, =C-r=                   | find in page                                    |
 | =M-s n=, =M-s p=               | next, previous match                            |
+| =o=, =C-c C-o=                 | activate a link, button or field by its label; =C-u= opens a link in a new buffer |
 | =i=, =RET=                     | =ladybird-insert-mode=: type into the page        |
 | =C-y=                          | paste the latest kill into the page             |
 | =M-w=                          | copy the page's selection                       |
@@ -200,8 +202,8 @@ In =ladybird-insert-mode= the keys that insert themselves, =RET=, =TAB=, =DEL= a
 cursor and function keys with any modifiers go to the page as they are.  Everything else
 keeps its Emacs meaning, in particular =C-x=, =C-c=, =M-x=, =C-h=, =C-u= and =C-g=;
 =<escape>= is the page's cancel key in a graphical frame.  =C-y= pastes, =M-w= copies the
-page's selection, and =C-c C-c= or a click on =:Insert= in the mode line leaves the mode.
-With an input method the characters it produces are sent.
+page's selection, =C-c C-o= activates a link, button or field by its label, and
+=C-c C-c= or a click on =:Insert= in the mode line leaves the mode.  With an input method the characters it produces are sent.
 
 The Emacs editing keys in =ladybird-insert-mode-forward-keys= edit the page's text field.
 A browser has other keys for what they do, and those differ between platforms, so each
@@ -229,6 +231,21 @@ string is typed and the minibuffer shows their number; =C-s= and =C-r= move to t
 and the previous match, =RET= leaves the matches highlighted, =C-g= ends the search.
 Ladybird turns the match the search ended on into the page's selection.
 
+=o= follows a link from the keyboard.  The page puts a label made of the characters of
+=ladybird-hint-alphabet= on every link, button and field in the window, and typing a
+label activates its element: a link or a button is clicked, a field gets the focus and
+=ladybird-insert-mode= turns on.  Each character narrows the labels the page shows; the
+echo area shows what has been typed, how many labels are left and, for the last one,
+its text or URL.  A character that continues no label is refused with a beep, =DEL=
+takes the last one back, and =C-g= or =<escape>= (in a graphical frame; in a terminal
+=ESC= starts a Meta key) ends without a choice.  Any other key, a click or the wheel
+ends the hints too and then does what it does otherwise; moving the mouse does not.
+With =C-u o= a link opens in a new buffer, if it is an http or https URL, or a file URL
+on a page that is a file itself; another one is refused with a message.  Characters
+typed before the labels arrive count.  When the page ends the hints (it navigates, crashes or does not answer in time)
+or the server refuses them, they end here too, with a message.  It needs a server whose
+welcome lists the =hints= feature.
+
 What a page asks comes to the minibuffer: alerts (in the echo area; =ladybird-alert-style=
 makes them wait for a key), confirmations, prompts, the choices of a select element,
 files, colours, dates, permissions and URLs for other programs.  =C-g= declines, and so
@@ -242,7 +259,7 @@ keys typed before the question appeared are discarded.  =open here= hands the UR
 only.
 
 A right click pops up a menu for the link, image, selection or text field under the
-pointer.
+pointer.  Its "Open Link" and "Open Link in New Buffer" load the same URLs as =C-u o=.
 
 The header line shows the page's URL first, at least its scheme and host, then the
 title in the room that is left.
@@ -262,8 +279,7 @@ With =ladybird-device-pixel-ratio= set to nil the ratio is the frame's scale fac
 device pixel.  On macOS that needs an Emacs built with
 =plans/emacs-canvas-ns-transform.patch=, which makes the NS port keep the transform.
 For Homebrew's emacs-plus the patch is registered in =~/.config/emacs-plus/build.yml=
-under the name =canvas-ns-transform=.  The patch and this setting have not been tested
-yet.
+under the name =canvas-ns-transform=.
 
 Elsewhere the default is nil.
 
@@ -289,6 +305,7 @@ Elsewhere the default is nil.
 | =ladybird-scroll-step=              | nil                | pixels per line scroll; nil is three text lines   |
 | =ladybird-insert-mode-forward-keys= | see above          | Emacs editing keys that edit the page's text field |
 | =ladybird-keep-view-on-kill=        | nil                | leave the page open when its buffer is killed     |
+| =ladybird-hint-alphabet=            | ="asdfghjkl"=      | characters of the labels of =o=; 2 to 36 of a-z and 0-9 |
 | =ladybird-reconnect=                | t                  | nil, t or =always=                                |
 | =ladybird-keepalive-interval=       | 30                 | idle seconds before a ping                        |
 | =ladybird-ping-timeout=             | 10                 | seconds to wait for its answer                    |

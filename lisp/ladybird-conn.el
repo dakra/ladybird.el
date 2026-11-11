@@ -134,6 +134,7 @@ server that exited is started again too."
   (ping-id 0) ping-timer
   (last-read 0.0)
   shm-failed                     ; non-nil once `shm_failed' was sent
+  hints-ended                    ; (VIEW . ID) of the hint sessions that ended last
   stderr-start                   ; where the server's standard error begins
   input queue draining)          ; chunks not yet fed, events not yet handled
 
