@@ -244,7 +244,9 @@ def zstd_compress(data, level=1):
     """Compress DATA into one zstd frame that states its content size."""
     if _zstd is not None:
         return _zstd.compress(data, level=level)
-    return subprocess.run(["zstd", f"-{level}", "-q", "-c", "--no-check"],
+    # Reading a pipe, zstd writes the content size only when told it.
+    return subprocess.run(["zstd", f"-{level}", "-q", "-c", "--no-check",
+                           f"--stream-size={len(data)}"],
                           input=data, stdout=subprocess.PIPE, check=True).stdout
 
 

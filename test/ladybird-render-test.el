@@ -1403,6 +1403,7 @@ prompts, newest first."
         (ladybird-test-receive conn '((type . "tooltip") (view . 1) (text)))))))
 
 (ert-deftest ladybird-render-test-favicon ()
+  (skip-unless (image-type-available-p 'png))
   (ladybird-render-test-with-view
     (ladybird-test-receive
      conn `((type . "favicon") (view . 1)

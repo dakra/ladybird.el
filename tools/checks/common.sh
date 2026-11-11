@@ -9,7 +9,7 @@ SERVER="$LADYBIRD --headless=emacs --emacs-log=$WORK/stdio-server.log"
 SERVER_PIDS=()
 
 cleanup() {
-    for pid in "${SERVER_PIDS[@]}"; do
+    for pid in ${SERVER_PIDS[@]+"${SERVER_PIDS[@]}"}; do
         kill "$pid" 2>/dev/null
         wait "$pid" 2>/dev/null
     done

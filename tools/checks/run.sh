@@ -31,7 +31,7 @@ mock_check() {
         local client_options=()
         [ "$options" = "--shm" ] && client_options=(--shm)
         if ! "${CLIENT[@]}" --server "python3 -I $mock --stdio --fps 0 $options" --strict \
-            --url mock://page --viewport 320x240@1 --verify-formula 0 "${client_options[@]}"; then
+            --url mock://page --viewport 320x240@1 --verify-formula 0 ${client_options[@]+"${client_options[@]}"}; then
             FAILED+=("mock $options")
             return
         fi

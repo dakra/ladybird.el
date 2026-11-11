@@ -9,6 +9,9 @@
 (require 'ert)
 (require 'ladybird-keys)
 
+;; An Emacs without a window system does not preload mwheel.
+(defvar mouse-wheel-flip-direction)
+
 (ert-deftest ladybird-keys-test-letters ()
   (should (equal (ladybird-keys-event ?a) '("A" 97 0)))
   (should (equal (ladybird-keys-event ?A) '("A" 65 1)))
