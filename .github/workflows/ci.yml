@@ -1,0 +1,326 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  ZIG_VERSION: 0.17.1
+  # purcell/nix-emacs-ci revision; its emacs-snapshot is Emacs 32.0.50
+  # at EMACS_REF, built without a window system.
+  NIX_EMACS_CI_REF: d8866da84b2167ebaad24765cd899e42cbc44c13
+  # emacs-mirror commit of the Emacs with a window system that the
+  # native job uses: built from source on Linux, the nightly build
+  # EMACS_MACOS_BUILD of jimeh/emacs-builds on macOS.
+  EMACS_REF: 79c4a9b7ba55c068fe4b9f1a2436560dfff3bc84
+  EMACS_MACOS_BUILD: Emacs.2026-10-31.79c4a9b.master
+  EMACS_MACOS_SHA256: 61cd296a72b283b7b97d634066dae9b6a16c5a1690606bdb6ead87e9a3f9df74
+
+jobs:
+  zig:
+    name: Zig (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26.3 for Zig ${{ env.ZIG_VERSION }}
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_26.3.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Check formatting
+        run: zig fmt --check build.zig src
+
+      # Generates the stream fixtures first; the tests embed them.
+      - name: Run the Zig unit tests
+        run: make test-zig
+
+  module:
+    name: Module (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            platform: aarch64-macos
+            target: aarch64-macos
+            suffix: .dylib
+          - os: macos-26
+            platform: x86_64-macos
+            target: x86_64-macos
+            suffix: .dylib
+          - os: ubuntu-latest
+            platform: x86_64-linux
+            target: x86_64-linux-gnu.2.35
+            suffix: .so
+          - os: ubuntu-latest
+            platform: aarch64-linux
+            target: aarch64-linux-gnu.2.35
+            suffix: .so
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26.3 for Zig ${{ env.ZIG_VERSION }}
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_26.3.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ${{ matrix.platform }}
+
+      # ReleaseFast for the baseline CPU of the target.  An explicit
+      # target also keeps the build host's OS version out of the module.
+      - name: Build the module
+        env:
+          TARGET: ${{ matrix.target }}
+        run: make build ZIG_TARGET_FLAG="-Dtarget=$TARGET"
+
+      - name: Upload the module and its version file
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ladybird-module-${{ matrix.platform }}
+          path: |
+            ladybird-module${{ matrix.suffix }}
+            ladybird-module.version
+          if-no-files-found: error
+
+  python:
+    name: Python ${{ matrix.python }} (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 3.11 is the oldest supported Python and compresses with the
+          # zstd program; from 3.14 on the tools use compression.zstd.
+          - os: ubuntu-latest
+            python: '3.11'
+          - os: ubuntu-latest
+            python: '3.14'
+          - os: macos-26
+            python: '3.14'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Without zstd the self-tests and the client leave the encoding out.
+      - name: Check that the tools can compress with zstd
+        run: |
+          python3 -I -c '
+          import sys
+          sys.path.insert(0, "tools")
+          import ladybird_protocol
+          sys.exit(None if ladybird_protocol.zstd_available() else "zstd is not available")'
+
+      - name: Run the self-tests of the protocol module and the mock server
+        run: make selftest-mock
+
+      - name: Generate the stream fixtures
+        run: make fixtures
+
+      # The reference client checks every frame of the mock server, once
+      # with raw, zstd and shared memory frames.
+      - name: Run the reference client against the mock server
+        run: tools/checks/run.sh mock
+
+  elisp:
+    name: Emacs Lisp
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          github_access_token: ${{ github.token }}
+
+      # This Emacs has no window system, so no canvas images: enough for
+      # the checks below, which run the package with the fake module.
+      - name: Install Emacs 32
+        id: emacs
+        run: |
+          nix profile install --accept-flake-config \
+            "github:purcell/nix-emacs-ci?rev=${NIX_EMACS_CI_REF}#emacs-snapshot"
+          emacs --batch -Q --eval '
+            (progn
+              (message "Emacs %s" emacs-version)
+              (when (< emacs-major-version 32)
+                (message "::error::ladybird needs Emacs 32")
+                (kill-emacs 1)))'
+
+      - name: Byte-compile with warnings as errors
+        run: make byte-compile
+
+      - name: Run checkdoc
+        if: ${{ !cancelled() && steps.emacs.outcome == 'success' }}
+        run: make checkdoc
+
+      - name: Run package-lint
+        if: ${{ !cancelled() && steps.emacs.outcome == 'success' }}
+        run: make package-lint
+
+      - name: Run the ERT tests with the fake module
+        if: ${{ !cancelled() && steps.emacs.outcome == 'success' }}
+        run: make test-elisp
+
+      - name: Run the ERT tests against the mock server
+        if: ${{ !cancelled() && steps.emacs.outcome == 'success' }}
+        run: make test-mock
+
+  native:
+    name: Native module in Emacs (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26.3 for Zig ${{ env.ZIG_VERSION }}
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_26.3.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: native
+
+      # Linux: Emacs built from source with X, kept in the cache.
+
+      - name: Install what the Emacs build and its result need
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf texinfo pkg-config \
+            libncurses-dev libx11-dev libpng-dev zlib1g-dev
+
+      # The build links to the libraries of the runner image.
+      - name: Name the runner image for the cache key
+        if: runner.os == 'Linux'
+        id: image
+        run: |
+          . /etc/os-release
+          echo "id=$ID-$VERSION_ID-$(uname -m)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Emacs build
+        if: runner.os == 'Linux'
+        id: emacs-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/emacs
+          key: emacs-${{ steps.image.outputs.id }}-${{ env.EMACS_REF }}-${{ hashFiles('.github/scripts/build-emacs.sh') }}
+
+      - name: Build Emacs
+        if: runner.os == 'Linux' && steps.emacs-cache.outputs.cache-hit != 'true'
+        run: .github/scripts/build-emacs.sh "$HOME/emacs"
+
+      - name: Save the Emacs build
+        if: runner.os == 'Linux' && steps.emacs-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/emacs
+          key: ${{ steps.emacs-cache.outputs.cache-primary-key }}
+
+      - name: Use the Emacs build
+        if: runner.os == 'Linux'
+        run: echo "EMACS=$HOME/emacs/bin/emacs" >> "$GITHUB_ENV"
+
+      # macOS: a nightly build, run from its disk image.  It compiles
+      # Lisp natively, and a test that redefines a primitive would have
+      # it compile a trampoline, which needs a compiler driver for its
+      # libgccjit.  The tests load the package as source, where the
+      # redefinitions take effect without a trampoline.
+
+      - name: Download Emacs
+        if: runner.os == 'macOS'
+        run: |
+          dmg="$RUNNER_TEMP/emacs.dmg"
+          curl -fsSL --retry 3 -o "$dmg" \
+            "https://github.com/jimeh/emacs-builds/releases/download/$EMACS_MACOS_BUILD/$EMACS_MACOS_BUILD.macOS-11.arm64.dmg"
+          echo "$EMACS_MACOS_SHA256  $dmg" | shasum -a 256 -c -
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/emacs" "$dmg"
+          {
+            echo "EMACS=$RUNNER_TEMP/emacs/Emacs.app/Contents/MacOS/Emacs"
+            echo "EMACSFLAGS=--eval '(setq native-comp-enable-subr-trampolines nil)'"
+          } >> "$GITHUB_ENV"
+
+      # The tests below need the canvas image type; an Emacs without it
+      # would fail each of them with a less clear message.
+      - name: Check that Emacs has canvas images
+        run: |
+          "$EMACS" --batch -Q --eval '
+            (progn
+              (message "Emacs %s (%s)" emacs-version system-configuration-features)
+              (unless (and (>= emacs-major-version 32)
+                           (image-type-available-p (quote canvas)))
+                (message "::error::this Emacs has no canvas images")
+                (kill-emacs 1)))'
+
+      # The Makefile reads EMACS and EMACSFLAGS from the environment.
+
+      - name: Run the ERT tests of the module
+        run: make test-native
+
+      - name: Run the ERT tests against the mock server with the module
+        if: ${{ !cancelled() }}
+        run: make test-mock-native
+
+      # Once more on an Emacs with a window system, where the tests that
+      # need images are not skipped.
+      - name: Run the ERT tests with the fake module
+        if: ${{ !cancelled() }}
+        run: make test-elisp
+
+      - name: Run the ERT tests against the mock server with the fake module
+        if: ${{ !cancelled() }}
+        run: make test-mock
