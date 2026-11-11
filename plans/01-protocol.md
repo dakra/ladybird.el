@@ -76,6 +76,7 @@ Server answers:
  "encoding":"zstd","shm":true,
  "log":"/tmp/ladybird-emacs-12345.log",
  "host":{"hostname":"devbox","platform":"linux"},
+ "features":["hints"],
  "views":[{"view":1,"url":"https://…","title":"…","loading":false,
            "can_go_back":true,"can_go_forward":false,"zoom":1.0,
            "width":1600,"height":1000,"dpr":2.0}]}
@@ -83,8 +84,9 @@ Server answers:
 
 `encoding` is the one the server will use; `shm` is `true` when both sides agreed to
 use shared memory (the segment itself is announced with `shm` messages, §4.3). `log` is
-the server's log file on its machine. If `views` is empty the client sends
-`create_view`. On a protocol mismatch the server sends `{"type":"reject","reason":"…"}`
+the server's log file on its machine. `features` names the optional parts of the
+protocol the server implements (`"hints"`, §6.1); a server without any may leave it
+out. If `views` is empty the client sends `create_view`. On a protocol mismatch the server sends `{"type":"reject","reason":"…"}`
 and closes.
 
 After `welcome` the server sends, for every view, a `state` and, as soon as the
@@ -297,6 +299,67 @@ Commands are not ordered after input events still on their way to the page: a
 `request_source` is **v2**: Ladybird's `get_source()` opens a view-source tab, which a
 headless view cannot show. v2 will define it as serialized DOM or page text.
 
+### 6.1 Hints
+
+Hints let the user activate an element of the page from the keyboard: the server puts a
+short label on every element in the viewport that can be activated, the user types a
+label, and the server activates that element. A server that implements them lists
+`"hints"` in `welcome.features` (§2).
+
+| Client → server | Fields | Meaning |
+| --- | --- | --- |
+| `hints` | `view`, `id`, `alphabet` | Label the elements and answer `hints_list`. `id` is a non-negative integer below 2^53 chosen by the client; it names this hint session. `alphabet` is 2 to 36 distinct characters of `a`–`z` and `0`–`9`; labels are made of them. A view has one hint session; a new `hints` ends the one before it without a message |
+| `hints_narrow` | `view`, `id`, `prefix` | Show only the labels that start with `prefix` (the empty string shows all). `prefix` is a string of characters of the session's alphabet, no longer than its labels |
+| `hints_end` | `view`, `id`, `activate` (an item's `index`, or null) | Remove the labels. With `activate` the server then moves the focus to the element and, unless it is a text field, clicks it |
+
+| Server → client | Fields | Meaning |
+| --- | --- | --- |
+| `hints_list` | `view`, `id`, `items`, `truncated` | `items` is an array of `{index, label, kind, text, url, x, y, width, height}` in document order. `kind` is `"link"`, `"button"`, `"input"` (what takes typed text: a `textarea`, an element with `contenteditable`, an `input` of a type with a text field) or `"other"`. `text` is the element's visible text or its accessible name, at most 200 characters. `url` is the absolute link target of a `"link"`, else null; it is also null for a target longer than 16 KiB. `x`, `y`, `width`, `height` are the element's rectangle relative to the viewport in CSS pixels, which the page's zoom and the device pixel ratio scale to canvas pixels. `truncated` is true when the page has more than 1000 such elements in the viewport; the rest have no label |
+| `hints_cancelled` | `view`, `id` | The hint session ended without `hints_end`: another document became active, WebContent crashed, the page closed its view (`hints_cancelled` comes before that `view_closed`), or the page did not answer in time or answered with something unusable. The labels are gone. It can arrive in place of `hints_list`. A `close_view` from the client ends the session with `view_closed` alone |
+
+Rules:
+
+- An element is listed when it can be activated (`a[href]`, `area[href]`, `button`,
+  `input` other than `type=hidden`, `select`, `textarea`, `summary`, `label`, an
+  element with `contenteditable`, an `onclick` attribute, a `tabindex` of 0 or more, or
+  a `role` of `button`, `link`, `tab`, `menuitem`, `checkbox`, `radio`, `switch` or
+  `option`), is not disabled, has a rectangle of at least 1×1 CSS pixels that
+  intersects the viewport, and is not hidden by `visibility` or `display`. Only the
+  top-level document is labelled, with what is in its open shadow roots; frames and
+  closed shadow roots are not. An `area` is not listed (Ladybird gives it no box).
+- Labels all have the same length, the shortest that gives every item its own label, so
+  no label is the prefix of another.
+- The labels are part of the page's frames: the client draws nothing. They stay where
+  they are in the document while the page scrolls, and elements that scroll into view
+  get no label.
+- `hints` with a bad `alphabet` or `id`, `hints_narrow` with a bad `prefix`, and
+  `hints_narrow` or `hints_end` with an `id` that is not the view's hint session, are
+  answered with `error` and change nothing. That `error` carries the `id` of the
+  message it answers, and no other `error` has an `id`, so the client can end a session
+  whose `hints` was refused. A `hints_narrow` or `hints_end` can cross a
+  `hints_cancelled` or an empty `hints_list`; the client ignores an `error` with the
+  `id` of a session it knows to be over. A `hints_end` whose `activate` is no item's index
+  removes the labels and activates nothing.
+- Before `hints_list` has been sent, a `hints_narrow` takes effect when the labels are
+  drawn, and a `hints_end` ends the session and activates nothing.
+- Activation is a mouse click at a point of the element that the page's hit test gives
+  to it, so the page sees a click of the user. An element that is covered everywhere
+  gets a click made by script instead, which a page does not treat as the user's: a
+  popup or a chooser may not open from it.
+- A page with nothing to label gets `hints_list` with empty `items`; the hint session
+  is over then and needs no `hints_end`.
+- A disconnecting or replaced client ends the hint session; a reconnecting client is
+  not told about it.
+- The script that finds the elements and draws the labels runs in the page, and the
+  page can interfere with it: it can see the labels, falsify every field of an item,
+  and draw a label on another element than the one the item's `index` stands for. The
+  client treats the items like any other strings from a page and uses them for display
+  only, except that it may load a `url` the user chose, under the rules it has for a
+  link the user clicked. The page can also move the click of an activation to any
+  point of the view, a frame of another site included. A page can do the same to a
+  click of the mouse by putting what it wants clicked under the pointer, so an
+  activation gives it no more than a mouse click in the page does.
+
 ## 7. Dialogs and pickers
 
 Every request has an `id` the client echoes. The server leaves the page blocked until
@@ -389,3 +452,5 @@ written against the draft; read their bodies with these corrections.
     `request_cancelled`; the server truncates over-long page strings, sends valid UTF-8
     only, answers out-of-range input numbers with `error`, refuses downloads with an
     `error`, and replaces a client only after the new connection's `hello`.
+17. Hints (§6.1): `hints`, `hints_narrow`, `hints_end`, `hints_list`, `hints_cancelled`,
+    `welcome.features`, and `id` in an `error` that answers a hints message.
