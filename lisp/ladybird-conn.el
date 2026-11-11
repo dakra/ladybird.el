@@ -123,7 +123,7 @@ server that exited is started again too."
   (views (make-hash-table))      ; view id -> buffer
   creating                       ; (BUFFER . REQUEST) awaiting a view, oldest first
   closing                        ; ids of views to close with the next welcome
-  view-limit                     ; number of views the server refused to exceed
+  kept                           ; (VIEW . STATE) of views left by killed buffers
   lingering                      ; timer that closes the connection left unused
   (pending (make-hash-table :test #'equal)) ; request id -> callback
   (next-request 0)
@@ -1034,6 +1034,15 @@ The process filter cannot leave the prompt it interrupts."
         (seq-remove (lambda (entry) (equal (car entry) key))
                     ladybird--queued-prompts))
   (run-at-time 0 nil #'ladybird--cancel-prompt key))
+
+(defun ladybird-conn-unload-function ()
+  "Close every connection and stop the keepalive, for `unload-feature'."
+  (mapc #'ladybird--disconnect ladybird--conns)
+  (when (timerp ladybird--keepalive-timer)
+    (cancel-timer ladybird--keepalive-timer))
+  (setq ladybird--keepalive-timer nil)
+  ;; Go on with the standard unloading.
+  nil)
 
 (provide 'ladybird-conn)
 

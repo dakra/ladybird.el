@@ -28,13 +28,17 @@ a server on a machine across a real network.
 marks mouse presses and typed keys, draws hint labels, and answers the protocol's
 commands with canned data.
 
-The Ladybird server shows one page per server process.  A command that opens a second
-page on it (=c=, a second =M-x ladybird=, "Open Link in New Buffer",
-=ladybird-open-blocked-popup=) loads the URL in the page there is and says so.  The
-package itself handles several pages per server, each in its own buffer, and the mock
-server serves them.
+A server holds several pages, each in its own buffer (see Several pages): 16 by
+default, or as many as =--emacs-max-views=N= says.  The live matrix tries them on the
+macOS server on this machine and the Linux server in the virtual machine, over all four
+connections (=live-pages=): two pages painting their own canvases, a cookie one sets and
+the other reads, a page in no window sending no frames and a full frame once it is shown
+again, where =ladybird-new-page-display= puts a new page, the limit, closing a page that
+is animating, and the pages a socket server kept coming back with =ladybird-connect=.  A
+server whose welcome names no number, or the number 1, holds one page: a command that
+opens a second page on it loads the URL in the page there is and says so.
 
-Not there yet: tabs and popups (a page that opens a window is reported, and
+Not there yet: popups (a page that opens a window is reported, and
 =ladybird-open-blocked-popup= opens it), view source, uploads from this machine (the file
 picker returns paths on the server's machine), downloads, bookmarks and profiles.
 
@@ -89,6 +93,9 @@ To open links from other packages in ladybird:
 =ladybird-browse-url= loads the URL in the page buffer used last, and opens a new one when
 there is none.
 
+=C-u C-c C-l= opens a URL in a new page buffer on the same server, and =C-c C-s= switches
+between page buffers by title and URL.
+
 * Hosts and transports
 
 =ladybird= starts =ladybird-program= as =PROGRAM --headless=emacs= and talks to it over its
@@ -113,12 +120,15 @@ label and one or more endpoints, tried in order:
 
 =M-x ladybird= opens on =ladybird-default-host=: the local server, a label, or =ask=.  With a
 prefix argument it asks.  =M-x ladybird-connect= connects without opening a page, gives
-every page the server has open a buffer and shows the first of them.
+every page the server has open a buffer and shows one of them: the page buffer used last
+if it is one, else the first; the echo area says how many there are.
 
 A server on standard input and output lives as long as its connection, so its pages end
 with Emacs or with the ssh session.  A server that listens on a socket keeps its pages:
 kill the buffers with =ladybird-keep-view-on-kill= set, or quit Emacs, and the next
-connection shows them again.  To reach such a server on another machine, forward its
+connection shows them again.  It also keeps running once its last page is closed, which
+the echo area says; it stops when it is stopped where it runs, for example with =C-c= in
+its terminal or by ending its process.  To reach such a server on another machine, forward its
 socket:
 
 #+begin_src sh
@@ -168,6 +178,50 @@ connection dropped when no answer comes within =ladybird-ping-timeout=.
 When a local or ssh server cannot be started or exits, the message has the last line it
 or ssh wrote to standard error; the buffer =" *ladybird-stderr*"= has all of it.
 
+* Several pages
+
+Every page is a buffer of its own.  =M-x ladybird=, =C-u C-c C-l=, =c= in command mode,
+=C-u C-c C-o= on a link, "Open Link in New Buffer" and =ladybird-open-blocked-popup= open a
+new page on the server of the current one (=M-x ladybird= on =ladybird-default-host=), with
+a view of its own on that server; the pages of a server share its cookies and storage.
+=ladybird-new-page-display= says where the new buffer appears: in the selected window
+(the default), in another window, or nowhere (=background=).  The buffer goes through
+=display-buffer=, so a rule of =display-buffer-alist= for =*ladybird:= buffers comes first.
+
+A server holds as many pages as its welcome's =max_views=: the Ladybird server 16, or N
+with =--emacs-max-views=N= (=ladybird-program-arguments= for a server the package starts).
+Once it has that many, a further page is refused with a message saying so, before the
+server is asked; the message counts the pages that buffers killed with
+=ladybird-keep-view-on-kill= left on the server.  =C-c C-s= and =M-x ladybird-connect= give
+those pages buffers again, with their current titles and URLs.  A server whose welcome
+names no number, or the number 1, holds one page, and a further page loads the URL in it.
+
+A page in no window is told it is hidden, and its server sends it no frames until a
+window shows it again; then it repaints in full.  Iconifying a frame or showing it
+again counts as hiding or showing its pages.  After a reconnect the pages that were
+shown before send a whole frame at once, the others when a window shows them; every page
+is told whether a window shows it as soon as the reconnecting command has shown its
+page.  =C-c C-s=
+(=ladybird-switch-to-page=) reads a page by any part of its title or URL, from every
+server; with several servers each is annotated with its host.
+
+There is no tab strip of its own.  Emacs's tab-line shows the page buffers of a window as
+tabs:
+
+#+begin_src emacs-lisp
+(add-hook 'ladybird-mode-hook #'tab-line-mode)
+(setq tab-line-tabs-function #'tab-line-tabs-mode-buffers)
+#+end_src
+
+With tab-bar, one tab per page: a page shown in a tab already selects that tab, any
+other gets a new one.
+
+#+begin_src emacs-lisp
+(add-to-list 'display-buffer-alist
+             '("\\`\\*ladybird: " (display-buffer-in-tab)
+               (reusable-frames . t)))
+#+end_src
+
 * Keys
 
 Keys go to the page, as in a terminal emulator: what inserts itself, =RET=, =TAB=, =DEL=,
@@ -195,6 +249,7 @@ The package's commands are under =C-c=:
 | =C-c C-b=, =C-c C-f=           | back, forward                                     |
 | =C-c C-r=                      | reload; with =C-u= without the cache              |
 | =C-c C-k=                      | stop loading                                      |
+| =C-c C-s=                      | switch to another page by its title or URL        |
 | =C-c C-w=                      | copy the page's URL                               |
 | =C-c C-t=                      | page console output on or off                     |
 | =C-c C-n=, =C-c C-p=           | focus the next, the previous link or field (=TAB=, =S-TAB=) |
@@ -348,6 +403,7 @@ Elsewhere the default is nil.
 | =ladybird-emacs-keys=               | =<f1>= =<f3>= =<f4>= =<f10>= =<f11>= | keys that keep their Emacs meaning |
 | =ladybird-initial-mode=             | =page=             | =page= or =command=: where a new buffer's keys go |
 | =ladybird-keep-view-on-kill=        | nil                | leave the page open when its buffer is killed     |
+| =ladybird-new-page-display=         | =selected-window=  | where a new page appears: =selected-window=, =other-window=, =background= |
 | =ladybird-hint-alphabet=            | ="asdfghjkl"=      | characters of the labels of =C-c C-o=; 2 to 36 of a-z and 0-9 |
 | =ladybird-reconnect=                | t                  | nil, t or =always=                                |
 | =ladybird-keepalive-interval=       | 30                 | idle seconds before a ping                        |

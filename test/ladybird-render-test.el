@@ -432,7 +432,11 @@ the canvas."
         (should (integerp (alist-get 'width create)))
         (should (= (alist-get 'dpr create) 1.0)))
       (should (= (length (ladybird-test-sent "create_view")) 1))
-      ;; An undisplayed view is reported hidden.
+      ;; Every view is told its visibility from a timer the welcome set,
+      ;; an undisplayed one that it is hidden.
+      (should-not (ladybird-test-sent "set_visibility"))
+      (should (timerp ladybird--update-timer))
+      (ladybird--update)
       (should (equal (ladybird-test-sent "set_visibility")
                      '(((type . "set_visibility") (view . 7) (visible)))))
       (ladybird-test-receive conn '((type . "view_created") (view . 8)
@@ -2794,57 +2798,61 @@ ID defaults to the last one sent, ITEMS to the test items."
                            #'<)
                      '(1 8 9))))))
 
+(defun ladybird-render-test-one-page-server (conn)
+  "Make CONN's server one that holds one page, as one without `max_views'."
+  (setf (ladybird--conn-server-info conn)
+        (assq-delete-all 'max_views (copy-alist (ladybird--conn-server-info conn)))))
+
+(defun ladybird-render-test-max-views (conn max)
+  "Make CONN's server one that holds MAX pages."
+  (ladybird-render-test-one-page-server conn)
+  (push (cons 'max_views max) (ladybird--conn-server-info conn)))
+
 (ert-deftest ladybird-render-test-create-refused ()
-  ;; A server that shows one page answers a second `create_view' with an
-  ;; error: the placeholder goes, the URL loads in the page there is, and
-  ;; the next page is not even asked for.
+  ;; A server whose welcome has no `max_views' holds one page: a further
+  ;; page is not asked for and its URL loads in the page there is.
   (ladybird-render-test-with-view
-    (save-window-excursion
+    (let ((ladybird-program "ladybird-no-such-program")
+          (ladybird-hosts '(("test" . "/nonexistent/ladybird")))
+          (ladybird-default-host nil))
+     (save-window-excursion
       (set-window-buffer (selected-window) buffer)
       (setq ladybird--last-buffer buffer)
-      (let* ((ladybird-program "ladybird-no-such-program")
-             (ladybird-hosts '(("test" . "/nonexistent/ladybird")))
-             (ladybird-default-host nil)
-             (second (ladybird-new-buffer))
-             (request (alist-get 'request (car (ladybird-test-sent "create_view"))))
-             (messages (ladybird-render-test-messages
-                         (ladybird-test-receive
-                          conn `((type . "error") (request . ,request)
-                                 (message . "only one view is supported"))))))
-        (should (eq (window-buffer) buffer))
-        (should-not (buffer-live-p second))
-        (should (equal (car (ladybird-test-sent "load"))
-                       '((type . "load") (view . 1) (url . "mock://one"))))
+      (ladybird-render-test-one-page-server conn)
+      (should (= (ladybird--max-views conn) 1))
+      (let ((messages (ladybird-render-test-messages
+                        (should (eq (ladybird-new-buffer) buffer)))))
         (should (equal messages
-                       '("ladybird: test opens no further page; mock://one \
-loaded in *ladybird: mock://one*")))
-        (should (= (ladybird--conn-view-limit conn) 1))
-        (should-not (ladybird--conn-creating conn))
-        (should (ladybird--ready-p conn))
-        ;; From now on a further page loads in this one.
-        (set-buffer buffer)
-        (setq ladybird-test-sent nil
-              ladybird--blocked-popup "mock://popped")
-        (should (eq (ladybird-open-blocked-popup) buffer))
-        (should (eq (ladybird "mock://again" ladybird-test-host) buffer))
-        (should (eq (ladybird-browse-url "mock://third" t) buffer))
-        (should-not (ladybird-test-sent "create_view"))
-        (should (equal (mapcar (lambda (m) (alist-get 'url m))
-                               (ladybird-test-sent "load"))
-                       '("mock://popped" "mock://again" "mock://third")))
-        (should (= (length (ladybird--buffers)) 1))
-        ;; Another server process may show more.
-        (ladybird--drop conn)
-        (ladybird-test-run-timer (ladybird--conn-timer conn))
+                       '("ladybird: test holds one page; mock://one loaded in \
+*ladybird: mock://one*"))))
+      (setq ladybird-test-sent nil
+            ladybird--blocked-popup "mock://popped")
+      (should (eq (ladybird-open-blocked-popup) buffer))
+      (should (eq (ladybird "mock://again" ladybird-test-host) buffer))
+      (should (eq (ladybird-browse-url "mock://third" t) buffer))
+      (should-not (ladybird-test-sent "create_view"))
+      (should (equal (mapcar (lambda (m) (alist-get 'url m))
+                             (ladybird-test-sent "load"))
+                     '("mock://popped" "mock://again" "mock://third")))
+      (should (= (length (ladybird--buffers)) 1))
+      ;; A refusal of a server that holds one page loads the URL there too.
+      (let ((second (ladybird--make-view-buffer conn nil "mock://2")))
+        (with-current-buffer second (ladybird--create-view))
+        (set-window-buffer (selected-window) second)
         (ladybird-test-receive
-         conn `((log . "/tmp/other.log")
-                ,@(assq-delete-all 'log (ladybird-test-welcome)))))
-      (should-not (ladybird--conn-view-limit conn)))))
+         conn `((type . "error")
+                (request . ,(alist-get 'request (car (ladybird-test-sent "create_view"))))
+                (message . "only one view is supported")))
+        (should-not (buffer-live-p second))
+        (should (eq (window-buffer) buffer))
+        (should (equal (car (last (ladybird-test-sent "load")))
+                       '((type . "load") (view . 1) (url . "mock://2")))))))))
 
 (ert-deftest ladybird-render-test-create-refused-unnamed ()
   ;; A server that does not name the request: an error about no view
   ;; fails the buffer that has waited longest.
   (ladybird-render-test-with-view
+    (ladybird-render-test-one-page-server conn)
     (let ((two (ladybird--make-view-buffer conn nil "mock://2"))
           (three (ladybird--make-view-buffer conn nil "mock://3")))
       (with-current-buffer two (ladybird--create-view))
@@ -2863,7 +2871,479 @@ loaded in *ladybird: mock://one*")))
                      '((type . "load") (view . 1) (url . "mock://2"))))
       (ladybird-test-receive conn '((type . "view_created") (view . 5)))
       (should (= (buffer-local-value 'ladybird--view three) 5))
-      (should (= (hash-table-count (ladybird--conn-pending conn)) 0)))))
+      (should (= (hash-table-count (ladybird--conn-pending conn)) 0))
+      ;; A view a page opened answers no request.
+      (let ((four (ladybird--make-view-buffer conn nil "mock://4")))
+        (with-current-buffer four (ladybird--create-view))
+        (ladybird-test-receive conn '((type . "view_created") (view . 6)
+                                      (opener . 1)))
+        (should-not (buffer-local-value 'ladybird--view four))))))
+
+(ert-deftest ladybird-render-test-several-pages ()
+  ;; A server that holds several pages gets a view for each new page,
+  ;; until its `max_views'; then the command says so and asks for nothing.
+  (ladybird-render-test-with-view
+    (save-window-excursion
+      (ladybird-render-test-max-views conn 3)
+      (set-window-buffer (selected-window) buffer)
+      (let* ((second (ladybird-new-buffer))
+             (third (with-current-buffer second (ladybird-goto-url "mock://3" t))))
+        (should-not (memq buffer (list second third)))
+        (should (eq (window-buffer) third))
+        (should (equal (mapcar (lambda (m) (alist-get 'url m))
+                               (ladybird-test-sent "create_view"))
+                       '("mock://one" "mock://3")))
+        ;; Those still being made count.
+        (should (= (ladybird--view-count conn) 3))
+        (setq ladybird-test-sent nil)
+        (should (equal (cadr (should-error (ladybird "mock://4" ladybird-test-host)
+                                           :type 'user-error))
+                       "ladybird: test has 3 pages open, the most it holds; \
+close one first"))
+        (with-current-buffer third
+          (should-error (ladybird--follow-link "https://example.org/" t)
+                        :type 'user-error))
+        (should-not (ladybird-test-sent))
+        (should (= (length (ladybird--buffers conn)) 3))
+        ;; Each page gets its own view.
+        (dolist (page (list second third))
+          (ladybird-test-receive
+           conn `((type . "view_created")
+                  (request . ,(cdr (assq page (ladybird--conn-creating conn))))
+                  (view . ,(if (eq page second) 2 3)))))
+        (should (equal (mapcar (lambda (page) (buffer-local-value 'ladybird--view page))
+                               (list buffer second third))
+                       '(1 2 3)))
+        ;; Frames go to their own views.
+        (ladybird-test-receive conn (ladybird-test-frame 1 2 4 3 nil 1 t)
+                               (ladybird-test-frame 1 3 4 3 nil 2 t)
+                               (ladybird-test-frame 2 3 4 3 '(0 0 1 1) 3))
+        (should (equal (mapcar (lambda (page)
+                                 (with-current-buffer page
+                                   (list ladybird--frame-count ladybird--full-frame-count)))
+                               (list buffer second third))
+                       '((0 0) (1 1) (2 1))))
+        ;; A page closed makes room; one left on the server does not.
+        (let ((ladybird-keep-view-on-kill t))
+          (kill-buffer second))
+        (should (equal (mapcar #'car (ladybird--conn-kept conn)) '(2)))
+        (should-error (ladybird "mock://4" ladybird-test-host) :type 'user-error)
+        (kill-buffer third)
+        (should (ladybird--ready-p conn))
+        (should (equal (ladybird-test-sent "close_view")
+                       '(((type . "close_view") (view . 3)))))
+        (let ((fourth (ladybird "mock://4" ladybird-test-host)))
+          (should (buffer-live-p fourth))
+          ;; A refusal there is reported, and loads nothing elsewhere.
+          (setq ladybird-test-sent nil)
+          (should (equal (ladybird-render-test-messages
+                           (ladybird-test-receive
+                            conn `((type . "error")
+                                   (request . ,(cdr (assq fourth
+                                                          (ladybird--conn-creating conn))))
+                                   (message . "only 3 views are supported"))))
+                         '("ladybird: test opened no page: only 3 views are supported")))
+          (should-not (buffer-live-p fourth))
+          (should-not (ladybird-test-sent "load")))))))
+
+(ert-deftest ladybird-render-test-kept-pages ()
+  ;; Pages left on a connected server by killed buffers count against the
+  ;; limit, keep their state, can be got back, and go when the server
+  ;; closes them.
+  (ladybird-render-test-with-view
+    (save-window-excursion
+      (set-window-buffer (selected-window) buffer)
+      (ladybird-render-test-max-views conn 2)
+      (let ((second (ladybird--make-view-buffer conn 2 "mock://2")))
+        (with-current-buffer second
+          (ladybird--apply-state '((view . 2) (url . "mock://2") (title . "Two"))))
+        (let ((ladybird-keep-view-on-kill t))
+          (kill-buffer second)))
+      (should (equal (mapcar #'car (ladybird--conn-kept conn)) '(2)))
+      (should (equal (cadr (should-error (ladybird "mock://3" ladybird-test-host)
+                                         :type 'user-error))
+                     "ladybird: test has 2 pages open, the most it holds, 1 of them \
+left by killed buffers, which C-c C-s or M-x ladybird-connect shows again; close one first"))
+      ;; The server's state of the kept page is kept up to date.
+      (ladybird-test-receive conn '((type . "state") (view . 2) (url . "mock://2b")
+                                    (title . "Two later") (loading . :false)))
+      (should (equal (alist-get 'title (cdr (assq 2 (ladybird--conn-kept conn))))
+                     "Two later"))
+      ;; C-c C-s offers it and gives it a buffer again.
+      (should (equal (mapcar #'car (ladybird--page-candidates))
+                     '("mock://one" "Two later  mock://2b")))
+      (setq ladybird-test-sent nil)
+      (ladybird-switch-to-page (cdr (assoc "Two later  mock://2b" (ladybird--page-candidates))))
+      (let ((again (window-buffer)))
+        (should (eq (gethash 2 (ladybird--conn-views conn)) again))
+        (should (equal (buffer-name again) "*ladybird: Two later*"))
+        (should-not (ladybird--conn-kept conn))
+        ;; Shown, it is told it is visible, which brings its frame.
+        (ladybird--update)
+        (should (member '((type . "set_visibility") (view . 2) (visible . t))
+                        (ladybird-test-sent "set_visibility")))
+        (let ((ladybird-keep-view-on-kill t))
+          (kill-buffer again)))
+      ;; `ladybird-connect' on the open connection gives it a buffer too.
+      (ladybird-connect ladybird-test-host)
+      (should (gethash 2 (ladybird--conn-views conn)))
+      (should-not (ladybird--conn-kept conn))
+      ;; A kept page the server closes is forgotten.
+      (let ((ladybird-keep-view-on-kill t))
+        (kill-buffer (gethash 2 (ladybird--conn-views conn))))
+      (should (ladybird--conn-kept conn))
+      (ladybird-test-receive conn '((type . "view_closed") (view . 2) (reason . "closed")))
+      (should-not (ladybird--conn-kept conn))
+      (should (= (ladybird--view-count conn) 1)))))
+
+(ert-deftest ladybird-render-test-clean-page-strings ()
+  ;; Page strings lose control and bidi override characters wherever
+  ;; they are shown; a long title does not push the URL out of a candidate.
+  (ladybird-render-test-with-view
+    (let ((evil (concat "Pay‮" "lmth.exe‬" "\n\ttail\a⁦x⁩")))
+      (should (equal (ladybird--clean evil) "Paylmth.exe  tailx"))
+      (ladybird--apply-state `((url . "https://example.org/‮abc") (title . ,evil)))
+      (should (equal (buffer-name) "*ladybird: Paylmth.exe  tailx*"))
+      (should (string-match-p "https://example.org/abc — Paylmth.exe tailx"
+                              (substring-no-properties (ladybird--header-line))))
+      (should-not (string-match-p "[‮\n\a]" (ladybird--echo-line evil)))
+      (should (equal (ladybird--page-name conn `((origin . ,evil))) "Paylmth.exe  tailx"))
+      ;; Candidates: the title is cut, the URL kept, look-alikes numbered.
+      (let ((long (make-string 200 ?T))
+            (second (ladybird--make-view-buffer conn 2 "mock://2")))
+        (ladybird--apply-state `((url . "https://example.org/one") (title . ,long)))
+        (with-current-buffer second
+          (ladybird--apply-state `((url . "https://example.org/two") (title . ,long))))
+        (let ((names (mapcar #'car (ladybird--page-candidates))))
+          (should (= (length names) 2))
+          (dolist (name names)
+            (should (< (string-width name) 90)))
+          (should (seq-find (lambda (name) (string-suffix-p "https://example.org/one" name))
+                            names))
+          (should (seq-find (lambda (name) (string-suffix-p "https://example.org/two" name))
+                            names)))))))
+
+(ert-deftest ladybird-render-test-opener-closed ()
+  ;; A view a page opened is closed until such views are taken.
+  (ladybird-render-test-with-view
+    (ladybird-test-receive conn '((type . "view_created") (view . 4) (opener . 1)
+                                  (url . "about:blank")))
+    (should (equal (ladybird-test-sent "close_view")
+                   '(((type . "close_view") (view . 4)))))
+    (should-not (gethash 4 (ladybird--conn-views conn)))))
+
+(ert-deftest ladybird-render-test-one-page-background ()
+  ;; On a server that holds one page, a new page in the background loads
+  ;; in that page without showing it.
+  (ladybird-render-test-with-view
+    (save-window-excursion
+      (ladybird-render-test-one-page-server conn)
+      (with-temp-buffer
+        (set-window-buffer (selected-window) (current-buffer))
+        (let ((ladybird-new-page-display 'background))
+          (should (eq (ladybird "mock://bg" ladybird-test-host) buffer)))
+        (should (eq (window-buffer) (current-buffer)))
+        (should-not (get-buffer-window buffer t))
+        (should (equal (car (ladybird-test-sent "load"))
+                       '((type . "load") (view . 1) (url . "mock://bg"))))))))
+
+(ert-deftest ladybird-render-test-hint-refusal-message ()
+  ;; A label typed ahead that opens a page the server has no room for is
+  ;; refused with a message, not a timer error.
+  (ladybird-render-test-with-hints
+    (ladybird-render-test-max-views conn 2)
+    (puthash 9 (ladybird--make-view-buffer conn 9 "mock://9") (ladybird--conn-views conn))
+    (setq ladybird--state '((url . "https://example.org/")))
+    (ladybird-render-test-keys "C-u C-c C-o a a")
+    (ladybird-test-receive conn (ladybird-render-test-hints-list))
+    (let ((messages (ladybird-render-test-messages (ladybird-render-test-take-up))))
+      (should (member "ladybird: test has 2 pages open, the most it holds; close one first"
+                      messages)))))
+
+(ert-deftest ladybird-render-test-viewport-refused ()
+  ;; A server that refuses a viewport, as one over its area cap does,
+  ;; leaves the page as it was.
+  (ladybird-render-test-with-view
+    (ladybird-render-test-show)
+    (let ((canvas ladybird--canvas))
+      (should (equal (ladybird-render-test-messages
+                       (ladybird-test-receive conn '((type . "error") (view . 1)
+                                                     (message . "viewport area over the cap"))))
+                     '("ladybird: test: viewport area over the cap")))
+      (should (eq ladybird--canvas canvas))
+      (should (ladybird--ready-p conn))
+      (ladybird-test-receive conn (ladybird-test-frame 2 1 40 30 '(0 0 2 2) 1))
+      (should (= ladybird--frame-count 2)))))
+
+(ert-deftest ladybird-render-test-frame-visibility-events ()
+  ;; Iconifying a frame or showing it again schedules an update, and
+  ;; runs what the event ran before.
+  (ladybird-render-test-with-view
+    (let ((special-event-map (copy-keymap special-event-map))
+          (ladybird--special-events nil)
+          (ran nil))
+      (define-key special-event-map [iconify-frame] (lambda (_e) (interactive "e") (setq ran t)))
+      (ladybird--follow-frame-visibility)
+      (should (eq (lookup-key special-event-map [iconify-frame])
+                  #'ladybird--frame-visibility-changed))
+      (should (eq (lookup-key special-event-map [make-frame-visible])
+                  #'ladybird--frame-visibility-changed))
+      (setq ladybird--update-timer nil)
+      (ladybird--frame-visibility-changed (list 'iconify-frame (selected-frame)))
+      (should (timerp ladybird--update-timer))
+      (should ran))))
+
+(ert-deftest ladybird-render-test-unload ()
+  ;; `unload-feature' takes everything ladybird put outside its buffers.
+  (skip-unless (executable-find (expand-file-name invocation-name invocation-directory)))
+  (let* ((dir (file-name-directory (locate-library "ladybird")))
+         (test-dir (file-name-directory (locate-library "ladybird-fake-module")))
+         (output
+          (with-temp-buffer
+            (call-process
+             (expand-file-name invocation-name invocation-directory) nil t nil
+             "--batch" "-Q" "-L" dir "-L" test-dir
+             "--eval"
+             (prin1-to-string
+              '(progn
+                 (require 'ladybird-fake-module)
+                 (require 'ladybird)
+                 (with-current-buffer (get-buffer-create "page")
+                   (ladybird-mode))
+                 (setq ladybird--hint 'x)
+                 (add-to-list 'emulation-mode-map-alists 'ladybird--hint-map-alist)
+                 (setq ladybird--hint nil)
+                 (ladybird--schedule-update)
+                 (unload-feature 'ladybird t)
+                 (let ((left nil))
+                   (dolist (hook '(post-command-hook window-buffer-change-functions
+                                   delete-frame-functions pre-command-hook
+                                   minibuffer-setup-hook))
+                     (dolist (f (default-value hook))
+                       (when (and (symbolp f) (string-prefix-p "ladybird" (symbol-name f)))
+                         (push (list hook f) left))))
+                   (when (memq 'ladybird--hint-map-alist emulation-mode-map-alists)
+                     (push 'emulation left))
+                   (when (eq (lookup-key special-event-map [iconify-frame])
+                             'ladybird--frame-visibility-changed)
+                     (push 'special-event-map left))
+                   (dolist (timer timer-list)
+                     (when (and (symbolp (timer--function timer))
+                                (string-prefix-p "ladybird"
+                                                 (symbol-name (timer--function timer))))
+                       (push 'timer left)))
+                   (princ (format "LEFT %S" left))))))
+            (buffer-string))))
+    (should (string-match-p "LEFT nil" output))))
+
+(ert-deftest ladybird-render-test-new-page-display ()
+  ;; Where a new page appears.
+  (ladybird-render-test-with-view
+    (save-window-excursion
+      (delete-other-windows)
+      (set-window-buffer (selected-window) buffer)
+      (setq ladybird--last-buffer buffer)
+      (let ((ladybird-new-page-display 'selected-window)
+            (page (ladybird-new-buffer)))
+        (should (eq (window-buffer) page))
+        (should (eq ladybird--last-buffer page))
+        (should (= (length (window-list)) 1)))
+      (set-window-buffer (selected-window) buffer)
+      (let* ((ladybird-new-page-display 'other-window)
+             (page (ladybird-new-buffer)))
+        (should (eq (window-buffer) page))
+        (should (= (length (window-list)) 2))
+        (should (memq buffer (mapcar #'window-buffer (window-list)))))
+      (delete-other-windows)
+      (set-window-buffer (selected-window) buffer)
+      (setq ladybird--last-buffer buffer)
+      (let* ((ladybird-new-page-display 'background)
+             (messages nil)
+             (page nil))
+        (setq messages (ladybird-render-test-messages
+                         (setq page (ladybird-new-buffer))))
+        (should (buffer-live-p page))
+        (should (eq (window-buffer) buffer))
+        (should-not (get-buffer-window page t))
+        (should (eq ladybird--last-buffer buffer))
+        (should (equal messages
+                       (list (format "ladybird: %s opens in the background"
+                                     (buffer-name page)))))
+        ;; It still asked for a view, with the size of the selected window.
+        (should (equal (alist-get 'url (car (last (ladybird-test-sent "create_view"))))
+                       "mock://one")))
+      ;; A rule of `display-buffer-alist' comes first.
+      (let* ((ladybird-new-page-display 'selected-window)
+             (display-buffer-alist
+              '(("\\*ladybird" (display-buffer-pop-up-window)
+                 (inhibit-same-window . t))))
+             (page (ladybird-new-buffer)))
+        (should (get-buffer-window page))
+        (should (eq (window-buffer (frame-first-window)) buffer))))))
+
+(ert-deftest ladybird-render-test-visibility-per-page ()
+  ;; Each view hears whether a window shows its buffer.
+  (ladybird-render-test-with-view
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((second (ladybird--make-view-buffer conn 2 "mock://2"))
+            (visible (lambda ()
+                       (mapcar (lambda (m) (list (alist-get 'view m)
+                                                 (alist-get 'visible m)))
+                               (ladybird-test-sent "set_visibility")))))
+        (set-window-buffer (selected-window) buffer)
+        (setq ladybird-test-sent nil)
+        (ladybird--update)
+        (should (equal (sort (funcall visible) (lambda (a b) (< (car a) (car b))))
+                       '((1 t) (2 nil))))
+        ;; The global hook schedules an update when a window changes.
+        (should (memq #'ladybird--window-buffer-changed
+                      (default-value 'window-buffer-change-functions)))
+        (setq ladybird-test-sent nil)
+        (set-window-buffer (selected-window) second)
+        (ladybird--update)
+        (should (equal (sort (funcall visible) (lambda (a b) (< (car a) (car b))))
+                       '((1 nil) (2 t))))
+        ;; Two windows on one buffer: still one visible view, told once.
+        (setq ladybird-test-sent nil)
+        (set-window-buffer (split-window) second)
+        (ladybird--update)
+        (should-not (funcall visible))
+        ;; A buffer in no window at all is hidden; shown again, visible.
+        (with-temp-buffer
+          (dolist (window (window-list))
+            (set-window-buffer window (current-buffer)))
+          (ladybird--update)
+          (should (equal (funcall visible) '((2 nil)))))
+        (setq ladybird-test-sent nil)
+        (delete-other-windows)
+        (set-window-buffer (selected-window) buffer)
+        (ladybird--update)
+        (should (equal (funcall visible) '((1 t))))))))
+
+(ert-deftest ladybird-render-test-reattach-pages ()
+  ;; Connecting to a server with several pages gives each a buffer and
+  ;; shows the one used last, else the first.
+  (ladybird-test-with-env
+    (let ((ladybird--frame-function #'ladybird--on-frame)
+          (ladybird--welcome-function #'ladybird--on-welcome)
+          (ladybird--change-function #'ladybird--on-conn-change)
+          (ladybird--viewport-function #'ladybird--hello-viewport)
+          (ladybird-device-pixel-ratio 1.0)
+          (ladybird--last-buffer nil)
+          (ladybird--update-timer nil)
+          (views '(((view . 3) (url . "mock://c") (title . "C"))
+                   ((view . 1) (url . "mock://a") (title . "A"))
+                   ((view . 2) (url . "mock://b") (title . "B")))))
+      (unwind-protect
+          (save-window-excursion
+            (ladybird-connect ladybird-test-host)
+            (let* ((conn (car ladybird--conns))
+                   (messages (ladybird-render-test-messages
+                               (ladybird-test-receive conn (ladybird-test-welcome views)))))
+              (should (= (length (ladybird--buffers conn)) 3))
+              (should (equal (buffer-local-value 'ladybird--view (window-buffer)) 1))
+              ;; Each view is told its visibility once, the shown one visible.
+              (setq ladybird-test-sent nil)
+              (ladybird--update)
+              (should (equal (sort (mapcar (lambda (m) (list (alist-get 'view m)
+                                                             (alist-get 'visible m)))
+                                           (ladybird-test-sent "set_visibility"))
+                                   (lambda (a b) (< (car a) (car b))))
+                             '((1 t) (2 nil) (3 nil))))
+              (should (equal messages
+                             '("ladybird: 3 pages found on test"
+                               "ladybird: 3 pages on test; C-c C-s switches")))
+              ;; Each buffer has its page's state.
+              (should (equal (sort (mapcar (lambda (b) (buffer-local-value 'ladybird--state b))
+                                           (ladybird--buffers conn))
+                                   (lambda (a b) (< (alist-get 'view a) (alist-get 'view b))))
+                             (sort (copy-sequence views)
+                                   (lambda (a b) (< (alist-get 'view a) (alist-get 'view b))))))
+              ;; Again, with the page of view 2 used last.
+              (setq ladybird--last-buffer (gethash 2 (ladybird--conn-views conn)))
+              (ladybird--drop conn)
+              (ladybird-test-run-timer (ladybird--conn-timer conn))
+              (ladybird-connect ladybird-test-host)
+              (ladybird-test-receive conn (ladybird-test-welcome views))
+              (should (= (length (ladybird--buffers conn)) 3))
+              (should (equal (buffer-local-value 'ladybird--view (window-buffer)) 2))))
+        (when (timerp ladybird--update-timer)
+          (cancel-timer ladybird--update-timer))
+        (mapc #'kill-buffer (ladybird--buffers))))))
+
+(ert-deftest ladybird-render-test-last-page-on-socket ()
+  ;; The last page of a socket server closed: the server keeps running.
+  (ladybird-render-test-with-view
+    (cl-letf (((symbol-function 'process-type) (lambda (_) 'network)))
+      (let ((second (ladybird--make-view-buffer conn 2 "mock://2")))
+        (should-not (ladybird-render-test-messages (kill-buffer second)))
+        (should (ladybird--ready-p conn))
+        (should (equal (ladybird-render-test-messages
+                         (let ((ladybird-keep-view-on-kill t))
+                           (kill-buffer buffer)))
+                       '("ladybird: no page is open here on test; its server keeps \
+running with 1 page, which `ladybird-connect' shows again"))))))
+  (ladybird-render-test-with-view
+    (cl-letf (((symbol-function 'process-type) (lambda (_) 'network)))
+      (should (equal (ladybird-render-test-messages (kill-buffer buffer))
+                     '("ladybird: no page is open here on test; its server keeps \
+running until it is stopped where it runs"))))))
+
+(ert-deftest ladybird-render-test-switch-to-page ()
+  ;; C-c C-s reads a page by its title and URL.
+  (ladybird-render-test-with-view
+    (save-window-excursion
+      (set-window-buffer (selected-window) buffer)
+      (should (eq (key-binding (kbd "C-c C-s")) #'ladybird-switch-to-page))
+      (let ((second (ladybird--make-view-buffer conn 2 "mock://2"))
+            (third (ladybird--make-view-buffer conn 3 "mock://3"))
+            (asked nil))
+        (with-current-buffer second
+          (ladybird--apply-state '((url . "mock://2") (title . "Second"))))
+        (with-current-buffer third
+          (ladybird--apply-state '((url . "mock://3") (title . "Second"))))
+        (should (equal (mapcar #'car (ladybird--page-candidates))
+                       '("Second  mock://2" "Second  mock://3" "mock://one")))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt table &rest args)
+                     (setq asked (list prompt (all-completions "" table)
+                                       (completion-metadata-get
+                                        (funcall table "" nil 'metadata)
+                                        'annotation-function)
+                                       (nth 4 args)
+                                       (completion-metadata-get
+                                        (funcall table "" nil 'metadata)
+                                        'category)
+                                       ;; A part of a URL completes.
+                                       (completion-all-completions
+                                        "mock://3" table nil 8
+                                        (completion-metadata
+                                         "" table nil))))
+                     "Second  mock://3")))
+          (call-interactively #'ladybird-switch-to-page))
+        (should (eq (window-buffer) third))
+        (should (eq ladybird--last-buffer third))
+        (should (equal (take 2 asked)
+                       '("Page: " ("Second  mock://2" "Second  mock://3" "mock://one"))))
+        ;; One server: no host annotation; the default is the first.
+        (should-not (nth 2 asked))
+        (should (equal (nth 3 asked) "Second  mock://2"))
+        (should (eq (nth 4 asked) 'ladybird-page))
+        (should (member "Second  mock://3" (nth 5 asked)))
+        ;; Several servers: each page says its host.
+        (let* ((other (ladybird-test-connect '("elsewhere" (:kind unix :path "/x"))))
+               (page (ladybird--make-view-buffer other 1 "mock://far")))
+          (ignore page)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt table &rest _)
+                       (setq asked (funcall (completion-metadata-get
+                                             (funcall table "" nil 'metadata)
+                                             'annotation-function)
+                                            "mock://far"))
+                       "mock://far")))
+            (call-interactively #'ladybird-switch-to-page))
+          (should (equal asked "  [elsewhere]")))))))
 
 (ert-deftest ladybird-render-test-create-refused-first ()
   ;; The only buffer of a connection gets no view: it is killed with a
@@ -3293,7 +3773,8 @@ loaded in *ladybird: mock://one*")))
         (delete-file log)))))
 
 (ert-deftest ladybird-mock-test-single-view ()
-  ;; A server that shows one page: the second page loads in the first.
+  ;; A server whose welcome has no max_views shows one page: the second
+  ;; page loads in the first and is not asked for.
   :tags '(mock)
   (skip-unless (executable-find "python3"))
   (let* ((log (make-temp-file "ladybird-mock" nil ".log"))
@@ -3302,7 +3783,7 @@ loaded in *ladybird: mock://one*")))
          (ladybird--last-buffer nil)
          (ladybird-device-pixel-ratio 1.0)
          (inhibit-message t)
-         (host (ladybird-test-mock-host log "--max-views" "1"))
+         (host (ladybird-test-mock-host log "--no-max-views"))
          buffer)
     (save-window-excursion
       (unwind-protect
@@ -3312,29 +3793,186 @@ loaded in *ladybird: mock://one*")))
               (ladybird-test-wait conn (lambda ()
                                          (buffer-local-value 'ladybird--canvas
                                                              buffer)))
-              (let ((second (ladybird "mock://two" host)))
-                (should-not (eq second buffer))
-                (ladybird-test-wait conn (lambda () (not (buffer-live-p second))))
-                (should (eq (window-buffer) buffer))
-                (ladybird-test-wait
-                 conn (lambda ()
-                        (equal (alist-get 'url (buffer-local-value 'ladybird--state
-                                                                   buffer))
-                               "mock://two"))))
-              (should (= (ladybird--conn-view-limit conn) 1))
-              ;; The third page is not asked for.
-              (should (eq (ladybird "mock://three" host) buffer))
+              (should (= (ladybird--max-views conn) 1))
+              (should (eq (ladybird "mock://two" host) buffer))
               (ladybird-test-wait
                conn (lambda ()
                       (equal (alist-get 'url (buffer-local-value 'ladybird--state
                                                                  buffer))
-                             "mock://three")))
+                             "mock://two")))
               (should (= (length (seq-filter
                                   (lambda (m)
                                     (equal (alist-get 'type m) "create_view"))
                                   (ladybird-test-log log)))
-                         2))
+                         1))
               (should (= (length (ladybird--buffers)) 1))))
+        (mapc #'kill-buffer (ladybird--buffers))
+        (delete-file log)))))
+
+(ert-deftest ladybird-mock-test-several-pages ()
+  ;; Two pages on one server: each paints, a hidden one gets no frames
+  ;; while the other animates, and a full frame when it is shown again;
+  ;; the limit is the welcome's; the pages share the cookie.
+  :tags '(mock)
+  (skip-unless (executable-find "python3"))
+  (let* ((log (make-temp-file "ladybird-mock" nil ".log"))
+         (ladybird--conns nil)
+         (ladybird--keepalive-timer nil)
+         (ladybird--last-buffer nil)
+         (ladybird-device-pixel-ratio 1.0)
+         (ladybird-resize-delay 0.01)
+         (inhibit-message t)
+         (host (ladybird-test-mock-host log "--max-views" "2" "--fps" "20"))
+         (logged (lambda (type &rest fields)
+                   (seq-filter (lambda (m)
+                                 (and (equal (alist-get 'type m) type)
+                                      (cl-loop for (key value) on fields by #'cddr
+                                               always (equal (alist-get key m) value))))
+                               (ladybird-test-log log))))
+         one two)
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (delete-other-windows)
+            (setq one (ladybird "mock://cookie/set/xyz" host))
+            (let ((conn (buffer-local-value 'ladybird--conn one)))
+              (ladybird-test-wait conn (lambda () (buffer-local-value 'ladybird--canvas one)))
+              (should (= (ladybird--max-views conn) 2))
+              (setq two (ladybird "mock://cookie" host))
+              (should (eq (window-buffer) two))
+              (ladybird-test-wait conn (lambda () (buffer-local-value 'ladybird--canvas two)))
+              (should-not (= (buffer-local-value 'ladybird--view one)
+                             (buffer-local-value 'ladybird--view two)))
+              ;; The second page reads what the first set.
+              (should (equal (alist-get 'title (buffer-local-value 'ladybird--state two))
+                             "Mock: cookie=xyz"))
+              ;; The limit.
+              (should-error (ladybird "mock://three" host) :type 'user-error)
+              (should (= 2 (length (funcall logged "create_view"))))
+              ;; One is shown, the other is not: only the shown one animates.
+              ;; Batch Emacs does no redisplay, which runs the window hooks.
+              (ladybird--update)
+              (ladybird-test-wait conn (lambda ()
+                                         (funcall logged "set_visibility"
+                                                  'view (buffer-local-value 'ladybird--view one)
+                                                  'visible nil)))
+              ;; A frame the server sent before it read that may be unread.
+              (let ((until (+ (float-time) 0.5)))
+                (while (< (float-time) until)
+                  (accept-process-output (ladybird--conn-process conn) 0.05)))
+              (let ((hidden (buffer-local-value 'ladybird--frame-count one))
+                    (shown (buffer-local-value 'ladybird--frame-count two)))
+                (ladybird-test-wait conn (lambda ()
+                                           (> (buffer-local-value 'ladybird--frame-count two)
+                                              (+ shown 5))))
+                (should (= (buffer-local-value 'ladybird--frame-count one) hidden))
+                ;; Shown again it starts with a full frame.
+                (let ((full (buffer-local-value 'ladybird--full-frame-count one)))
+                  (set-window-buffer (selected-window) one)
+                  (ladybird--update)
+                  (ladybird-test-wait conn (lambda ()
+                                             (> (buffer-local-value 'ladybird--full-frame-count one)
+                                                full)))))
+              ;; Killing one page leaves the other working.
+              (kill-buffer two)
+              (ladybird-test-wait conn (lambda () (funcall logged "close_view")))
+              (should (ladybird--ready-p conn))
+              (let ((count (buffer-local-value 'ladybird--frame-count one)))
+                (ladybird-test-wait conn (lambda ()
+                                           (> (buffer-local-value 'ladybird--frame-count one)
+                                              (+ count 3)))))))
+        (mapc #'kill-buffer (ladybird--buffers))
+        (delete-file log)))))
+
+(ert-deftest ladybird-mock-test-interrupted-bands ()
+  ;; A page hidden or closed while its frame is in bands: the server drops
+  ;; the rest, the other page goes on, and shown again the page gets a
+  ;; whole frame, painted right.
+  :tags '(mock)
+  (skip-unless (executable-find "python3"))
+  (let* ((log (make-temp-file "ladybird-mock" nil ".log"))
+         (ladybird--conns nil)
+         (ladybird--keepalive-timer nil)
+         (ladybird--last-buffer nil)
+         (ladybird-device-pixel-ratio 1.0)
+         (inhibit-message t)
+         (host (ladybird-test-mock-host log "--band-rows" "8" "--band-pause" "0.3"))
+         (sent (lambda (view &rest fields)
+                 (seq-filter (lambda (m)
+                               (and (equal (alist-get 'type m) "_frame_sent")
+                                    (eql (alist-get 'view m) view)
+                                    (cl-loop for (key value) on fields by #'cddr
+                                             always (equal (alist-get key m) value))))
+                             (ladybird-test-log log))))
+         (dropped (lambda (why)
+                    (seq-filter (lambda (m) (and (equal (alist-get 'type m) "_bands_dropped")
+                                                 (equal (alist-get 'why m) why)))
+                                (ladybird-test-log log))))
+         (show (lambda (buffer)
+                 (set-window-buffer (selected-window) buffer)
+                 (ladybird--update)))
+         one two)
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (delete-other-windows)
+            (setq one (ladybird "mock://one" host))
+            (let* ((conn (buffer-local-value 'ladybird--conn one))
+                   (a (progn (ladybird-test-wait
+                              conn (lambda () (buffer-local-value 'ladybird--view one)))
+                             (buffer-local-value 'ladybird--view one))))
+              (ladybird-test-wait conn (lambda () (funcall sent a 'more nil)))
+              (setq two (ladybird "mock://two" host))
+              (ladybird--update)
+              (let ((b (progn (ladybird-test-wait
+                               conn (lambda () (buffer-local-value 'ladybird--view two)))
+                              (buffer-local-value 'ladybird--view two))))
+                (ladybird-test-wait conn (lambda () (funcall sent b 'more nil)))
+                ;; Shown again, the first page's whole frame starts; hidden
+                ;; after its first band, the rest is dropped.
+                (let ((before (length (funcall sent a 'full t))))
+                  (funcall show one)
+                  (ladybird-test-wait conn (lambda () (> (length (funcall sent a 'full t))
+                                                         before)))
+                  (funcall show two)
+                  (ladybird-test-wait conn (lambda () (funcall dropped "hidden"))))
+                ;; The second page is not held up.
+                (let ((count (length (funcall sent b))))
+                  (ladybird-test-wait conn (lambda () (> (length (funcall sent b 'more nil))
+                                                         1)))
+                  (should (> (length (funcall sent b)) count)))
+                ;; Shown again, the first page gets its whole frame, all bands.
+                (let ((full (buffer-local-value 'ladybird--full-frame-count one))
+                      (done (length (funcall sent a 'more nil))))
+                  (funcall show one)
+                  (ladybird-test-wait conn (lambda () (> (length (funcall sent a 'more nil))
+                                                         done)))
+                  (ladybird-test-wait conn (lambda ()
+                                             (> (buffer-local-value 'ladybird--full-frame-count one)
+                                                full)))
+                  (with-current-buffer one
+                    (let ((h (cdr ladybird--canvas-size))
+                          (w (car ladybird--canvas-size)))
+                      (ladybird-test-wait
+                       conn (lambda ()
+                              (= (ladybird-module-canvas-pixel ladybird--canvas 3 (1- h))
+                                 (ladybird-test-pixel 3 (1- h) 0 w h)))))))
+                ;; Closed after the first band of a whole frame: the rest is
+                ;; dropped and the other page goes on.
+                (funcall show two)
+                (ladybird-test-wait conn (lambda () (> (length (funcall sent b 'full t)) 1)))
+                (kill-buffer two)
+                (ladybird-test-wait conn (lambda () (funcall dropped "closed")))
+                (should (ladybird--ready-p conn))
+                (set-window-buffer (selected-window) one)
+                (ladybird--update)
+                (let ((count (buffer-local-value 'ladybird--frame-count one)))
+                  (ladybird--send conn `((type . "mouse") (view . ,a) (kind . "down")
+                                         (x . 5) (y . 5) (button . "left")
+                                         (buttons . ["left"]) (modifiers . 0) (clicks . 1)))
+                  (ladybird-test-wait conn (lambda ()
+                                             (> (buffer-local-value 'ladybird--frame-count one)
+                                                count)))))))
         (mapc #'kill-buffer (ladybird--buffers))
         (delete-file log)))))
 

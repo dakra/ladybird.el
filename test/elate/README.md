@@ -23,7 +23,8 @@ native module from the checkout and fall back to `test/ladybird-fake-module.el`.
 | `size` | stdio, tcp | viewport after window and frame changes, visibility, focus |
 | `ui` | stdio, unix | dialogs, pickers, permissions, withdrawn requests, a prompt that waits for the minibuffer, page events, find |
 | `reconnect` | unix, tcp | a lost connection, another server process, a second client, server exit |
-| `limit` | stdio | a server that shows one page: a second page (`c` in command mode) loads in the first |
+| `limit` | stdio | a server whose welcome names no `max_views` holds one page: a second page (`c` in command mode) loads in the first |
+| `pages` | unix | several pages on one server: a second buffer and view, the shared cookie, a hidden page without frames and a full frame when shown again, `C-c C-s`, a page opened in the background, the limit, killing one page, connecting again to the pages the server kept |
 | `hints` | stdio | following links by their labels (`C-c C-o`, `o` in command mode): narrowing, refusal, `DEL`, buttons, links, `C-u`, fields, `C-g`, `<escape>`, `ESC x` on the terminal, wheel and mouse movement, a session the server ends, before or after its labels, a page's question and an alert that waits for a key during the hints, no labels |
 | `mouse` | (graphical frame) | clicks, wheel and movement at canvas positions |
 
@@ -108,7 +109,7 @@ places, and `ladybird-live-color` reads a pixel through the module's test access
 | `live-find` | counting, stepping, case, the selection left by `C-g` |
 | `live-hints` | the list and its labels in the frames, cancelling, a button, a text field from command mode, a checkbox, a link |
 | `live-viewport` | split, frame resize, a growing minibuffer, visibility, focus |
-| `live-single` | a second page on a server that shows one |
+| `live-pages` | two pages on one server painting their own canvases, a cookie set in one and read in the other, `C-c C-s`, a hidden animated page sending no frames and a full frame when shown again, `ladybird-new-page-display` (`selected-window`, `other-window`, `background`), killing a page while it animates, the limit (the server started with `--emacs-max-views=3`), and the pages coming back with `ladybird-connect` (`socket`, `forward`) |
 | `live-events` | console, blocked popup, refused download, clipboard, screenshot |
 | `live-socket` | a kept page found again, a second client, a server restart (`socket`, `forward`) |
 

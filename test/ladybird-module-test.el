@@ -450,6 +450,62 @@
         (ladybird-module-feed session "")
         (should (= ladybird-test--refreshes 3))))))
 
+(ert-deftest ladybird-test-interrupted-bands ()
+  ;; A server that hides or closes a view in the middle of a banded frame
+  ;; sends no more bands of it: the bands that came wait unrefreshed, the
+  ;; other views go on, and the view's next frame, a full one, paints and
+  ;; refreshes it.
+  (ladybird-test--counting-refreshes
+    (ladybird-test-with-session session
+      (let ((one (ladybird-test-make-canvas 8 6))
+            (two (ladybird-test-make-canvas 8 6))
+            (three (ladybird-test-make-canvas 8 6)))
+        (ladybird-module-attach-canvas session 1 one)
+        (ladybird-module-attach-canvas session 2 two)
+        (ladybird-module-attach-canvas session 3 three)
+        (ladybird-module-feed session
+                              (concat (ladybird-test-frame-record :view 1 :width 8 :height 6
+                                                                :flags 1)
+                                      (ladybird-test-frame-record :view 2 :width 8 :height 6
+                                                                :flags 1)
+                                      (ladybird-test-frame-record :view 3 :width 8 :height 6
+                                                                :flags 1)))
+        (setq ladybird-test--refreshes 0)
+        ;; The first band of a full frame of view 1; the rest never comes.
+        (should (equal (ladybird-test-statuses
+                        (ladybird-module-feed
+                         session (ladybird-test-frame-record :seq 2 :view 1 :width 8
+                                                           :height 6 :h 2 :flags 3
+                                                           :seed 5)))
+                       '(painted)))
+        (should (= ladybird-test--refreshes 0))
+        ;; Another view's frame comes next and is refreshed at once.
+        (ladybird-module-feed session (ladybird-test-frame-record :seq 2 :view 2 :width 8
+                                                                :height 6 :flags 1 :seed 6))
+        (should (= ladybird-test--refreshes 1))
+        (should (equal (plist-get (ladybird-module-stats session) :dirty-views) '(1)))
+        (should (= (ladybird-module-canvas-pixel two 7 5) (ladybird-test-formula 7 5 6 8 6)))
+        ;; View 1, shown again, sends a whole frame: it is painted and refreshed.
+        (ladybird-module-feed session (ladybird-test-frame-record :seq 3 :view 1 :width 8
+                                                                :height 6 :flags 1 :seed 7))
+        (should (= ladybird-test--refreshes 2))
+        (should-not (plist-get (ladybird-module-stats session) :dirty-views))
+        (dotimes (y 6)
+          (should (= (ladybird-module-canvas-pixel one 3 y) (ladybird-test-formula 3 y 7 8 6))))
+        ;; A view closed in the middle of a banded frame leaves nothing waiting.
+        (ladybird-module-feed session (ladybird-test-frame-record :seq 2 :view 3 :width 8
+                                                                :height 6 :h 2 :flags 3))
+        (ladybird-module-forget-view session 3)
+        (should-not (plist-get (ladybird-module-stats session) :dirty-views))
+        (should (equal (ladybird-test-statuses
+                        (ladybird-module-feed session (ladybird-test-frame-record
+                                                       :seq 3 :view 3 :width 8 :height 6
+                                                       :y 2 :h 2)))
+                       '(unknown-view)))
+        (ladybird-module-feed session (ladybird-test-frame-record :seq 3 :view 2 :width 8
+                                                                :height 6 :flags 1))
+        (should (= ladybird-test--refreshes 3))))))
+
 ;;; zstd
 
 (ert-deftest ladybird-test-zstd-full ()

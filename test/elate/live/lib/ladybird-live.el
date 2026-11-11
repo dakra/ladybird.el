@@ -129,6 +129,8 @@
 (defvar ladybird-live-statuses nil
   "Statuses of the frames received, newest first.")
 (defvar ladybird-live-scratch nil "A variable for the steps of a scenario.")
+(defvar ladybird-live-server-arguments nil
+  "Further arguments of the server a scenario starts, in every variant.")
 (defvar ladybird-live-saved nil "Another variable for the steps of a scenario.")
 
 (advice-add 'ladybird--send :before
@@ -212,8 +214,9 @@ It runs on the machine of the scenario's server."
     (delete-file ladybird-live-socket))
   (setq ladybird-live-server
         (make-process :name "ladybird-live-server" :buffer nil :noquery t
-                      :command (list ladybird-live-program "--headless=emacs"
-                                     "--emacs-socket" ladybird-live-socket)))
+                      :command (append (list ladybird-live-program "--headless=emacs"
+                                             "--emacs-socket" ladybird-live-socket)
+                                       ladybird-live-server-arguments)))
   (ladybird-live--wait (lambda () (file-exists-p ladybird-live-socket)) 30
                        "the server's socket"))
 
@@ -225,11 +228,12 @@ It runs on a terminal of its ssh, so it ends with that ssh."
   (ladybird-live--remote "rm" "-f" ladybird-live-remote-socket)
   (setq ladybird-live-server
         (make-process :name "ladybird-live-server" :buffer nil :noquery t
-                      :command (list ladybird-live-ssh "-tt"
-                                     ladybird-live-ssh-host
-                                     ladybird-live-remote-program
-                                     "--headless=emacs" "--emacs-socket"
-                                     ladybird-live-remote-socket)))
+                      :command (append (list ladybird-live-ssh "-tt"
+                                             ladybird-live-ssh-host
+                                             ladybird-live-remote-program
+                                             "--headless=emacs" "--emacs-socket"
+                                             ladybird-live-remote-socket)
+                                       ladybird-live-server-arguments)))
   (ladybird-live--wait
    (lambda () (eql 0 (ladybird-live--remote "test" "-S"
                                             ladybird-live-remote-socket)))
@@ -274,7 +278,8 @@ Return the page buffer."
         ladybird-live-sent nil
         ladybird-live-received nil
         ladybird-live-statuses nil
-        ladybird-ssh-program ladybird-live-ssh)
+        ladybird-ssh-program ladybird-live-ssh
+        ladybird-program-arguments ladybird-live-server-arguments)
   (when (and (ladybird-live-remote-p) (not ladybird-live-ssh-host))
     (error "LADYBIRD_LIVE_SSH_HOST is not set"))
   (ladybird-live--http)
@@ -371,12 +376,38 @@ Return the page buffer."
 
 (defun ladybird-live-color (x y)
   "Return the colour of the canvas at X, Y in Emacs pixels, as \"#rrggbb\"."
-  (ladybird-live-in-page
+  (ladybird-live-color-in (ladybird-live-buffer) x y))
+
+(defun ladybird-live-color-in (buffer x y)
+  "Return the colour of BUFFER's canvas at X, Y in Emacs pixels, as \"#rrggbb\"."
+  (with-current-buffer buffer
     (format "#%06x"
             (logand #xffffff
                     (ladybird-module-canvas-pixel
                      ladybird--canvas
                      (round (* x ladybird--dpr)) (round (* y ladybird--dpr)))))))
+
+(defun ladybird-live-field-in (buffer key)
+  "Return the value BUFFER's page reports for KEY in its title, or nil."
+  (when-let* ((title (alist-get 'title (buffer-local-value 'ladybird--state buffer))))
+    (cl-loop for part in (split-string title ";")
+             when (string-prefix-p (concat key "=") part)
+             return (substring part (1+ (length key))))))
+
+(defun ladybird-live-pages ()
+  "Return the page buffers, the lowest view id first."
+  (sort (seq-filter (lambda (buffer) (buffer-local-value 'ladybird--view buffer))
+                    (ladybird--buffers))
+        (lambda (a b) (< (buffer-local-value 'ladybird--view a)
+                         (buffer-local-value 'ladybird--view b)))))
+
+(defun ladybird-live-page-in-p (buffer page)
+  "Return non-nil once BUFFER shows the page named PAGE, loaded and painted."
+  (and (buffer-live-p buffer)
+       (equal (ladybird-live-field-in buffer "page") page)
+       (not (alist-get 'loading (buffer-local-value 'ladybird--state buffer)))
+       (buffer-local-value 'ladybird--canvas buffer)
+       t))
 
 (defun ladybird-live-messages-p (regexp)
   "Return non-nil if a line of *Messages* matches REGEXP."
@@ -413,10 +444,13 @@ FIELDS is a property list of field symbols and values."
   "Return t if the page's connection lost no frame.
 Signal an error that says what is wrong otherwise.  Every frame has to
 be acknowledged, and none dropped but those a forwarded socket offers
-in shared memory this machine cannot map."
+in shared memory this machine cannot map and those of a page killed
+while they were on the way."
   (let ((conn (ladybird-live-conn))
         (bad (seq-remove (lambda (status)
-                           (or (memq status '(painted stored size-mismatch))
+                           ;; A page killed while its frames were on the
+                           ;; way gets them as frames of an unknown view.
+                           (or (memq status '(painted stored size-mismatch unknown-view))
                                (and (eq status 'shm-error)
                                     (equal ladybird-live-variant "forward"))))
                          ladybird-live-statuses)))

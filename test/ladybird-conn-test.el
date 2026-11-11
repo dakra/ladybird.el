@@ -170,9 +170,10 @@ follow the formula with SEED.  FULL sets the full flag.  DPR is 1.0 or
       sent)))
 
 (defun ladybird-test-welcome (&optional views shm)
-  "Return a welcome message with VIEWS; SHM is its shm field."
+  "Return a welcome message with VIEWS; SHM is its shm field.
+The server holds up to 16 views."
   `((type . "welcome") (protocol . 1) (server . "test") (encoding . "raw")
-    (shm . ,(ladybird--bool shm)) (log . "/dev/null")
+    (shm . ,(ladybird--bool shm)) (log . "/dev/null") (max_views . 16)
     (host . ((hostname . ,(system-name)) (platform . "test")))
     (views . ,(vconcat views))))
 
@@ -1481,6 +1482,37 @@ the state messages received, newest first."
                      '("shm" "raw"))))
     (should (seq-find (lambda (m) (equal (alist-get 'type m) "shm_failed"))
                       (ladybird-test-log log)))))
+
+(ert-deftest ladybird-mock-test-shm-fallback-two-views ()
+  ;; One shm_failed, sent once, brings every view whole frames in the stream.
+  :tags '(mock)
+  (skip-unless (and (executable-find "python3") (not ladybird-test-native)))
+  (ladybird-test-with-mock ("--shm" "--views" "2")
+    (should (eq (ladybird--conn-shm conn) t))
+    (let ((raw (lambda ()
+                 (seq-filter (lambda (m) (and (equal (alist-get 'type m) "_frame_sent")
+                                              (equal (alist-get 'encoding m) "raw")))
+                             (ladybird-test-log log)))))
+      (ladybird-test-wait conn (lambda ()
+                                 (equal (sort (delete-dups
+                                               (mapcar (lambda (m) (alist-get 'view m))
+                                                       (funcall raw)))
+                                              #'<)
+                                        '(1 2))))
+      (dolist (m (funcall raw))
+        (should (eq (alist-get 'full m) t)))
+      ;; Every view's frames get through: the shared memory ones fail,
+      ;; the stream ones are stored.
+      (ladybird-test-wait
+       conn (lambda ()
+              (seq-every-p
+               (lambda (view)
+                 (memq 'stored (mapcar (lambda (event) (car (last event)))
+                                       (seq-filter (lambda (event) (eql (nth 1 event) view))
+                                                   frames))))
+               '(1 2))))
+      (should (= 1 (seq-count (lambda (m) (equal (alist-get 'type m) "shm_failed"))
+                              (ladybird-test-log log)))))))
 
 (ert-deftest ladybird-mock-test-shm ()
   ;; The mock writes the announcement of a segment and the first frame

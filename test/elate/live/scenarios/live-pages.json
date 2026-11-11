@@ -1,0 +1,350 @@
+{
+  "name": "live-pages",
+  "comment": "Several pages on one server: each in its own buffer and view, painting its own canvas; a cookie set in one read in the other; C-c C-s switching; an animated page in no window sending no frames while the shown one animates, and a full frame when it is shown again; ladybird-new-page-display; a killed page leaving the other working; the welcome's limit; and the pages coming back with ladybird-connect on a socket server.",
+  "params": {
+    "server": "stdio"
+  },
+  "variants": {
+    "stdio": {
+      "server": "stdio"
+    },
+    "socket": {
+      "server": "socket"
+    },
+    "ssh": {
+      "server": "ssh"
+    },
+    "forward": {
+      "server": "forward"
+    }
+  },
+  "defaults": {
+    "timeout": 20
+  },
+  "session": {
+    "ui": "gui",
+    "size": "100x35",
+    "eval_file": [
+      "../lib/ladybird-live.el"
+    ]
+  },
+  "steps": [
+    {
+      "group": "setup"
+    },
+    {
+      "eval": "(progn (setq ladybird-live-server-arguments (list \"--emacs-max-views=3\")) (ladybird-live-start \"{{server}}\" (concat \"cookie.html?set=\" ladybird-live-id)) t)",
+      "timeout": 120
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-live-page-p \"cookie\")",
+      "timeout": 60
+    },
+    {
+      "eval": "(progn (delete-other-windows (get-buffer-window (ladybird-live-buffer))) t)"
+    },
+    {
+      "assert": {
+        "eval": "(= (ladybird--max-views (ladybird-live-conn)) 3)"
+      },
+      "comment": "the welcome says what --emacs-max-views=3 asked for"
+    },
+    {
+      "group": "second",
+      "comment": "a second page opens in a buffer of its own, with a view of its own on the same server, and reads the cookie the first set"
+    },
+    {
+      "eval": "(progn (ladybird (ladybird-live-url \"cookie.html\")) t)"
+    },
+    {
+      "wait": "until",
+      "pred": "(and (= 2 (length (ladybird-live-pages))) (ladybird-live-page-in-p (cadr (ladybird-live-pages)) \"cookie\"))"
+    },
+    {
+      "assert": {
+        "eval": "(= 1 (length ladybird--conns))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(eq (window-buffer (selected-window)) (cadr (ladybird-live-pages)))"
+      },
+      "comment": "in the selected window, as ladybird-new-page-display says by default"
+    },
+    {
+      "assert": {
+        "eval": "(= (ladybird-live-sent-count \"create_view\") 2)"
+      }
+    },
+    {
+      "wait": "until",
+      "pred": "(string-match-p (concat \"\\\\(?:^\\\\|,\\\\)k=\" (regexp-quote ladybird-live-id) \"\\\\(?:,\\\\|$\\\\)\") (or (ladybird-live-field-in (cadr (ladybird-live-pages)) \"cookie\") \"\"))",
+      "comment": "the views share the cookies; the server may hold other cookies of the address"
+    },
+    {
+      "group": "independent",
+      "comment": "each page paints its own canvas"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-color-in (cadr (ladybird-live-pages)) 50 50) \"#0000ff\")"
+    },
+    {
+      "eval": "(progn (set-window-buffer (selected-window) (car (ladybird-live-pages))) t)"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-color-in (car (ladybird-live-pages)) 50 50) \"#ff0000\")"
+    },
+    {
+      "assert": {
+        "eval": "(equal (ladybird-live-color-in (cadr (ladybird-live-pages)) 50 50) \"#0000ff\")"
+      },
+      "comment": "the other canvas kept its own frame"
+    },
+    {
+      "group": "switch",
+      "comment": "C-c C-s reads a page by its title and URL"
+    },
+    {
+      "eval": "(progn (set-window-buffer (selected-window) (cadr (ladybird-live-pages))) t)"
+    },
+    {
+      "keys": "C-c C-s",
+      "delivery": "events"
+    },
+    {
+      "wait": "prompt"
+    },
+    {
+      "type": "?set=",
+      "comment": "a part of the URL completes"
+    },
+    {
+      "keys": "TAB RET",
+      "delivery": "events"
+    },
+    {
+      "wait": "until",
+      "pred": "(eq (window-buffer (selected-window)) (car (ladybird-live-pages)))"
+    },
+    {
+      "group": "hidden",
+      "comment": "an animated page in no window is told it is hidden and sends no frames while the shown one animates; shown again it starts with a full frame"
+    },
+    {
+      "eval": "(progn (with-current-buffer (car (ladybird-live-pages)) (ladybird-goto-url (ladybird-live-url \"animate.html\"))) (with-current-buffer (cadr (ladybird-live-pages)) (ladybird-goto-url (ladybird-live-url \"animate.html\"))) t)"
+    },
+    {
+      "wait": "until",
+      "pred": "(and (ladybird-live-page-in-p (car (ladybird-live-pages)) \"animate\") (ladybird-live-page-in-p (cadr (ladybird-live-pages)) \"animate\"))"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-field-in (cadr (ladybird-live-pages)) \"vis\") \"hidden\")",
+      "comment": "the page in no window sees itself hidden"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-field-in (car (ladybird-live-pages)) \"vis\") \"visible\")"
+    },
+    {
+      "eval": "(progn (sleep-for 0.5) (setq ladybird-live-scratch (list (buffer-local-value (quote ladybird--frame-count) (car (ladybird-live-pages))) (buffer-local-value (quote ladybird--frame-count) (cadr (ladybird-live-pages))))) t)"
+    },
+    {
+      "eval": "(progn (sleep-for 1.5) t)"
+    },
+    {
+      "assert": {
+        "eval": "(> (buffer-local-value (quote ladybird--frame-count) (car (ladybird-live-pages))) (+ 5 (nth 0 ladybird-live-scratch)))"
+      },
+      "comment": "the shown page animates"
+    },
+    {
+      "assert": {
+        "eval": "(= (buffer-local-value (quote ladybird--frame-count) (cadr (ladybird-live-pages))) (nth 1 ladybird-live-scratch))"
+      },
+      "comment": "the hidden one sends nothing"
+    },
+    {
+      "eval": "(setq ladybird-live-saved (buffer-local-value (quote ladybird--full-frame-count) (cadr (ladybird-live-pages))))"
+    },
+    {
+      "eval": "(progn (set-window-buffer (selected-window) (cadr (ladybird-live-pages))) t)"
+    },
+    {
+      "wait": "until",
+      "pred": "(> (buffer-local-value (quote ladybird--full-frame-count) (cadr (ladybird-live-pages))) ladybird-live-saved)"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-field-in (car (ladybird-live-pages)) \"vis\") \"hidden\")"
+    },
+    {
+      "group": "new-page-display",
+      "comment": "with ladybird-new-page-display other-window a new page opens in another window"
+    },
+    {
+      "eval": "(progn (setq ladybird-new-page-display (quote other-window)) (ladybird (ladybird-live-url \"animate.html\")) (setq ladybird-new-page-display (quote selected-window)) t)"
+    },
+    {
+      "wait": "until",
+      "pred": "(and (= 3 (length (ladybird-live-pages))) (ladybird-live-page-in-p (nth 2 (ladybird-live-pages)) \"animate\"))"
+    },
+    {
+      "assert": {
+        "eval": "(= 2 (length (window-list)))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(eq (window-buffer (selected-window)) (nth 2 (ladybird-live-pages)))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(get-buffer-window (cadr (ladybird-live-pages)))"
+      },
+      "comment": "the page that was shown stays in the other window"
+    },
+    {
+      "group": "kill",
+      "comment": "killing a page that is animating, its frames still coming, closes its view and leaves the others working"
+    },
+    {
+      "wait": "until",
+      "pred": "(> (buffer-local-value (quote ladybird--frame-count) (nth 2 (ladybird-live-pages))) 5)",
+      "comment": "it animates"
+    },
+    {
+      "eval": "(progn (kill-buffer (nth 2 (ladybird-live-pages))) (delete-other-windows) (set-window-buffer (selected-window) (car (ladybird-live-pages))) t)"
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-live-received \"view_closed\" (quote reason) \"client\")"
+    },
+    {
+      "eval": "(setq ladybird-live-scratch (buffer-local-value (quote ladybird--frame-count) (car (ladybird-live-pages))))"
+    },
+    {
+      "wait": "until",
+      "pred": "(> (buffer-local-value (quote ladybird--frame-count) (car (ladybird-live-pages))) (+ 5 ladybird-live-scratch))"
+    },
+    {
+      "assert": {
+        "eval": "(= 2 (length (ladybird-live-pages)))"
+      }
+    },
+    {
+      "group": "limit",
+      "comment": "the server holds 3 pages: a third opens, here with ladybird-new-page-display background, so no window shows it; a fourth is refused before it is asked for"
+    },
+    {
+      "eval": "(progn (setq ladybird-live-scratch (window-buffer (selected-window))) (let ((ladybird-new-page-display (quote background))) (ladybird (ladybird-live-url \"index.html\"))) t)"
+    },
+    {
+      "wait": "until",
+      "pred": "(= 3 (hash-table-count (ladybird--conn-views (ladybird-live-conn))))",
+      "timeout": 60
+    },
+    {
+      "assert": {
+        "eval": "(and (eq (window-buffer (selected-window)) ladybird-live-scratch) (null (get-buffer-window (nth 2 (ladybird-live-pages)) t)))"
+      },
+      "comment": "the selected window still shows what it showed"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-field-in (nth 2 (ladybird-live-pages)) \"page\") \"index\")",
+      "comment": "the page loads all the same"
+    },
+    {
+      "eval": "(setq ladybird-live-saved (ladybird-live-sent-count \"create_view\"))"
+    },
+    {
+      "assert": {
+        "eval": "(condition-case err (progn (ladybird (ladybird-live-url \"index.html\")) nil) (user-error (string-match-p \"has 3 pages open, the most it holds; close one first\" (cadr err))))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(= ladybird-live-saved (ladybird-live-sent-count \"create_view\"))"
+      },
+      "comment": "nothing was asked for"
+    },
+    {
+      "eval": "(progn (dolist (buffer (nthcdr 2 (ladybird-live-pages))) (kill-buffer buffer)) t)"
+    },
+    {
+      "wait": "until",
+      "pred": "(= 2 (length (ladybird-live-pages)))"
+    },
+    {
+      "group": "reattach",
+      "comment": "on a socket server a page left on the server with ladybird-keep-view-on-kill comes back with ladybird-connect, and so do the others (socket and forward)"
+    },
+    {
+      "eval": "(progn (when (member \"{{server}}\" (quote (\"socket\" \"forward\"))) (let ((ladybird-keep-view-on-kill t)) (mapc (function kill-buffer) (ladybird-live-pages)))) t)"
+    },
+    {
+      "assert": {
+        "eval": "(or (not (member \"{{server}}\" (quote (\"socket\" \"forward\")))) (and (null ladybird--conns) (ladybird-live-messages-p \"keeps running with 2 pages\")))"
+      }
+    },
+    {
+      "eval": "(progn (setq ladybird-live-saved (ladybird-live-sent-count \"create_view\")) (when (member \"{{server}}\" (quote (\"socket\" \"forward\"))) (ladybird-connect \"live\")) t)"
+    },
+    {
+      "wait": "until",
+      "pred": "(= 2 (length (ladybird-live-pages)))",
+      "timeout": 60
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-live-page-in-p (window-buffer (selected-window)) \"animate\")",
+      "timeout": 30,
+      "comment": "the page shown gets a frame"
+    },
+    {
+      "assert": {
+        "eval": "(or (not (member \"{{server}}\" (quote (\"socket\" \"forward\")))) (and (ladybird-live-messages-p \"ladybird: 2 pages on live\") (= ladybird-live-saved (ladybird-live-sent-count \"create_view\"))))"
+      },
+      "comment": "no page was made again"
+    },
+    {
+      "assert": {
+        "eval": "(seq-every-p (lambda (buffer) (equal (ladybird-live-field-in buffer \"page\") \"animate\")) (ladybird-live-pages))"
+      },
+      "comment": "both have their state"
+    },
+    {
+      "eval": "(progn (set-window-buffer (selected-window) (seq-find (lambda (buffer) (not (eq buffer (window-buffer (selected-window))))) (ladybird-live-pages))) t)"
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-live-page-in-p (window-buffer (selected-window)) \"animate\")",
+      "timeout": 30,
+      "comment": "the other one, hidden until now, gets a frame when it is shown"
+    },
+    {
+      "group": "health",
+      "comment": "every frame was acknowledged and none dropped"
+    },
+    {
+      "eval": "(progn (sleep-for 0.5) t)"
+    },
+    {
+      "assert": {
+        "eval": "(ladybird-live-healthy-p)"
+      }
+    },
+    {
+      "group": "cleanup"
+    },
+    {
+      "eval": "(ladybird-live-cleanup)",
+      "timeout": 60
+    }
+  ]
+}

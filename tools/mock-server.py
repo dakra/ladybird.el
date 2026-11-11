@@ -26,7 +26,15 @@ Usage: python3 -I tools/mock-server.py [OPTIONS]
   --platform NAME     platform named in the welcome: macos, linux or unknown
                       (default: this machine's)
   --hostname NAME     host name in the welcome (default: this machine's)
-  --max-views N       answer a create_view beyond N views with an error
+  --max-views N       hold at most N views (default 16), the welcome's
+                      max_views; a create_view beyond them gets an error
+  --no-max-views      leave max_views out of the welcome and hold one view
+  --band-rows N       send a stream frame taller than N rows in bands of N
+                      rows, one after the other's acknowledgement; while one
+                      view's frame is in bands the others wait
+  --band-pause S      wait S seconds before each band after the first
+  --max-area PIXELS   refuse a create_view or set_viewport that would make
+                      the views cover more pixels with an error
   --no-hints          leave "hints" out of the welcome's features (there are
                       none then) and answer hints with an error
   --selftest          run an in-process client against the server
@@ -38,6 +46,14 @@ hover, favicon, console, clipboard, background, error, close.
 mock://cancel-NAME emits the request of mock://NAME and withdraws it
 half a second later with request_cancelled; mock://disconnect drops the
 client and keeps the views.
+
+The views share a cookie: loading mock://cookie/set/VALUE sets it, and a
+page at mock://cookie has the title "Mock: cookie=VALUE".  A hidden view
+sends no frames and sends a full one when it is shown again.  Hiding or
+closing a view whose frame is in bands drops the bands not sent
+(logged as {"type":"_bands_dropped","view","bands","why"}).  One
+shm_failed turns every view to stream frames, each sending a whole
+frame next.  The server keeps running with no view.
 
 Hints (protocol section 6.1): a page has 12 items, kinds link, button,
 input and other in turn, with the texts "Link 1", "Button 2", "Field 3",
@@ -203,6 +219,7 @@ class View:
         self.old_shm = None
         self.shm_announced = False
         self.hints = None  # {"id", "items", "prefix"} of the hint session
+        self.bands = []  # (x, y, w, h, flags) of the frame's bands not sent
         self.resize(width, height, dpr)
 
     def resize(self, width, height, dpr):
@@ -315,6 +332,7 @@ class Server:
         self.selector = selectors.DefaultSelector()
         self.views = {}
         self.next_view = 1
+        self.cookie = ""
         self.next_id = 1
         self.shm_generation = 0
         self.client = None
@@ -536,15 +554,69 @@ class Server:
                  "size": view.shm.size})
         return view.shm
 
+    def banding(self):
+        """Return the view whose frame is in bands, or None."""
+        return next((v for v in self.views.values() if v.bands), None)
+
+    def drop_bands(self, view, why):
+        """Drop the bands of VIEW's frame not sent; the others go on."""
+        if view.bands:
+            self.log({"type": "_bands_dropped", "view": view.id,
+                      "bands": len(view.bands), "why": why})
+            view.bands = []
+            view.damage_all()
+            for other in list(self.views.values()):
+                self.pump(other)
+
+    def send_band(self, view):
+        """Send the next band of VIEW's frame once its last is acknowledged."""
+        client = self.client
+        if (not client or not client.ready or not view.bands
+                or view.in_flight is not None or not view.visible
+                or self.views.get(view.id) is not view):
+            return
+        x, y, w, h, flags = view.bands.pop(0)
+        view.seq += 1
+        if view.bands:
+            flags |= lp.FLAG_MORE
+        client.out += lp.encode_frame(view.seq, view.id, view.width, view.height,
+                                      view.dpr, x, y, w, h, lp.ENCODING_RAW, flags,
+                                      view.rect_bytes(x, y, w, h))
+        view.in_flight = view.seq
+        self.log({"type": "_frame_sent", "view": view.id, "seq": view.seq,
+                  "frame_width": view.width, "frame_height": view.height,
+                  "x": x, "y": y, "width": w, "height": h,
+                  "full": bool(flags & lp.FLAG_FULL), "more": bool(view.bands),
+                  "encoding": "raw", "seed": view.seed, "scroll": view.scroll})
+        self.flush(client)
+        if not view.bands:
+            for other in list(self.views.values()):
+                if other is not view:
+                    self.pump(other)
+
     def pump(self, view):
-        """Send VIEW's pending damage unless a frame is in flight."""
+        """Send VIEW's pending damage unless a frame is in flight.
+        With --band-rows a frame taller than that goes in bands; while
+        one view's frame is in bands the others wait."""
         client = self.client
         if (not client or not client.ready or view.in_flight is not None
-                or view.damage is None or not view.visible):
+                or view.damage is None or not view.visible or view.bands):
+            return
+        banding = self.banding()
+        if banding is not None and banding is not view:
             return
         if view.dirty:
             view.render()
         x, y, w, h = view.damage
+        rows = self.args.band_rows
+        if rows and not client.shm and h > rows:
+            view.damage = None
+            full = (x, y, w, h) == (0, 0, view.width, view.height)
+            view.bands = [(x, top, w, min(rows, y + h - top),
+                           lp.FLAG_FULL if full and top == y else 0)
+                          for top in range(y, y + h, rows)]
+            self.send_band(view)
+            return
         view.damage = None
         full = (x, y, w, h) == (0, 0, view.width, view.height)
         view.seq += 1
@@ -583,10 +655,21 @@ class Server:
         self.next_id += 1
         return self.next_id - 1
 
+    def title_for(self, url):
+        """Return the title of the page at URL; mock://cookie shows the cookie."""
+        if url.startswith("mock://cookie/set/"):
+            self.cookie = url[len("mock://cookie/set/"):]
+        if url == "mock://cookie":
+            return "Mock: cookie=" + self.cookie
+        return "Mock: " + url
+
+    def max_views(self):
+        return 1 if self.args.no_max_views else self.args.max_views
+
     def navigate(self, view, url):
         self.cancel_hints(view)
         view.url = url
-        view.title = "Mock: " + url
+        view.title = self.title_for(url)
         view.loading = True
         view.can_go_back = True
         view.can_go_forward = False
@@ -715,6 +798,8 @@ class Server:
         client.shm = bool(self.args.shm and m.get("shm"))
         client.ready = True
         features = {} if self.args.no_hints else {"features": ["hints"]}
+        if not self.args.no_max_views:
+            features["max_views"] = self.args.max_views
         self.send(client, {
             "type": "welcome", "protocol": lp.PROTOCOL_VERSION,
             "server": f"ladybird mock server ({os.getpid()})",
@@ -736,17 +821,25 @@ class Server:
     def on_create_view(self, client, m):
         # The answer names the request when the client numbered it.
         request = {} if m.get("request") is None else {"request": m["request"]}
-        if (self.args.max_views is not None
-                and len(self.views) >= self.args.max_views):
-            one = self.args.max_views == 1
+        width, height, _ = client.viewport
+        area = (int(m.get("width", width)) * int(m.get("height", height))
+                + sum(v.width * v.height for v in self.views.values()))
+        if self.args.max_area and area > self.args.max_area:
+            self.tell({"type": "error", **request,
+                       "message": f"the views would cover {area} pixels, "
+                                  f"more than {self.args.max_area}"})
+            return
+        if len(self.views) >= self.max_views():
+            one = self.max_views() == 1
             self.tell({"type": "error", **request,
                        "message": "only one view is supported" if one
-                       else f"only {self.args.max_views} views are supported"})
+                       else f"only {self.max_views()} views are supported"})
             return
         width, height, dpr = client.viewport
         url = m.get("url") or "about:blank"
         view = self.add_view(url, m.get("width", width), m.get("height", height),
                              m.get("dpr", dpr))
+        view.title = self.title_for(url)
         self.tell({"type": "view_created", "view": view.id, **request,
                    "url": view.url, "title": view.title, "width": view.width,
                    "height": view.height, "dpr": view.dpr})
@@ -760,12 +853,26 @@ class Server:
         if view:
             view.hints = None
             del self.views[view.id]
+            if view.bands:
+                self.log({"type": "_bands_dropped", "view": view.id,
+                          "bands": len(view.bands), "why": "closed"})
+                view.bands = []
+                for other in list(self.views.values()):
+                    self.pump(other)
             for segment in (view.shm, view.old_shm):
                 self.release(segment)
             self.tell({"type": "view_closed", "view": view.id, "reason": "client"})
 
     def on_set_viewport(self, _client, m):
         view = self.view_of(m)
+        if view and self.args.max_area:
+            area = (int(m.get("width", view.width)) * int(m.get("height", view.height))
+                    + sum(v.width * v.height for v in self.views.values() if v is not view))
+            if area > self.args.max_area:
+                self.tell({"type": "error", "view": view.id,
+                           "message": f"the views would cover {area} pixels, "
+                                      f"more than {self.args.max_area}"})
+                return
         if view:
             view.resize(m.get("width", view.width), m.get("height", view.height),
                         m.get("dpr", view.dpr))
@@ -774,7 +881,14 @@ class Server:
     def on_set_visibility(self, _client, m):
         view = self.view_of(m)
         if view:
+            shown = bool(m.get("visible")) and not view.visible
             view.visible = bool(m.get("visible"))
+            if not view.visible:
+                self.drop_bands(view, "hidden")
+            # A view shown again starts with a full frame.
+            if shown:
+                view.dirty = True
+                view.damage_all()
             self.pump(view)
 
     def on_frame_ack(self, _client, m):
@@ -783,13 +897,23 @@ class Server:
             view.in_flight = None
             self.release(view.old_shm)
             view.old_shm = None
-            self.pump(view)
+            if view.bands:
+                if self.args.band_pause:
+                    self.after(self.args.band_pause, lambda: self.send_band(view))
+                else:
+                    self.send_band(view)
+            else:
+                self.pump(view)
 
     def on_shm_failed(self, client, m):
+        # Every view of the connection goes over to stream frames, each
+        # with a whole frame next.
         client.shm = False
-        view = self.views.get(m.get("view"))
-        if view:
-            view.in_flight = None
+        failed = self.views.get(m.get("view"))
+        if failed:
+            failed.in_flight = None
+        for view in list(self.views.values()):
+            view.dirty = True
             view.damage_all()
             self.pump(view)
 
@@ -1267,7 +1391,162 @@ def selftest():
     thread.join(5)
 
     selftest_hints(serve, hello)
+    selftest_views(serve, hello)
     print("ok" + "".join(f" ({note})" for note in notes))
+
+
+def selftest_views(serve, hello):
+    client, thread = serve("--max-views", "2")
+    client.send(hello)
+    welcome = client.expect("welcome")
+    assert welcome["max_views"] == 2 and welcome["views"] == []
+
+    def create(request, url):
+        client.send({"type": "create_view", "request": request, "url": url,
+                     "width": 64, "height": 48, "dpr": 1.0})
+
+    def frame_of(view):
+        header, _ = client.frame()
+        assert header.view == view, (header.view, view)
+        client.ack(header)
+        return header
+
+    create(1, "mock://a")
+    a = client.expect("view_created")["view"]
+    client.expect("state")
+    assert frame_of(a).full
+    create(2, "mock://b")
+    b = client.expect("view_created")["view"]
+    assert a != b
+    client.expect("state")
+    assert frame_of(b).full
+    # The limit is the welcome's max_views.
+    create(3, "mock://c")
+    assert client.expect("error") == {"type": "error", "request": 3,
+                                      "message": "only 2 views are supported"}
+    # A hidden view sends nothing; a shown one goes on.
+    client.send({"type": "set_visibility", "view": b, "visible": False})
+    for view in (b, a):
+        client.send({"type": "mouse", "view": view, "kind": "down", "x": 5, "y": 5,
+                     "button": "left", "buttons": ["left"], "modifiers": 0,
+                     "clicks": 1})
+    assert not frame_of(a).full
+    client.quiet()
+    # Shown again, it starts with a full frame.
+    client.send({"type": "set_visibility", "view": b, "visible": True})
+    assert frame_of(b).full
+    # The views share the cookie.
+    client.send({"type": "load", "view": a, "url": "mock://cookie/set/abc"})
+    client.expect("state")
+    client.send({"type": "load", "view": b, "url": "mock://cookie"})
+    state = client.expect("state")
+    assert state["view"] == b and state["title"] == "Mock: cookie=abc", state
+    client.expect("state")
+    client.expect("state")
+    # The server keeps running with no view.
+    for view in (a, b):
+        client.send({"type": "close_view", "view": view})
+        assert client.expect("view_closed")["view"] == view
+    client.send({"type": "ping", "id": 9})
+    assert client.expect("pong")["id"] == 9
+    create(4, "mock://d")
+    assert client.expect("view_created")["view"] > b, "view ids are not reused"
+    client.sock.close()
+    thread.join(5)
+
+    # A banded frame interrupted by hiding or closing its view: the rest
+    # is dropped, another view's frame may come next, and the view shown
+    # again starts with a full frame.
+    client, thread = serve("--band-rows", "16")
+    client.send(hello)
+    client.expect("welcome")
+    create(1, "mock://a")
+    a = client.expect("view_created")["view"]
+    client.expect("state")
+    first, _ = client.frame()
+    assert first.view == a and first.full and first.more and first.damage_height == 16
+    create(2, "mock://b")
+    b = client.expect("view_created")["view"]
+    client.expect("state")
+    client.send({"type": "set_visibility", "view": a, "visible": False})
+    client.ack(first)
+    header, _ = client.frame()
+    assert header.view == b and header.full and header.more, "b goes once a's bands end"
+    client.ack(header)
+    header, _ = client.frame()
+    assert header.view == b and not header.full and header.more
+    client.ack(header)
+    header, _ = client.frame()
+    assert header.view == b and not header.more
+    client.ack(header)
+    client.send({"type": "set_visibility", "view": a, "visible": True})
+    header, _ = client.frame()
+    assert header.view == a and header.full and header.more
+    client.send({"type": "close_view", "view": a})
+    client.ack(header)
+    assert client.expect("view_closed")["view"] == a
+    client.send({"type": "mouse", "view": b, "kind": "down", "x": 5, "y": 5,
+                 "button": "left", "buttons": ["left"], "modifiers": 0, "clicks": 1})
+    header, _ = client.frame()
+    assert header.view == b, "b is not held up by the bands of the closed view"
+    client.sock.close()
+    thread.join(5)
+
+    # One shm_failed turns every view to stream frames, each whole.
+    client, thread = serve("--shm")
+    client.send({**hello, "shm": True})
+    client.expect("welcome")
+    create(1, "mock://a")
+    a = client.expect("view_created")["view"]
+    client.expect("state")
+    client.expect("shm")
+    first, _ = client.frame()
+    create(2, "mock://b")
+    b = client.expect("view_created")["view"]
+    client.expect("state")
+    client.expect("shm")
+    second, _ = client.frame()
+    assert first.encoding == second.encoding == lp.ENCODING_SHM
+    client.send({"type": "shm_failed", "view": a})
+    client.ack(second)
+    seen = {}
+    while len(seen) < 2:
+        header, _ = client.frame()
+        client.ack(header)
+        seen.setdefault(header.view, header)
+    for header in seen.values():
+        assert header.encoding == lp.ENCODING_RAW and header.full, header
+    client.sock.close()
+    thread.join(5)
+
+    # The area of all views is capped.
+    client, thread = serve("--max-area", "5000")
+    client.send(hello)
+    client.expect("welcome")
+    create(1, "mock://a")
+    a = client.expect("view_created")["view"]
+    client.expect("state")
+    client.frame()
+    create(2, "mock://b")
+    assert "more than 5000" in client.expect("error")["message"]
+    client.send({"type": "set_viewport", "view": a, "width": 100, "height": 100,
+                 "dpr": 1.0})
+    error = client.expect("error")
+    assert error["view"] == a and "more than 5000" in error["message"]
+    client.sock.close()
+    thread.join(5)
+
+    client, thread = serve("--no-max-views")
+    client.send(hello)
+    assert "max_views" not in client.expect("welcome")
+    create(1, "mock://a")
+    client.expect("view_created")
+    client.expect("state")
+    client.frame()
+    create(2, "mock://b")
+    assert client.expect("error")["message"] == "only one view is supported"
+    client.sock.close()
+    thread.join(5)
 
 
 def selftest_hints(serve, hello):
@@ -1447,7 +1726,11 @@ def parse_arguments(argv):
     parser.add_argument("--reject", action="store_true")
     parser.add_argument("--zstd", action="store_true")
     parser.add_argument("--shm", action="store_true")
-    parser.add_argument("--max-views", type=int, metavar="N")
+    parser.add_argument("--max-views", type=int, default=16, metavar="N")
+    parser.add_argument("--no-max-views", action="store_true")
+    parser.add_argument("--band-rows", type=int, metavar="N")
+    parser.add_argument("--band-pause", type=float, default=0, metavar="S")
+    parser.add_argument("--max-area", type=int, metavar="PIXELS")
     parser.add_argument("--hostname", metavar="NAME")
     parser.add_argument("--no-hints", action="store_true")
     parser.add_argument("--platform", default=(

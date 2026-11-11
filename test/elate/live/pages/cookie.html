@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>page=cookie</title>
+<style>
+html, body { margin: 0; background: #0000ff; }
+html.setter, html.setter body { background: #ff0000; }
+</style>
+<script src="/live.js"></script></head>
+<body>
+<script>
+// cookie.html?set=VALUE sets the cookie k=VALUE and paints red; without
+// a query it paints blue.  Both report the cookies the page sees.
+live.page = 'cookie';
+var set = new URLSearchParams(location.search).get('set');
+if (set) {
+  document.cookie = 'k=' + set + '; path=/';
+  document.documentElement.className = 'setter';
+}
+// The cookies are joined with commas: live.js separates fields with semicolons.
+function update() { live.cookie = document.cookie.replace(/;\s*/g, ','); live.vis = document.visibilityState; }
+</script>
+</body></html>

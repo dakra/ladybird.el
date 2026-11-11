@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>page=animate</title>
+<style>
+html, body { margin: 0; }
+</style>
+<script src="/live.js"></script></head>
+<body>
+<script>
+// Changes its colour on every animation frame, so a visible page
+// presents frames all the time.
+live.page = 'animate';
+live.frames = 0;
+function step() {
+  live.frames++;
+  document.body.style.background = 'hsl(' + (live.frames * 7 % 360) + ', 80%, 50%)';
+  requestAnimationFrame(step);
+}
+requestAnimationFrame(step);
+function update() { live.vis = document.visibilityState; }
+</script>
+</body></html>

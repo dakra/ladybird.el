@@ -80,6 +80,7 @@ of a canvas, and tests substitute the fake module.
 | `ladybird-reconnect` | `t` | Redial a lost connection with backoff 1, 2, 4 … 30 s. |
 | `ladybird-translated-keys` | see 5.3 | Emacs editing and motion keys translated for the server's platform and sent to the page. |
 | `ladybird-emacs-keys` | `<f1> <f3> <f4> <f10> <f11>` | Keys the page map leaves to Emacs (help, keyboard macros, menu bar, full screen); they win over `ladybird-translated-keys`. Rebuilds the page map like it. |
+| `ladybird-new-page-display` | `selected-window` | Where a page a command opens in a new buffer appears: `selected-window`, `other-window` or `background`; through `display-buffer` (4.6). |
 | `ladybird-initial-mode` | `page` | `page`: a new buffer sends its keys to the page; `command`: it starts in `ladybird-command-mode`. |
 | `ladybird-scroll-step` | `nil` | Pixels for `n`/`p`; `nil` = `(frame-char-height)` × 3. |
 | `ladybird-console-buffer` | `"*ladybird-console*"` | |
@@ -99,6 +100,7 @@ of a canvas, and tests substitute the fake module.
 | `ladybird-scroll-down-line`, `-up-line`, `-down-page`, `-up-page`, `-left`, `-right`, `-top`, `-bottom` (command mode: `n`/`p`, `C-n`/`C-p`, `<down>`/`<up>`, `SPC`/`DEL`/`S-SPC`, `C-v`/`M-v`, `<next>`/`<prior>`, `<left>`/`<right>`, `C-b`/`C-f`, `<`/`>`, `M-<`/`M->`) | Send `mouse wheel` at the canvas center with `dy`/`dx` in device pixels; a page is `(window-body-height win t)` − one line; top/bottom send ±10⁶. Command mode also remaps `scroll-up-command` and the like to them. |
 | `ladybird-zoom-adjust` (`[remap text-scale-adjust]`: `C-x C-+`, `C-x C-=`, `C-x C--`, `C-x C-0`) | `zoom` in, out or reset by the last key's base character; a transient map lets `+ = - 0` repeat, as `text-scale-adjust` does. `ladybird-zoom-in` (`+`, `=`), `-out` (`-`), `-reset` (`0`) in command mode. |
 | `ladybird-find` (`C-s`), `ladybird-find-backward` (`C-r`) | Section 6.6. |
+| `ladybird-switch-to-page` (`C-c C-s`) | `completing-read` over every page buffer by title and URL, the buffer used last first and the current one last; with several connections an annotation names the host (4.6). |
 | `ladybird-follow-hint` (`C-c C-o`; `o` in command mode) | Section 6, item 13. With a prefix argument a chosen link opens in a new buffer. |
 | `ladybird-command-mode` (`C-c C-e`, the mode-line tag), `ladybird-page-mode` (`C-c C-j`; `i`, `RET` in command mode) | Single keys are commands, or keys go to the page. |
 | `ladybird-send-next-key` (`C-c C-q`, `[remap quoted-insert]`) | Reads one key and sends it untranslated (`read-event` in a graphical frame, `read-key` in a terminal, where an `ESC` read with a key is that key with Meta); a mouse event is put back on `unread-command-events`. |
@@ -432,6 +434,83 @@ any, `(create-image (base64-decode-string png) 'png t :height (frame-char-height
 :ascent 'center)`), title, `" — "`, URL, `[loading]`, `[detached]`/`[reconnecting in Ns]`.
 `mode-line-process` carries the `:Page`/`:Command` tag and `:Loading` as `ghostel--mode-line-refresh`.
 `favicon` arrives as base64 PNG; decode once per message.
+
+### 4.6 Several pages
+
+Every view is a buffer; the connection maps view ids to buffers. `ladybird--open` makes
+the buffer, shows it with `ladybird--display-new-page` (`ladybird-new-page-display`:
+`pop-to-buffer-same-window`, `pop-to-buffer` with `inhibit-same-window`, or
+`display-buffer-no-window` with `allow-no-window`, so `display-buffer-alist` rules come
+first) and sends `create_view` on the connection of the host. Every command that opens a
+page in a new buffer goes through it: `ladybird`, `ladybird-new-buffer`, `ladybird-goto-url`
+with a prefix argument, `ladybird--follow-link` with a new buffer (hints, context menu),
+`ladybird-open-blocked-popup` and `ladybird-browse-url` without a page to reuse.
+
+The limit is `welcome.max_views` (`ladybird--max-views`; 1 when the welcome has none).
+`ladybird--view-count` counts the views of the connection's buffers, those of buffers
+killed with `ladybird-keep-view-on-kill` (the connection's `kept`, cleared by the next
+welcome, which lists them) and the `create_view`s not yet answered. At the limit
+`ladybird--open` asks for nothing: a server that holds one page loads the URL in it
+(`ladybird--load-in-page`), any other is refused with a `user-error` that names the limit.
+An `error` answering a `create_view` kills the new buffer; only on a one-page server does
+it load the URL in the page there is.
+
+Visibility is per view: `ladybird--sync-viewport` sends `set_visibility` whenever whether
+a window on a visible frame shows the buffer changes, from `ladybird--update`, which
+`window-size-change-functions` and `window-selection-change-functions` (buffer-local),
+the global `window-buffer-change-functions` (a window that stops showing a page runs the
+hooks of the buffer it shows now), `delete-frame-functions` and the special events
+`iconify-frame` and `make-frame-visible` (bound in `special-event-map`, the binding they
+had run after; a window system sends them, NS included; a terminal has no iconified
+frames) schedule. A new view and every view after a welcome starts at `unknown`, so it
+is told at once; after a welcome from the timer the welcome sets, so that
+`ladybird-connect` has shown its page and every view is told once. Each buffer counts
+the frames it painted and the full ones among them (`ladybird--frame-count`,
+`ladybird--full-frame-count`); the module's stats count frames per session only.
+
+A welcome gives every listed view without a buffer a new one, with its state, and says
+how many pages it found. `ladybird-connect` shows the page buffer used last if it is one
+of the connection's, else the one with the lowest view id (the welcome does not say which
+view was used last), and says how many pages the server has. Closing the last page of a
+socket connection says that the server keeps running, with how many pages it kept; the
+protocol has no message that stops a server. A `view_created` with `opener` answers no
+request and is answered with `close_view` until §3.1 is taken.
+
+A view kept for a killed buffer on a connection that stays up (`kept`, an alist of view
+and its last `state`) counts against the limit, and the refusal says how many of the
+pages are such. `state` messages for it update the kept state, `view_closed` drops it.
+`ladybird--restore-kept` gives such views buffers again: `ladybird-connect` on the open
+connection does it for all, `ladybird-switch-to-page` offers them among the pages and
+does it for the one chosen. The buffer has the kept state and gets its frame once a
+window shows it (`set_visibility`, then a full frame). The protocol has no message that
+asks for a view's state; state that changed while no `state` arrived for it, or before
+the client connected, is not known.
+
+Page strings shown in Emacs pass `ladybird--clean`, which turns line breaks and tabs
+into spaces and drops other control characters and the bidirectional formatting
+characters (U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069): buffer names, the
+header line, everything cut to the echo area (`ladybird--echo-line`: hints, hovered
+links, tooltips, external URLs), dialog texts and origins, select labels and the
+candidates of `ladybird-switch-to-page`, whose titles are cut to 60 columns and URLs
+kept whole. The console buffer shows console output as it came.
+
+`ladybird-unload-function` (and `ladybird-conn-unload-function`) close the pages and
+connections, cancel the package's timers and take back the global hooks
+(`post-command-hook`, `window-buffer-change-functions`, `delete-frame-functions`,
+`pre-command-hook`, `minibuffer-setup-hook`), the `after-focus-change-function` advice,
+the `emulation-mode-map-alists` entry of hints, the `special-event-map` bindings and the
+mouse tracking.
+
+Tried against the Ladybird server on macOS and Linux over stdio, a socket, ssh and a
+forwarded socket (`live-pages`, the server started with `--emacs-max-views=3`): two
+pages painting their own canvases, a shared cookie, `C-c C-s` (a part of a URL completes,
+through the completion category `ladybird-page` with the `substring` style), a hidden
+animated page sending no frames while the shown one does and a full frame when shown
+again, `ladybird-new-page-display` with `selected-window`, `other-window` and
+`background`, closing a page while it animates, the limit, and reattaching to the pages
+a socket server kept. Views that were visible before the reconnect send a full frame
+right after the welcome; pages the client hid, such as those of buffers killed with
+`ladybird-keep-view-on-kill`, send one when a window shows them again.
 
 ## 5. Input (`ladybird-keys.el` + bindings in `ladybird.el`)
 
