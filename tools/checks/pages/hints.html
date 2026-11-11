@@ -1,0 +1,39 @@
+<!doctype html>
+<title>hints</title>
+<style>
+  body { margin: 0; font: 16px sans-serif; background: white; color: black; }
+  .p { position: absolute; left: 20px; }
+  .cover { position: absolute; left: 10px; top: 440px; width: 220px; height: 40px; background: #dddddd; }
+  #far { top: 2000px; }
+</style>
+<a id=link class=p style="top: 20px" href="hints-target.html">plain link</a>
+<a id=blank class=p style="top: 60px" href="https://example.org/blank" target=_blank>new window link</a>
+<button id=button class=p style="top: 100px" onclick="document.title = 'button:' + event.isTrusted">press me</button>
+<label class=p style="top: 140px; left: 60px" for=check>check me</label>
+<input id=check class=p style="top: 140px" type=checkbox onchange="document.title = 'check:' + this.checked">
+<form onsubmit="document.title = 'submitted'; return false">
+  <input id=text class=p style="top: 180px; width: 200px" placeholder="type here"
+         onfocus="document.title = 'focus:text'" onclick="document.title = 'clicked:text'"
+         oninput="document.title = 'text:' + this.value">
+</form>
+<textarea id=area class=p style="top: 220px; width: 200px; height: 40px" onfocus="document.title = 'focus:area'"
+          onclick="document.title = 'clicked:area'" oninput="document.title = 'area:' + this.value">notes</textarea>
+<select id=choice class=p style="top: 290px; width: 120px" onchange="document.title = 'select:' + this.value">
+  <option value=one>One</option><option value=two>Two</option>
+</select>
+<button id=disabled class=p style="top: 330px" disabled>disabled button</button>
+<a id=none href="#none" style="display: none">display none link</a>
+<a id=invisible class=p style="top: 370px; visibility: hidden" href="#invisible">invisible link</a>
+<div id=div class=p style="top: 400px; width: 140px; height: 30px" onclick="document.title = 'div:' + event.isTrusted">clickable div</div>
+<a id=covered class=p style="top: 450px" href="#covered">covered link</a>
+<div class=cover></div>
+<a id=far class=p href="#far">far link</a>
+<div id=editable class=p style="top: 500px; width: 200px; height: 24px; border: 1px solid #888888" contenteditable
+     onfocus="document.title = 'focus:edit'" onclick="document.title = 'clicked:edit'"
+     oninput="document.title = 'edit:' + this.textContent">draft</div>
+<div id=host class=p style="top: 540px"></div>
+<script>
+  host.attachShadow({ mode: "open" }).innerHTML =
+    "<button onclick=\"document.title = 'shadow:' + event.isTrusted\">shadow button</button>";
+  addEventListener("hashchange", () => document.title = "hash:" + location.hash);
+</script>

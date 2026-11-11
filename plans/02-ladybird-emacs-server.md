@@ -227,6 +227,82 @@ runs, so the log location is identical for both. The log path is sent in `welcom
 - Page closes itself (`on_close`): `view_closed`, destroy view; the process stays up until the client goes away or sends nothing (stdio EOF ends it).
 - Signals: headless runs do not register the SIGINT/SIGTERM handlers (`m_persists_sessions` is false, `Application.cpp:1764`), so register with `Core::EventLoop::register_signal(signo, handler)` for `SIGINT, SIGTERM, SIGHUP` as `TerminalWebView::enter_terminal_modes` does: handler closes the client, unlinks the socket path and shm segment, then `Core::EventLoop::current().quit(0)`. The `EmacsServer` destructor repeats the unlinking (idempotent). Helpers are torn down by `Application`'s destructor as today.
 
+### 2.9 Hints
+
+Protocol §6.1. Everything lives in `EmacsWebView.cpp`; the parts without I/O
+(`is_valid_hint_alphabet`, `hint_session_id`, `hint_label_length`, `is_valid_hint_prefix`,
+`hint_labels`, `hint_label_mask`, `hint_activation_index`, `parse_hint_collection`) are in
+`EmacsProtocol.cpp` and unit-tested.
+
+- **Route into the page.** The server runs its scripts with `ViewImplementation::js_console_input`
+  and reads the answers from `on_received_js_console_result` (the console route evaluates in
+  the top-level document and echoes nothing into `console` messages or the log). The answer
+  of a string-valued script is a `DebuggerValue` of type `String` with the text verbatim.
+  Answers carry no request id, and a script that throws gives none, so every script is wrapped
+  in a function that catches everything and returns `TOKEN "\n" RESULT`: a fresh random token
+  per script, a result that is a string of at most 20 M UTF-16 units (else `"null"`). A
+  token is known until its answer arrives or 60 s after it was due; an answer due more than
+  5 s ago is dropped. `run_javascript` is unusable: it returns nothing.
+- **Sharing the callback with DevTools.** `Application::evaluate_javascript` puts its own
+  callback in place and removes it once answered. Before each hint script the server puts
+  its dispatcher in place, keeping the callback it replaces; the dispatcher takes answers that
+  start with a known token and passes the others to the kept callback. Once no token is
+  outstanding, the kept callback is put back. A DevTools evaluation that starts while a hint
+  answer is outstanding replaces the dispatcher, so that answer goes to DevTools and the
+  session ends with `hints_cancelled` after 5 s; a clean fix needs request ids on the console
+  IPC.
+- **Three steps.** `hints` validates `id` and `alphabet`, ends any previous session silently,
+  and runs the collect script: it walks the document and every open shadow root (an element
+  of a shadow root right after its host), keeps what §6.1 lists (at most 1001 elements),
+  stores them with `draw`/`narrow`/`end` functions under a non-enumerable global whose name
+  is `__ladybird_hints_` plus 128 random bits, and returns
+  `{items:[{kind,text,url,x,y,width,height}]}`. The server parses that with
+  `parse_hint_collection` (wrong types become defaults, text is read as WTF-8 and cut to 200
+  code points, a link URL is reparsed with `URL::Parser` and dropped beyond 16 KiB, more
+  than 1000 items means `truncated`), makes the labels itself, and runs
+  `draw(labels, mask, typed)`. Once the page answers `"drawn"` it sends `hints_list`. An
+  empty collection is answered with an empty `hints_list` at once.
+- **What goes into scripts.** Only server-made values: the global's name and the tokens (hex),
+  the labels (from the validated alphabet, serialized by `JsonArray`), the narrowing mask (a
+  string of `0`/`1` that the server computes from `prefix`), the length of the typed part, and
+  a validated item index. Neither `id` nor `prefix` reaches the page.
+- **Labels.** A host element `ladybird-hints-<random>` is appended to the document element,
+  with inline `!important` styles (`all: initial`, absolute at 0,0, size 0, z-index
+  2147483647, `pointer-events: none`) and a closed shadow root that holds one box per label:
+  bold 11 px monospace, dark text on `#fff3a3`, 1 px border. A box sits at the top-left corner
+  of the element's first client rectangle in the viewport, moved inside the viewport, in
+  coordinates relative to the host, so it scrolls with the document and adds no scrollable
+  overflow. Styles are set through CSSOM, which a page's CSP does not block.
+- **Narrowing.** `prefix` must be characters of the session's alphabet and no longer than the
+  labels (before the labels exist: than the labels of 1000 items). The page hides the boxes
+  whose mask character is `0` and draws the typed part in `#d04000` whenever some label
+  matches. A `hints_narrow` that arrives before the labels exist is applied when they are
+  drawn; a `hints_end` then ends the session and activates nothing.
+- **Ending.** `hints_end` (and a silent end) runs `end(index)`: the host is removed, the
+  global deleted. With an index the page focuses the element; a text field (`textarea`, a
+  text-like `input`, an element with `contenteditable`) then gets its caret at the end and
+  nothing else. Anything else is hit-tested at nine points of its client rectangles inside
+  the viewport with `elementFromPoint`, descending into open shadow roots; the first point
+  that hits the element or a descendant is returned, and the server clicks there with a mouse
+  move, down and up through `enqueue_input_event` (CSS pixels times `dpr` times zoom), so the
+  page gets a trusted event with user activation: a `target=_blank` link goes to
+  `popup_blocked`, a `select` opens the `select` request. A point outside the view is not
+  clicked. The point comes from the page, which can move it (§6.1); checking it against the
+  item's rectangle would add nothing, as the page reports that rectangle too, and would
+  refuse legitimate clicks after the layout moved. An element covered everywhere is clicked
+  by the page (`click()`), which is untrusted.
+- **Session end.** Another active document sends `hints_cancelled` and runs `end` once more,
+  in case the collect script ran in the new document; earlier answers are dropped. A
+  WebContent crash and the page closing its view send `hints_cancelled` (before
+  `view_closed`). A collect or draw step that is not answered within 5 s, or answers
+  something unusable, sends `hints_cancelled` in place of `hints_list` and asks the page to
+  remove what it made. A disconnecting or replaced client ends the session silently and the
+  labels are removed. `close_view` destroys the view with `view_closed` alone. Errors that
+  answer `hints`, `hints_narrow` or `hints_end`, also for an unknown view, carry the `id` of
+  the message; no other error has one.
+- **Check:** `tools/checks/hints.sh` (run.sh name `hints`) with the pages
+  `hints.html`, `hints-target.html`, `hints-many.html`, `hints-close.html`.
+
 ## 3. Input mapping
 
 ### 3.1 Key names

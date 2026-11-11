@@ -14,7 +14,8 @@ Script lines (--script FILE, one command per line, `#` starts a comment):
   {"type": ...}             send a control message, after forgetting the control
                             messages received so far; "view" is filled in when
                             missing; "$view", "$id" and "$last.KEY" stand for
-                            the view id and fields of the last matched message,
+                            the view id and (dotted) fields of the last matched
+                            message,
                             $pages for the URL of the script's pages directory
                             $dir for the path of the script's directory and
                             $tmp for a directory that is removed at exit
@@ -28,6 +29,10 @@ Script lines (--script FILE, one command per line, `#` starts a comment):
                             height, dpr, encoding (raw, zstd, shm)
   expect-no-frame N         fail when a frame arrives within N seconds
   expect-eof [N]            wait for the server to close the stream
+  expect-no TYPE N          fail when a control message of TYPE arrives
+                            within N seconds
+  expect-order TYPE...      wait for control messages of these types and
+                            fail unless they arrived in this order
   ack on|off                start or stop acknowledging frames; `on` also
                             acknowledges what is outstanding
   frames MIN [MAX]          fail unless MIN..MAX frames arrived since the last
@@ -39,12 +44,31 @@ Script lines (--script FILE, one command per line, `#` starts a comment):
   remove PATH               delete a file
   stall N                   neither read nor write for N seconds
   echo TEXT                 print TEXT to stderr
+  frame-save NAME           remember the frame store as NAME
+  frame-same NAME           fail unless the frame store equals NAME
+  frame-differs NAME        fail if the frame store equals NAME
+  color-in X Y W H RRGGBB [TOL]
+                            fail unless some pixel of the rectangle has that
+                            colour; no-color-in fails if one does
+  hints-valid ALPHABET      check the last hints_list: indices in order,
+                            distinct labels over ALPHABET of the shortest
+                            common length, kinds, text length, urls only on
+                            links, rectangles that intersect the viewport
+  hint TEXT [K=V ...]       pick the first item of the last hints_list with
+                            that text whose fields match; "$hint.KEY" then
+                            stands for its fields
+  no-hint TEXT              fail if the last hints_list has an item with
+                            that text
+  hint-label-shown TEXT     fail unless the frame store shows a hint label
+                            at the item with that text; hint-label-hidden
+                            fails if it does
 
 The "$..." and $... placeholders of control messages work in every line.
 """
 
 import argparse
 import json
+import math
 import mmap
 import os
 import select
@@ -66,6 +90,9 @@ DEFAULT_SERVER = ("/Users/daniel/src/ladybird/Build/release/bin/"
 ENCODING_NAMES = {proto.ENCODING_RAW: "raw", proto.ENCODING_ZSTD: "zstd",
                   proto.ENCODING_SHM: "shm"}
 GLOBAL_TYPES = {"hello", "ping", "pong", "create_view"}
+# The background of the server's hint labels.
+HINT_LABEL_COLOR = "fff3a3"
+HINT_KINDS = {"link", "button", "input", "other"}
 
 
 class CheckFailed(Exception):
@@ -137,6 +164,9 @@ class Client:
         self.shm_failures = 0
         self.stderr_data = b""
         self.scratch = None
+        self.hints = None
+        self.hint = {}
+        self.saved_frames = {}
 
     # -- transport ---------------------------------------------------------
 
@@ -279,6 +309,8 @@ class Client:
             self.rejected = message
         elif kind == "ping":
             self.send({"type": "pong", "id": message.get("id")})
+        elif kind == "hints_list":
+            self.hints = message
         self.inbox.append(message)
 
     def handle_frame(self, payload):
@@ -470,10 +502,11 @@ class Client:
         if self.view_id is not None:
             text = text.replace('"$view"', str(self.view_id))
         text = text.replace('"$id"', json.dumps(self.last.get("id")))
-        while '"$last.' in text:
-            start = text.index('"$last.')
-            end = text.index('"', start + 1)
-            text = text[:start] + json.dumps(self.last.get(text[start + 7:end])) + text[end + 1:]
+        for prefix, source in (('"$last.', self.last), ('"$hint.', self.hint)):
+            while prefix in text:
+                start = text.index(prefix)
+                end = text.index('"', start + 1)
+                text = text[:start] + json.dumps(lookup(source, text[start + len(prefix):end])) + text[end + 1:]
         return text
 
     def run_script(self, path):
@@ -514,6 +547,22 @@ class Client:
             self.pump_for(float(words[0]))
             if self.frame_count != count:
                 raise CheckFailed(f"{self.frame_count - count} frame(s) arrived")
+        elif command == "expect-no":
+            def arrived():
+                return any(message.get("type") == words[0] for message in self.inbox)
+            deadline = time.monotonic() + float(words[1])
+            while not arrived() and time.monotonic() < deadline:
+                self.pump(min(0.1, max(0, deadline - time.monotonic())))
+            if arrived():
+                message = next(message for message in self.inbox if message.get("type") == words[0])
+                raise CheckFailed(f"unexpected {json.dumps(message)[:300]}")
+        elif command == "expect-order":
+            def positions():
+                types = [message.get("type") for message in self.inbox]
+                return [types.index(kind) for kind in words] if all(kind in types for kind in words) else None
+            found = self.wait_until(positions, timeout, " and ".join(words))
+            if found != sorted(found):
+                raise CheckFailed(f"arrived in the order {[words[i] for i in sorted(range(len(words)), key=found.__getitem__)]}")
         elif command == "expect-eof":
             deadline = time.monotonic() + (float(words[0]) if words else timeout)
             while not self.eof:
@@ -544,6 +593,52 @@ class Client:
             want = bytes.fromhex(words[2].lstrip("#"))
             if any(abs(have - wanted) > tolerance for have, wanted in zip((r, g, b), want)):
                 raise CheckFailed(f"pixel {x},{y} is #{r:02x}{g:02x}{b:02x}")
+        elif command == "frame-save":
+            self.saved_frames[words[0]] = bytes(self.current_view().store)
+        elif command in ("frame-same", "frame-differs"):
+            saved = self.saved_frames[words[0]]
+            store = bytes(self.current_view().store)
+            if command == "frame-same" and store != saved:
+                differing = sum(1 for offset in range(0, min(len(store), len(saved)), 4)
+                                if store[offset:offset + 4] != saved[offset:offset + 4])
+                raise CheckFailed(f"{differing} pixel(s) differ from {words[0]}")
+            if command == "frame-differs" and store == saved:
+                raise CheckFailed(f"the frame store still equals {words[0]}")
+        elif command in ("color-in", "no-color-in"):
+            x, y, width, height = (int(float(word)) for word in words[:4])
+            tolerance = int(words[5]) if len(words) > 5 else 0
+            found = self.color_in(x, y, width, height, words[4], tolerance)
+            if command == "color-in" and not found:
+                raise CheckFailed(f"no pixel of #{words[4]} in {width}x{height} at {x},{y}")
+            if command == "no-color-in" and found:
+                raise CheckFailed(f"a pixel of #{words[4]} in {width}x{height} at {x},{y}")
+        elif command == "hints-valid":
+            self.check_hints(words[0])
+        elif command == "hint":
+            conditions = [control_condition(word) for word in words[1:]]
+            items = self.hint_items()
+            self.hint = next((item for item in items if item.get("text") == words[0]
+                              and all(match(item) for match in conditions)), None)
+            if self.hint is None:
+                raise CheckFailed(f"no matching item with text {words[0]!r} in "
+                                  + json.dumps([item.get("text") for item in items]))
+        elif command == "no-hint":
+            if any(item.get("text") == words[0] for item in self.hint_items()):
+                raise CheckFailed(f"an item has text {words[0]!r}")
+        elif command in ("hint-label-shown", "hint-label-hidden"):
+            item = next((item for item in self.hint_items() if item.get("text") == words[0]), None)
+            if item is None:
+                raise CheckFailed(f"no item with text {words[0]!r}")
+            view = self.current_view()
+            scale = view.dpr * view.state.get("zoom", 1)
+            # A label sits at the top-left corner of its element, moved into the viewport.
+            x = max(0, math.floor(item["x"] * scale) - 2)
+            y = max(0, math.floor(item["y"] * scale) - 2)
+            found = self.color_in(x, y, round(16 * scale), round(12 * scale), HINT_LABEL_COLOR, 6)
+            if command == "hint-label-shown" and not found:
+                raise CheckFailed(f"no label at {words[0]!r}")
+            if command == "hint-label-hidden" and found:
+                raise CheckFailed(f"a label at {words[0]!r}")
         elif command == "png":
             self.write_png(os.path.join(base, words[0]) if not os.path.isabs(words[0]) else words[0])
         elif command == "png-size":
@@ -564,6 +659,56 @@ class Client:
             print(rest, file=sys.stderr)
         else:
             raise CheckFailed(f"unknown script command {command}")
+
+    def color_in(self, x, y, width, height, color, tolerance):
+        view = self.current_view()
+        want = bytes.fromhex(color.lstrip("#"))
+        for row in range(max(0, y), min(view.height, y + height)):
+            for column in range(max(0, x), min(view.width, x + width)):
+                offset = (row * view.width + column) * 4
+                b, g, r = view.store[offset:offset + 3]
+                if all(abs(have - wanted) <= tolerance for have, wanted in zip((r, g, b), want)):
+                    return True
+        return False
+
+    def hint_items(self):
+        if self.hints is None:
+            raise CheckFailed("no hints_list arrived")
+        return self.hints.get("items", [])
+
+    def check_hints(self, alphabet):
+        """Check the structure of the last hints_list against protocol section 6.1."""
+        items = self.hint_items()
+        view = self.current_view()
+        scale = view.dpr * view.state.get("zoom", 1)
+        css_width, css_height = view.width / scale, view.height / scale
+        if not isinstance(self.hints.get("truncated"), bool):
+            raise CheckFailed("truncated is not a boolean")
+        labels = [item.get("label") for item in items]
+        length = 1
+        while len(alphabet) ** length < len(items):
+            length += 1
+        for position, item in enumerate(items):
+            where = f"item {position} {json.dumps(item)[:200]}"
+            if item.get("index") != position:
+                raise CheckFailed(f"{where}: index is not {position}")
+            label = item.get("label")
+            if not isinstance(label, str) or len(label) != length or any(c not in alphabet for c in label):
+                raise CheckFailed(f"{where}: label is not {length} characters of {alphabet}")
+            if item.get("kind") not in HINT_KINDS:
+                raise CheckFailed(f"{where}: bad kind")
+            if not isinstance(item.get("text"), str) or len(item["text"]) > 200:
+                raise CheckFailed(f"{where}: bad text")
+            url = item.get("url")
+            if (item["kind"] != "link" and url is not None) or (url is not None and ":" not in url):
+                raise CheckFailed(f"{where}: bad url")
+            x, y, width, height = (item.get(key) for key in ("x", "y", "width", "height"))
+            if not all(isinstance(value, (int, float)) for value in (x, y, width, height)):
+                raise CheckFailed(f"{where}: rectangle is not numbers")
+            if width < 1 or height < 1 or x >= css_width or y >= css_height or x + width <= 0 or y + height <= 0:
+                raise CheckFailed(f"{where}: rectangle is outside the {css_width:g}x{css_height:g} viewport")
+        if len(set(labels)) != len(labels):
+            raise CheckFailed("labels are not distinct")
 
     def run(self):
         self.connect()

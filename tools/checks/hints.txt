@@ -1,0 +1,388 @@
+# Hints (protocol section 6.1): run with --url hints.html --viewport 800x600@1.
+{"type":"set_focus","focused":true}
+settle 0.5
+frame-save before
+
+# What can be activated in the viewport is listed in document order, with labels of one length.
+{"type":"hints","id":1,"alphabet":"asdf"}
+expect hints_list id=1 items#=12 truncated=false
+hints-valid asdf
+hint "plain link" index=0 label=aa kind=link url~=/checks/pages/hints-target.html x=20 y=20
+hint "new window link" kind=link url=https://example.org/blank x=20 y=60
+hint "press me" kind=button url=null x=20 y=100
+hint "check me" kind=other x=60 y=140
+hint "check me" kind=other x=24 y=143 width=13 height=13
+hint "type here" kind=input x=20 y=180
+hint "notes" kind=input x=20 y=220
+hint "One" kind=other x=20 y=290
+hint "clickable div" kind=other x=20 y=400 width=140 height=30
+hint "covered link" index=9 label=ds kind=link url~=hints.html#covered x=20 y=450
+hint "draft" index=10 label=dd kind=input x=20 y=500
+hint "shadow button" index=11 label=df kind=button x=20 y=540
+no-hint "disabled button"
+no-hint "display none link"
+no-hint "invisible link"
+no-hint "far link"
+
+# The labels are in the frames, above everything, also above the element that covers a link.
+settle 0.5
+frame-differs before
+hint-label-shown "plain link"
+hint-label-shown "press me"
+hint-label-shown "type here"
+hint-label-shown "covered link"
+
+# Narrowing hides the labels that do not start with the prefix.
+{"type":"hints_narrow","id":1,"prefix":"d"}
+settle 0.5
+hint-label-shown "clickable div"
+hint-label-shown "covered link"
+hint-label-hidden "plain link"
+hint-label-hidden "press me"
+# The typed part of a label stands out.
+color-in 20 398 10 14 d04000 70
+no-color-in 30 398 10 14 d04000 70
+{"type":"hints_narrow","id":1,"prefix":"ds"}
+settle 0.5
+hint-label-shown "covered link"
+hint-label-hidden "clickable div"
+{"type":"hints_narrow","id":1,"prefix":"f"}
+settle 0.5
+hint-label-hidden "covered link"
+{"type":"hints_narrow","id":1,"prefix":""}
+settle 0.5
+hint-label-shown "plain link"
+hint-label-shown "covered link"
+
+# The labels stay where they are in the document while the page scrolls.
+color-in 21 22 10 6 fff3a3 6
+{"type":"mouse","kind":"wheel","x":400,"y":300,"dx":0,"dy":15,"modifiers":0,"precise":true}
+settle 0.5
+color-in 21 6 10 2 fff3a3 6
+no-color-in 21 22 10 6 fff3a3 6
+{"type":"mouse","kind":"wheel","x":400,"y":300,"dx":0,"dy":-15,"modifiers":0,"precise":true}
+settle 0.5
+color-in 21 22 10 6 fff3a3 6
+
+# Ending without activation leaves the page as it was, and the session is over.
+{"type":"hints_end","id":1,"activate":null}
+expect-no hints_cancelled 0.5
+settle 0.5
+frame-same before
+expect-no state 0.5
+{"type":"hints_narrow","id":1,"prefix":""}
+expect error id=1 message~=hints_narrow
+
+# A new session replaces the one before it without a message.
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2 items#=12
+{"type":"hints","id":3,"alphabet":"0123456789"}
+expect-no hints_cancelled 0.5
+expect hints_list id=3 items#=12 'items.0.label="00"' 'items.11.label="11"'
+hints-valid 0123456789
+{"type":"hints_narrow","id":2,"prefix":""}
+expect error id=2 message~=hints_narrow
+
+# Bad requests are refused with an error that carries their id, and change nothing.
+{"type":"hints","id":5,"alphabet":"a"}
+expect error id=5 message~=alphabet
+{"type":"hints","id":5,"alphabet":"aa"}
+expect error id=5 message~=alphabet
+{"type":"hints","id":5,"alphabet":"AB"}
+expect error id=5 message~=alphabet
+{"type":"hints","id":5,"alphabet":"ab-"}
+expect error id=5 message~=alphabet
+{"type":"hints","id":5,"alphabet":"abcdefghijklmnopqrstuvwxyz0123456789a"}
+expect error id=5 message~=alphabet
+{"type":"hints","id":5,"alphabet":7}
+expect error id=5 message~=alphabet
+{"type":"hints","id":5}
+expect error id=5 message~=alphabet
+{"type":"hints","alphabet":"ab"}
+expect error "message~=an id"
+{"type":"hints","id":"5","alphabet":"ab"}
+expect error id='"5"' "message~=an id"
+{"type":"hints","id":-1,"alphabet":"ab"}
+expect error id=-1 "message~=an id"
+{"type":"hints","id":1.5,"alphabet":"ab"}
+expect error id=1.5 "message~=an id"
+{"type":"hints","id":9007199254740992,"alphabet":"ab"}
+expect error id=9007199254740992 "message~=an id"
+{"type":"hints","id":{"x":1},"alphabet":"ab"}
+expect error id.x=1 "message~=an id"
+{"type":"hints","id":null,"alphabet":"ab"}
+expect error "message~=an id"
+{"type":"hints_narrow","id":"3","prefix":"1"}
+expect error id='"3"' message~=hints_narrow
+{"type":"hints_narrow","prefix":"1"}
+expect error message~=hints_narrow
+{"type":"hints_narrow","id":3}
+expect error id=3 message~=prefix
+{"type":"hints_narrow","id":3,"prefix":7}
+expect error id=3 message~=prefix
+{"type":"hints_narrow","id":3,"prefix":"a"}
+expect error id=3 message~=prefix
+{"type":"hints_narrow","id":3,"prefix":"000"}
+expect error id=3 message~=prefix
+{"type":"hints","view":99,"id":42,"alphabet":"ab"}
+expect error view=99 id=42 "message=unknown view"
+{"type":"hints_end","view":99,"id":43,"activate":null}
+expect error view=99 id=43 "message=unknown view"
+{"type":"load","view":99,"url":"about:blank"}
+expect error view=99 id=null "message=unknown view"
+{"type":"hints_end","id":4,"activate":0}
+expect error id=4 message~=hints_end
+{"type":"hints_narrow","id":3,"prefix":"01"}
+expect-no error 0.5
+settle 0.5
+hint-label-shown "new window link"
+hint-label-hidden "plain link"
+
+# An activate that names no item removes the labels and activates nothing.
+{"type":"hints_end","id":3,"activate":"0"}
+expect-no state 1
+settle 0.5
+frame-same before
+{"type":"hints","id":6,"alphabet":"asdf"}
+expect hints_list id=6
+{"type":"hints_end","id":6,"activate":12}
+expect-no state 1
+{"type":"hints","id":6,"alphabet":"asdf"}
+expect hints_list id=6
+{"type":"hints_end","id":6,"activate":0.5}
+expect-no state 1
+{"type":"hints","id":6,"alphabet":"asdf"}
+expect hints_list id=6
+{"type":"hints_end","id":6,"activate":-1}
+expect-no state 1
+settle 0.5
+frame-same before
+
+# Activation clicks like the user would: a link navigates.
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "plain link"
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect state "title=hint target" loading=false
+{"type":"history","delta":-1}
+expect state title=hints loading=false
+settle 0.3
+
+# A link to a new window goes where a middle click goes.
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "new window link"
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect popup_blocked url=https://example.org/blank
+
+# A button gets a trusted click.
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "press me"
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect state title=button:true
+
+# A checkbox toggles, and so does its label.
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "check me" x=24
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect state title=check:true
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "check me" x=60
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect state title=check:false
+
+# A text field gets the focus and a caret, and is not clicked.
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "type here"
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect state title=focus:text
+expect-no state 1
+{"type":"key","kind":"down","key":"X","code_point":120,"modifiers":0}
+{"type":"key","kind":"up","key":"X","code_point":120,"modifiers":0}
+expect state title=text:x
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "notes"
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect state title=focus:area
+expect-no state 1
+{"type":"key","kind":"down","key":"X","code_point":120,"modifiers":0}
+{"type":"key","kind":"up","key":"X","code_point":120,"modifiers":0}
+expect state title=area:notesx
+
+# A select opens the chooser.
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "One"
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect select items.1.label=Two
+{"type":"select_closed","id":"$id","item":"$last.items.1.id"}
+expect state title=select:two
+
+# An element with an onclick attribute gets a trusted click.
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "clickable div"
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect state title=div:true
+
+# An element with contenteditable gets the focus and a caret, and is not clicked.
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "draft" kind=input
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect state title=focus:edit
+expect-no state 1
+{"type":"key","kind":"down","key":"X","code_point":120,"modifiers":0}
+{"type":"key","kind":"up","key":"X","code_point":120,"modifiers":0}
+expect state title=edit:draftx
+
+# An element in an open shadow root gets a trusted click.
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "shadow button" kind=button
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect state title=shadow:true
+
+# A covered link cannot be clicked where it is, so the page clicks it.
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "covered link"
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect state title=hash:#covered
+
+# The click lands on the element also when the page is zoomed and the device pixel ratio is not 1.
+{"type":"load","url":"$pages/hints.html"}
+expect state title=hints loading=false
+{"type":"set_viewport","width":1600,"height":1200,"dpr":2}
+expect-frame full=true width=1600 height=1200
+{"type":"zoom","op":"in"}
+expect state zoom=1.1
+settle 0.5
+{"type":"hints","id":8,"alphabet":"asdf"}
+expect hints_list id=8
+hints-valid asdf
+hint "clickable div" x=20 y=400
+settle 0.5
+hint-label-shown "clickable div"
+{"type":"hints_end","id":8,"activate":"$hint.index"}
+expect state title=div:true
+{"type":"zoom","op":"reset"}
+expect state zoom=1
+{"type":"set_viewport","width":800,"height":600,"dpr":1}
+expect-frame full=true width=800 height=600
+
+# Another document ends the session, which the client is told.
+{"type":"hints","id":9,"alphabet":"asdf"}
+expect hints_list id=9
+{"type":"load","url":"$pages/text.html"}
+expect hints_cancelled id=9
+expect state title=text loading=false
+{"type":"hints_end","id":9,"activate":null}
+expect error id=9 message~=hints_end
+
+# A page with nothing to label gets an empty list, which ends the session.
+{"type":"load_html","html":"<p>nothing to see</p><a href=#x style=display:none>x</a><button disabled>b</button>"}
+expect state loading=false
+settle 0.3
+{"type":"hints","id":10,"alphabet":"ab"}
+expect hints_list id=10 items#=0 truncated=false
+{"type":"hints_narrow","id":10,"prefix":""}
+expect error id=10 message~=hints_narrow
+
+# More than 1000 elements: the first 1000 get labels.
+{"type":"load","url":"$pages/hints-many.html"}
+expect state title=many loading=false
+settle 0.5
+frame-save many
+{"type":"hints","id":11,"alphabet":"ab"}
+expect hints_list id=11 items#=1000 truncated=true 'items.0.text="0"' 'items.999.text="999"' items.999.label=bbbbbaabbb
+hints-valid ab
+settle 0.5
+frame-differs many
+{"type":"hints_end","id":11,"activate":null}
+settle 0.5
+frame-same many
+
+# A page can falsify what its script reports, but not past the limits.
+{"type":"load_html","html":"<title>huge</title><script>JSON.stringify = () => 'x'.repeat(30000000)</script><a href=#a>a</a>"}
+expect state title=huge loading=false
+{"type":"hints","id":12,"alphabet":"ab"}
+expect hints_cancelled id=12
+{"type":"load_html","html":"<title>fake</title><script>var text = 'y'.repeat(1000), items = []; for (var i = 0; i < 5000; ++i) items.push({kind: 'evil', text: text, url: 'javascript:alert(1)', x: 1e308, y: 's', width: NaN, height: -5}); var fake = JSON.stringify({items: items}); JSON.stringify = () => fake</script><a href=#a>a</a>"}
+expect state title=fake loading=false
+{"type":"hints","id":13,"alphabet":"ab"}
+expect hints_list id=13 items#=1000 truncated=true items.0.kind=other items.0.text#=200 items.0.url=null items.0.x=1000000000 items.0.y=0 items.0.width=0 items.0.height=-5
+{"type":"hints_end","id":13,"activate":0}
+expect-no state 1
+{"type":"load_html","html":"<title>throws</title><script>Element.prototype.getBoundingClientRect = () => { throw new Error('no') }</script><a href=#a>a</a>"}
+expect state title=throws loading=false
+{"type":"hints","id":14,"alphabet":"ab"}
+expect hints_cancelled id=14
+{"type":"load_html","html":"<title>text</title><body><script>var link = document.createElement('a'); link.href = 'https://example.org/' + 'p'.repeat(20000); link.textContent = 'a\\ud800b ' + '\\ud83d\\ude00'.repeat(300); document.body.appendChild(link)</script>"}
+expect state title=text loading=false
+{"type":"hints","id":15,"alphabet":"ab"}
+expect hints_list id=15 items#=1 items.0.kind=link items.0.url=null items.0.text~=a�b
+{"type":"hints_end","id":15,"activate":null}
+{"type":"ping","id":"alive"}
+expect pong id=alive
+
+# A page that keeps the script from answering ends the session, and the server keeps working.
+{"type":"load_html","html":"<title>slow</title><script>var slow = true, original = Element.prototype.getBoundingClientRect; Element.prototype.getBoundingClientRect = function () { if (slow) { slow = false; var end = Date.now() + 8000; while (Date.now() < end); } return original.call(this) }</script><a href=#a>a</a>"}
+expect state title=slow loading=false
+settle 0.3
+frame-save slow
+{"type":"hints","id":16,"alphabet":"ab"}
+expect hints_cancelled id=16 timeout=10
+expect-no hints_list 0.1
+{"type":"ping","id":"alive"}
+expect pong id=alive
+sleep 4
+{"type":"hints","id":17,"alphabet":"ab"}
+expect hints_list id=17 items#=1
+{"type":"hints_end","id":17,"activate":null}
+settle 0.5
+frame-same slow
+
+# Before hints_list, a hints_narrow applies once the labels are drawn, and a hints_end activates nothing.
+{"type":"load_html","html":"<title>delay</title><script>var last = 0, original = Element.prototype.getBoundingClientRect; Element.prototype.getBoundingClientRect = function () { var now = Date.now(); if (now - last > 1500) { var end = now + 2000; while (Date.now() < end); } last = Date.now(); return original.call(this) }</script><p><a href=#one>one</a><p><a href=#two>two</a><p><a href=#three>three</a>"}
+expect state title=delay loading=false
+settle 0.3
+sleep 2
+{"type":"hints","id":30,"alphabet":"ab"}
+{"type":"hints_narrow","id":30,"prefix":"b"}
+expect hints_list id=30 items#=3 items.2.label=ba
+settle 0.5
+hint-label-shown "three"
+hint-label-hidden "one"
+hint-label-hidden "two"
+{"type":"hints_end","id":30,"activate":null}
+settle 0.5
+frame-save delay
+sleep 2
+{"type":"hints","id":31,"alphabet":"ab"}
+{"type":"hints_end","id":31,"activate":0}
+expect-no hints_list 4
+expect-no state 0.5
+settle 0.5
+frame-same delay
+{"type":"hints_narrow","id":31,"prefix":""}
+expect error id=31 message~=hints_narrow
+
+# A page that closes its view ends the session first.
+{"type":"close_view"}
+expect view_closed reason=client
+{"type":"create_view","width":800,"height":600,"dpr":1,"url":"$pages/hints-close.html"}
+expect view_created
+expect state title=close loading=false
+{"type":"hints","id":40,"alphabet":"ab"}
+expect hints_list id=40 items#=1
+expect-order hints_cancelled view_closed
+expect hints_cancelled id=40
+expect view_closed reason=closed
+{"type":"hints","id":41,"alphabet":"ab"}
+expect error id=41 "message=unknown view"

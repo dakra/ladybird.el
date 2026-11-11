@@ -1,0 +1,6 @@
+# A client that follows one that left a hint session sees no labels and is not told about the session.
+settle 1
+no-color-in 0 0 800 600 fff3a3 6
+expect-no hints_cancelled 1
+{"type":"hints_narrow","id":20,"prefix":""}
+expect error id=20 message~=hints_narrow

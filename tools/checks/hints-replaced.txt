@@ -1,0 +1,8 @@
+# Starts a hint session and waits to be replaced: run with --url hints.html.
+settle 0.3
+{"type":"hints","id":20,"alphabet":"asdf"}
+expect hints_list id=20 items#=12
+settle 0.5
+hint-label-shown "plain link"
+echo labels are shown
+expect replaced timeout=30
