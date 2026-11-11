@@ -20,6 +20,7 @@ Script lines (--script FILE, one command per line, `#` starts a comment):
                             $dir for the path of the script's directory and
                             $tmp for a directory that is removed at exit
   sleep N                   keep reading for N seconds
+  click X Y                 move the mouse to X,Y and click the left button
   settle [N]                wait until no frame arrived for N seconds (1.0)
   expect TYPE [K=V ...]     wait for a control message of TYPE whose fields
                             equal the JSON values V (K may be dotted;
@@ -315,7 +316,9 @@ class Client:
             for description in message.get("views", []):
                 self.view(description["view"]).state = description
         elif kind == "view_created":
-            self.view_id = message["view"]
+            # A view a page opened does not become the one the script is about.
+            if "opener" not in message:
+                self.view_id = message["view"]
             self.view(message["view"]).state = dict(message)
         elif kind == "state":
             self.view(message["view"]).state = message
@@ -492,7 +495,8 @@ class Client:
         width, height, dpr = self.args.viewport
         self.send({"type": "hello", "protocol": self.args.protocol, "client": "ladybird-client 0.1",
                    "viewport": {"width": width, "height": height, "dpr": dpr},
-                   "encodings": self.args.encodings, "shm": self.args.shm, "token": None})
+                   "encodings": self.args.encodings, "shm": self.args.shm, "popups": self.args.popups,
+                   "token": None})
         self.wait_until(lambda: self.welcome, self.args.timeout, "welcome")
         if self.welcome.get("protocol") != proto.PROTOCOL_VERSION:
             raise CheckFailed(f"welcome has protocol {self.welcome.get('protocol')}")
@@ -581,6 +585,14 @@ class Client:
                 words.remove(word)
         if command == "sleep":
             self.pump_for(float(words[0]))
+        elif command == "click":
+            x, y = int(words[0]), int(words[1])
+            self.inbox.clear()
+            for kind, button, buttons in (("move", None, []), ("down", "left", ["left"]), ("up", "left", [])):
+                message = {"type": "mouse", "kind": kind, "x": x, "y": y, "buttons": buttons, "modifiers": 0}
+                if button:
+                    message.update(button=button, clicks=1)
+                self.send(self.fill_in(message))
         elif command == "settle":
             self.settle(float(words[0]) if words else 1.0)
         elif command == "expect":
@@ -896,6 +908,7 @@ def main():
     parser.add_argument("--viewport", type=parse_viewport, default=(800, 600, 1.0), metavar="WxH@DPR")
     parser.add_argument("--encodings", default=None, help="comma-separated, in preference order")
     parser.add_argument("--shm", action="store_true", help="offer shared memory")
+    parser.add_argument("--popups", action="store_true", help="take views that pages open")
     parser.add_argument("--fail-shm", action="store_true", help="answer every shm message with shm_failed")
     parser.add_argument("--protocol", type=int, default=proto.PROTOCOL_VERSION)
     parser.add_argument("--url")

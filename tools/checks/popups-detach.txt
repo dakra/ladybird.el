@@ -1,0 +1,11 @@
+# A client that takes popups leaves two behind, one of them of another site: run with --socket --popups --shm
+# --url $http/popups-cross.html.
+{"type":"set_focus","focused":true}
+settle 0.5
+click 400 20
+expect view_created view=2 opener=1
+expect state view=2 title=child?named:opener loading=false
+click 400 60
+expect view_created view=3 opener=1
+expect state view=3 title=child?cross:opener loading=false
+echo popups are left

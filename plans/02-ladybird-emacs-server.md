@@ -23,8 +23,7 @@ v1 delivers `Ladybird --headless=emacs`:
 - dialogs and pickers of section 7 including `context_menu` and `external_url`
 - second client replaces the first; disconnect keeps the view; SIGINT/SIGTERM/SIGHUP clean up
 
-Out of scope (protocol section 10 plus Ladybird-side limits): TCP transport, multiple
-views and `view_created` for popups (a popup is reported as `popup_blocked`, see 2.3), file uploads from the client machine, `context_menu_action`, downloads,
+Out of scope (protocol section 10 plus Ladybird-side limits): TCP transport, file uploads from the client machine, `context_menu_action`, downloads,
 devtools, Windows (`TerminalWebView` is also `if (NOT WIN32)`).
 
 ## 2. Design
@@ -47,7 +46,8 @@ in-process, with no IPC to add: that is why the Emacs server lives in `LibWebVie
 What headless cannot do: there is no tab strip, so `Application::open_blank_new_tab`
 returns `{}` (`Libraries/LibWebView/Application.h:284`; `Hub::Application` falls back to it
 without a UI, `Services/Hub/Application.cpp:108-112`). Consequences: `get_source()` shows
-nothing (8.4), and popups go to `HeadlessWebView::create_child` (8.9).
+nothing (8.4), and windows that pages open get an `EmacsWebView` of their own or, when
+there is none for them, a hidden `HeadlessWebView::create_child` (2.11).
 
 ### 2.2 Files to add
 
@@ -110,7 +110,7 @@ All callbacks are members of `WebView::ViewImplementation` (`Libraries/LibWebVie
 | `on_request_permission(PermissionPromptRequest const&, PermissionPromptCallback)` (`ViewImplementation.h:110,123`; `name: Web::Permissions::PermissionName` via `Web::Permissions::to_string`, `top_level_origin.serialize()`, `is_file`) | `permission`; call `did_show_permission_prompt(request)` when sent; answer with `Web::Permissions::PromptOutcome` (`AllowAlways`, `AllowOnce`, `Block`, `Dismissed`, `Ignored`, `Cancelled`): `allow_once`→`AllowOnce`, `allow_always`→`AllowAlways`, `deny`→`Block`, `dismiss`→`Dismissed`. `on_cancel_permission_prompt(request)` → call stored callback with `Cancelled`, drop id, send `permission_cancelled`. |
 | `on_request_external_url_confirmation(URL const&, URL::Origin const&, ExternalURLHandler const&, Function<void(bool)>)` | `external_url` with `application = handler.application_name()`; answer calls the stored function |
 | *virtual* `did_request_context_menu(ContextMenuRequest)` (`Libraries/LibWebView/ContextMenuRequest.h`: `kind ∈ {Page, Link, Image, Media}`, `widget_position`, `is_editable`, `selected_text`, `link_navigation`/`navigation` (`Web::HTML::PreparedNavigationDescriptor`, URL via its `url` member), `image_mime_type`, `media`) | `context_menu` |
-| `on_new_web_view` | `popup_blocked {view, url}` (`url` null when the callback does not supply one). The callback must return a window handle synchronously, so `HeadlessWebView`'s hidden child is still created; close it once its first URL is known and report that URL |
+| `on_new_web_view` | A view for the window, announced with `view_created {opener}` (2.11). Without one, `popup_blocked {view, url}` (`url` null when the callback does not supply one): the callback must return a window handle synchronously, so `HeadlessWebView`'s hidden child is created; it is closed once its first URL is known, which is reported |
 | page clipboard writes (copy, `navigator.clipboard.writeText`): headless keeps them in `Application`'s in-process `m_clipboard`; find the hook in T5 (`Application::insert_clipboard_item` or the view's clipboard callback) | `clipboard {view, text}` for `text/plain` representations |
 | `on_request_screenshot`, `on_request_dictionary_lookup`, `on_activate_tab`, `on_theme_color_change`, DOM/devtools callbacks | ignored |
 
@@ -380,9 +380,9 @@ announces a new one to the next client.
   leaves the server's views at once; it is destroyed after the callback returns. A
   `close_view` for a view that was closed already gets no answer; one for an id that was
   never a view's gets `error`.
-- **Downloads.** A download blocked in a server with one view is reported with that view's
-  id; with several, the `error` has no `view`, as the download does not say which view it
-  is of.
+- **Downloads.** A blocked download is reported with the id of the view whose page or
+  user asked for it. One of a window without a view of its own (2.11) is reported with
+  the only view's id, or without `view` when there are several.
 - **Check:** `tools/checks/views.sh` (run.sh name `views`) with `views.txt` (three views
   with a limit of three: pages and pixels, the limit error, hiding and showing, bands of a
   4200×4100 frame beside another animating view, a dialog in one view while others work,
@@ -394,6 +394,55 @@ announces a new one to the next client.
   `create_view` with the WebContent processes and segments left after closing,
   `views-detach.txt` / `views-reattach.txt`, and `views-encodings-a.txt`, `-b.txt`, `-c.txt`
   (clients with and without shared memory and zstd, one after another).
+
+### 2.11 Views opened by pages
+
+A window a page opens goes through the engine's own path: the renderer asks for a new
+top-level traversable only with user activation, which it consumes, so a page gets one
+window per user activation however many it asks for;
+`WebContentPage::did_request_new_web_view` checks the activation of the input it
+delivered again, and `on_new_web_view` gets the traversable. A link the user middle- or
+ctrl-clicks opens through `create_view_for_new_tab_or_window`, without a traversable and
+without needing the activation, so a handler of that click that calls `window.open` gives
+a second view. Both call
+`EmacsServer::open_view(opener, traversable)`, which makes the view through
+`create_view` like `create_view` from the client, on the engine's traversable, so
+`window.opener`, the `WindowProxy` that `window.open` returns, `noopener`, named targets
+and `window.close()` are the engine's. It has the opener's viewport and `dpr`, and is
+announced with `view_created` carrying `opener` and no `request`, then `state` and a
+frame. A view for a tab sends its first `state` once the caller has started loading the
+URL in it, so that `state` has `loading` true.
+
+- There is a view only while a client is connected whose `hello` had `"popups": true`,
+  the server has fewer than `max_views` views, and the opener's area fits within what the
+  other views leave. Otherwise the window gets the hidden child of 2.3 and the opener
+  sends `popup_blocked`; the child closes once its URL is known or after 2 s.
+- The window starts in the opener's WebContent process
+  (`open_page_for_new_top_level_traversable`), and site isolation moves it as it does any
+  navigation. A crash is reported for the view whose page it took.
+- The opened view does not depend on its opener: closing the opener leaves it, and
+  `window.opener` behaves as the engine defines. `window.close()` sends `view_closed`
+  with `reason: "closed"` (2.10), after which the opener's reference reports `closed`.
+- A client with another `popups` value than the one before finds the opened views as
+  ordinary views; its value applies to windows opened from then on.
+- A window whose first navigation turns out to be a download is closed again: a blocked
+  download is reported for the view whose page or user asked for it
+  (`Application::default_path_for_downloaded_file` gets that view), and a view a page
+  opened that has not committed a navigation yet then sends `view_closed` with
+  `reason: "closed"` after the `error`. A download of a window that has no view of its
+  own is reported with the only view's id, or without `view` when there are several.
+- **Check:** `tools/checks/popups.sh` (run.sh name `popups`), over HTTP with the frame on
+  another site: `popups.txt` (`target=_blank`, middle click, named and unnamed
+  `window.open` and a name used again, `rel=noopener`, a window opened without user
+  activation, `postMessage` both ways, one window per click, a frame of
+  another site, a hinted link, a middle click whose handler also opens a window, a view
+  the client closes at once, the `noopener` feature, a download, find, visibility and a
+  dialog in an opened view, `window.close()` from both sides, the opener closed first),
+  `popups-limit.txt` (the limit, and a closed view's slot used again),
+  `popups-off.txt` (a client without `popups`, also for a middle click), and
+  `popups-detach.txt` / `popups-reattach.txt` on `popups-cross.html` (a client without
+  `popups` comes back to opened views, one of another site in a WebContent process of
+  its own), with the WebContent processes left after closing them.
 
 ## 3. Input mapping
 
@@ -703,7 +752,7 @@ Existing options that apply: `--window-width/--window-height` (initial view when
 - **Headless `Application` behaviours**: downloads go to the default download dir without a prompt
   (`Application.cpp:2290`); clipboard is the in-process `m_clipboard`; notifications are no-ops.
 - **`HeadlessWebView` crash propagation**: children propagate crashes to the root via
-  `propagate_web_content_crash`; a popup crash would thus report `crashed` for view 1. Acceptable for v1.
+  `propagate_web_content_crash`; a crash of a hidden child of a blocked popup would thus report `crashed` for its opener.
 - **Open question**: should a stdio server exit when the view closes itself (`on_close`)? This plan keeps it running until EOF; the Emacs side can send `create_view` again.
 - **Open question**: `--emacs-socket` on a path longer than `sizeof(sockaddr_un.sun_path)` (104 on macOS) fails in `SocketAddress::to_sockaddr_un`; report as a startup error.
 

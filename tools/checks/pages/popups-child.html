@@ -1,0 +1,17 @@
+<!doctype html>
+<title>child</title>
+<style>
+    body { margin: 0; }
+    button { display: block; width: 100%; height: 40px; margin: 0; border: 0; padding: 0; }
+</style>
+<button onclick="window.close()">close me</button>
+<button onclick="document.title = 'opener:' + (window.opener ? 'set' : 'none')">opener</button>
+<script>
+    document.title = "child" + location.search + ":" + (window.opener ? "opener" : "none");
+    onmessage = event => {
+        document.title = "got:" + event.data;
+        event.source.postMessage("back:" + event.data, "*");
+    };
+    if (window.opener)
+        window.opener.postMessage("ready" + location.search, "*");
+</script>

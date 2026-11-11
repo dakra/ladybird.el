@@ -146,7 +146,7 @@ input and output until the client disconnects.
 
 | Server → client | Fields | Meaning |
 | --- | --- | --- |
-| `view_created` | `view`, `url`, `title`, `width`, `height`, `dpr`, `request` or `opener` | Answer to `create_view` (with its `request`); `url` is `about:blank`, the `state` that follows has the requested URL with `loading` true. With `opener`, the id of another view, it announces a view a page of that view opened (§3.1) |
+| `view_created` | `view`, `url`, `title`, `width`, `height`, `dpr`, `request` or `opener` | Answer to `create_view` (with its `request`); `url` is `about:blank`, the `state` that follows a `create_view` has the requested URL with `loading` true. With `opener`, the id of another view, it announces a view a page of that view opened (§3.1) |
 | `popup_blocked` | `view`, `url` (null when unknown) | A page tried to open a window with user activation (also middle click and "open in new tab") and the server made no view for it (§3.1); the client may offer to `create_view` with that URL. Ladybird drops popups without user activation silently |
 | `view_closed` | `view`, `reason` (`"closed"`, `"crashed"`, `"client"`) | |
 | `state` | `view`, `url`, `title`, `loading`, `can_go_back`, `can_go_forward`, `zoom` | Whole state, sent whenever any of it changes. Sending the whole thing keeps the client stateless |
@@ -155,17 +155,31 @@ input and output until the client disconnects.
 ### 3.1 Views opened by pages
 
 A page opens a window with `window.open`, a link with a `target` or a middle click.
-Ladybird lets it only after a user's action in the page. The server then makes a view
-for the window when the client's `hello` had `"popups": true` and there are fewer than
-`max_views` views, and sends `view_created` with `opener`, followed by `state` and a
-frame as for any new view. The view has the size and `dpr` of its opener until the
-client sends `set_viewport`. A client that does not want it sends `close_view`.
+Ladybird lets it only after a user's action in the page, unless it was started with
+`--allow-popups`. The server then makes a view for the window when the client's
+`hello` had `"popups": true`, there are fewer than `max_views` views and the limit on
+all viewports leaves room for one of the opener's size, and sends `view_created` with
+`opener`, followed by `state` and a frame as for any new view. Otherwise the server
+makes no view and sends `popup_blocked`.
 
-Otherwise the server makes no view and sends `popup_blocked`.
+The view has the size and `dpr` of its opener until the client sends `set_viewport`.
+Its `url` is `about:blank` until the page's URL is known. A client that does not want
+it sends `close_view`. One action of the user lets the page open one window; a link
+the user clicks with the middle button or with Ctrl opens one more.
 
-The opener's page holds a reference to the new one (`window.opener`, the value
-`window.open` returned), as in a browser. When a page closes its window
-(`window.close()`), the server sends `view_closed` with reason `"closed"`.
+A window whose first navigation turns out to be a download is closed again: the client
+gets the `error` for the download with the new view's id, then `view_closed` with
+reason `"closed"`.
+
+`opener` is the view the window was opened from, also when the new page cannot reach
+that view's page (`noopener`, a middle click). Where the page can, the two hold
+references to each other (`window.opener`, the value `window.open` returned), as in a
+browser. When a page closes its window (`window.close()`), the server sends
+`view_closed` with reason `"closed"`. Closing a view leaves the views it opened.
+
+A view a page opened is a view like any other after that: `welcome.views` lists it
+without `opener`, and the `popups` of a later `hello` decides only about windows opened
+from then on.
 
 ## 4. Frames
 
@@ -526,5 +540,5 @@ written against the draft; read their bodies with these corrections.
 17. Hints (§6.1): `hints`, `hints_narrow`, `hints_end`, `hints_list`, `hints_cancelled`,
     `welcome.features`, and `id` in an `error` that answers a hints message.
 18. Several views per server (§3): `welcome.max_views`, one frame flow and shared
-    memory segment per view. Views opened by pages (§3.1): `hello.popups` and
-    `view_created.opener`.
+    memory segment per view, turns for frames, the limit on all viewports together.
+    Views opened by pages (§3.1): `hello.popups` and `view_created.opener`.

@@ -1,0 +1,20 @@
+# A client without popups comes back to the views popups-detach.txt left: run with --socket --no-view. The opened views
+# are views like any other, and the window keeps its name.
+welcome views#=3 views.1.view=2 views.2.view=3
+expect state view=2 title=child?named:opener
+expect state view=3 title=child?cross:opener
+expect-frame view=2 full=true
+expect-frame view=3 full=true
+{"type":"set_focus","view":1,"focused":true}
+use 1
+click 400 100
+expect state view=2 title=child?again:opener
+click 400 140
+expect popup_blocked view=1 url~=popups-child.html?unnamed
+expect-no view_created 0.5
+{"type":"close_view","view":3}
+expect view_closed view=3 reason=client
+{"type":"close_view","view":2}
+expect view_closed view=2 reason=client
+{"type":"close_view","view":1}
+expect view_closed view=1 reason=client

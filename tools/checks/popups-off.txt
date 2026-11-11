@@ -1,0 +1,12 @@
+# A client without popups: run with --url $http/popups.html. Windows that pages open get no view.
+{"type":"set_focus","focused":true}
+settle 0.5
+click 400 20
+expect popup_blocked view=1 url~=popups-child.html?blank
+click 400 60
+expect popup_blocked view=1 url~=popups-child.html?named
+{"type":"mouse","kind":"move","x":400,"y":20,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":400,"y":20,"button":"middle","buttons":["middle"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":400,"y":20,"button":"middle","buttons":[],"modifiers":0,"clicks":1}
+expect popup_blocked view=1 url~=popups-child.html?blank
+expect-no view_created 1

@@ -1,0 +1,16 @@
+# Views opened by pages beyond the limit: run with --popups --url $http/popups.html on a server with
+# --emacs-max-views=2.
+{"type":"set_focus","focused":true}
+settle 0.5
+click 400 20
+expect view_created opener=1
+keep first
+click 400 60
+expect popup_blocked view=1 url~=popups-child.html?named
+expect-no view_created 1
+# The slot of a closed view is the next window's.
+{"type":"close_view","view":"$kept.first.view"}
+expect view_closed view="$kept.first.view" reason=client
+click 400 140
+expect view_created opener=1
+expect state title=child?unnamed:opener loading=false

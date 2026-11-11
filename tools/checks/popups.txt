@@ -1,0 +1,147 @@
+# Views opened by pages (protocol section 3.1): run with --popups --url $http/popups.html --viewport 800x600@1, the
+# page on 127.0.0.1 and its frame on localhost. Each button of a page is 40 pixels high, the first at the top.
+{"type":"set_focus","focused":true}
+# A second after it loaded, the page tries to open a window without user activation, which is dropped silently. View
+# ids are never reused, so the first window that opens below gets view 2.
+expect state view=1 title=unasked:null timeout=5
+expect-no view_created 0.5
+expect-no popup_blocked 0.1
+
+# A link with target=_blank gets a view of the opener's size, without an opener, as such a link implies noopener.
+click 400 20
+expect view_created view=2 opener=1 width=800 height=600 dpr=1
+keep blank
+expect state view="$kept.blank.view" title=child?blank:none loading=false
+expect-frame view="$kept.blank.view" full=true width=800 height=600
+
+# So does a middle click on a link.
+{"type":"mouse","kind":"move","x":400,"y":20,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":400,"y":20,"button":"middle","buttons":["middle"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":400,"y":20,"button":"middle","buttons":[],"modifiers":0,"clicks":1}
+expect view_created opener=1 width=800 height=600
+keep middle
+expect state view="$kept.middle.view" title=child?blank:none loading=false
+{"type":"close_view","view":"$kept.middle.view"}
+expect view_closed view="$kept.middle.view" reason=client
+
+# window.open with a name, and again with the same name, which goes to the same view.
+click 400 60
+expect view_created opener=1
+keep named
+expect state view="$kept.named.view" title=child?named:opener
+expect state view=1 title=msg:ready?named
+click 400 100
+expect state view=1 title=same:true
+expect state view="$kept.named.view" title=child?again:opener
+expect-no view_created 0.5
+
+# window.open without a name, and a link with rel=noopener.
+click 400 140
+expect view_created opener=1
+keep unnamed
+expect state view="$kept.unnamed.view" title=child?unnamed:opener
+click 400 180
+expect view_created opener=1
+keep noopener
+expect state view="$kept.noopener.view" title=child?noopener:none
+
+# postMessage both ways.
+click 400 220
+expect state view="$kept.named.view" title=got:hello
+expect state view=1 title=msg:back:hello
+
+# One click opens one window, however many the page asks for.
+click 400 300
+expect view_created opener=1
+keep many
+expect-no view_created 1
+expect-no popup_blocked 0.1
+expect state view="$kept.many.view" title=child?many0:opener
+
+# A frame of another site opens a window.
+click 400 340
+expect view_created opener=1
+keep frame
+expect state view="$kept.frame.view" title=child?frame:opener loading=false
+
+# A hinted link opens a view as a click does.
+{"type":"hints","view":1,"id":1,"alphabet":"ab"}
+expect hints_list view=1 id=1
+hint "blank link"
+{"type":"hints_end","view":1,"id":1,"activate":"$hint.index"}
+expect view_created opener=1
+keep hinted
+expect state view="$kept.hinted.view" title=child?blank:none loading=false
+
+# A middle click on a link whose handler opens a window too gives two views: the window spends the user activation,
+# and the link the user clicked needs none.
+{"type":"mouse","kind":"move","x":400,"y":380,"buttons":[],"modifiers":0}
+{"type":"mouse","kind":"down","x":400,"y":380,"button":"middle","buttons":["middle"],"modifiers":0,"clicks":1}
+{"type":"mouse","kind":"up","x":400,"y":380,"button":"middle","buttons":[],"modifiers":0,"clicks":1}
+expect view_created opener=1
+keep first
+expect view_created opener=1
+keep second
+expect state title=child?link:none loading=false
+expect state title=child?down:opener loading=false
+expect-no view_created 0.5
+{"type":"close_view","view":"$kept.first.view"}
+expect view_closed view="$kept.first.view" reason=client
+{"type":"close_view","view":"$kept.second.view"}
+expect view_closed view="$kept.second.view" reason=client
+
+# A client that closes a new view at once leaves the opener a reference to a closed window.
+click 400 420
+expect view_created opener=1
+keep late
+{"type":"close_view","view":"$kept.late.view"}
+expect view_closed view="$kept.late.view" reason=client
+expect state view=1 title=moved:true
+
+# window.open with the noopener feature returns null, and the window has no opener.
+click 400 460
+expect view_created opener=1
+keep feature
+expect state view=1 title=feature:null
+expect state view="$kept.feature.view" title=child?feature:none loading=false
+
+# A window whose first navigation is a download is closed again.
+click 400 500
+expect view_created opener=1
+keep download
+expect error view="$kept.download.view" "message=download blocked: popups-file.bin"
+expect view_closed view="$kept.download.view" reason=closed
+{"type":"find","view":1,"query":"download","case_sensitive":false,"highlight_all":false}
+expect find_result view=1 query=download index=1 total=1
+
+# A view opened by a page is a view like any other.
+use "$kept.unnamed.view"
+{"type":"find","query":"close","case_sensitive":false,"highlight_all":true}
+expect find_result query=close index=1 total=1
+{"type":"set_visibility","visible":false}
+expect-no-frame 0.5 view="$kept.unnamed.view"
+{"type":"set_visibility","visible":true}
+expect-frame view="$kept.unnamed.view" full=true
+{"type":"load_html","html":"<script>setTimeout(() => alert('popup'), 100)</script>"}
+expect dialog kind=alert message=popup
+{"type":"dialog_closed","id":"$id","accepted":true}
+{"type":"history","delta":-1}
+expect state title=child?unnamed:opener loading=false
+
+# The opener closes a window through its reference, and the window closes itself.
+use 1
+click 400 260
+expect view_closed view="$kept.named.view" reason=closed
+expect state view=1 title=closed:true
+use "$kept.unnamed.view"
+click 400 20
+expect view_closed view="$kept.unnamed.view" reason=closed
+
+# Closing the opener leaves the views it opened.
+{"type":"close_view","view":1}
+expect view_closed view=1 reason=client
+use "$kept.frame.view"
+click 400 60
+expect state view="$kept.frame.view" "title~=opener:"
+{"type":"find","view":"$kept.many.view","query":"close","case_sensitive":false,"highlight_all":false}
+expect find_result view="$kept.many.view" query=close index=1 total=1

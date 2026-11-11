@@ -1,0 +1,26 @@
+<!doctype html>
+<title>opener</title>
+<style>
+    body { margin: 0; }
+    a, button, iframe { display: block; box-sizing: border-box; width: 100%; height: 40px; margin: 0; border: 0; padding: 0; font: 16px sans-serif; text-align: left; }
+</style>
+<a target="_blank" href="popups-child.html?blank">blank link</a>
+<button onclick="named = window.open('popups-child.html?named', 'named')">named</button>
+<button onclick="again = window.open('popups-child.html?again', 'named'); document.title = 'same:' + (again === named)">named again</button>
+<button onclick="unnamed = window.open('popups-child.html?unnamed')">unnamed</button>
+<a target="_blank" rel="noopener" href="popups-child.html?noopener">noopener link</a>
+<button onclick="named.postMessage('hello', '*')">post</button>
+<button onclick="named.close(); setTimeout(() => document.title = 'closed:' + named.closed, 500)">close</button>
+<button onclick="for (let i = 0; i < 5; i++) window.open('popups-child.html?many' + i)">many</button>
+<iframe id="frame"></iframe>
+<a href="popups-child.html?link" onmousedown="if (event.button == 1) window.open('popups-child.html?down')">middle and open</a>
+<button onclick="late = window.open('popups-child.html?late'); setTimeout(() => { late.location = 'popups-child.html?moved'; document.title = 'moved:' + late.closed }, 1500)">late</button>
+<button onclick="feature = window.open('popups-child.html?feature', '_blank', 'noopener'); document.title = 'feature:' + feature">noopener feature</button>
+<a target="_blank" href="popups-file.bin">download</a>
+<script>
+    // The frame is of another site: the page is on 127.0.0.1, the frame on localhost.
+    frame.src = "http://localhost:" + location.port + "/popups-frame.html";
+    onmessage = event => document.title = "msg:" + event.data;
+    // Without user activation, nothing opens.
+    setTimeout(() => document.title = "unasked:" + window.open("popups-child.html?unasked"), 1000);
+</script>

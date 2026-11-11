@@ -1,6 +1,6 @@
 #!/bin/bash
 # Runs every acceptance check of the server work package against a built Ladybird.
-# Usage: tools/checks/run.sh [CHECK...]   (default: all; names are t4 reattach t5 t6 t7 t8 t9 bands hints views mock)
+# Usage: tools/checks/run.sh [CHECK...]   (default: all; names are t4 reattach t5 t6 t7 t8 t9 bands hints views popups mock)
 set -u
 . "$(dirname "$0")/common.sh"
 
@@ -39,7 +39,7 @@ mock_check() {
     echo "mock: ok"
 }
 
-[ $# -eq 0 ] && set -- t4 reattach t5 t6 t7 t8 t9 bands hints views mock
+[ $# -eq 0 ] && set -- t4 reattach t5 t6 t7 t8 t9 bands hints views popups mock
 for check in "$@"; do
     case "$check" in
         t4) shell_check t4-handshake ;;
@@ -55,6 +55,7 @@ for check in "$@"; do
             ;;
         hints) shell_check hints ;;
         views) shell_check views ;;
+        popups) shell_check popups ;;
         mock) mock_check ;;
         *) echo "unknown check $check" >&2; exit 2 ;;
     esac
