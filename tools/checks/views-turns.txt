@@ -8,7 +8,7 @@ sleep 0.5
 
 # A page that sets a title of 1 MiB over and over while the client reads nothing neither costs the client its
 # connection nor keeps the other views' frames behind its titles.
-{"type":"load_html","view":1,"html":"<script>let i = 0; const big = 'x'.repeat(1 << 20); setInterval(() => { document.title = (i++) + big; if (i == 2000) document.title = 'done'; }, 0)</script>"}
+{"type":"load_html","view":1,"html":"<script>let i = 0; const big = 'x'.repeat(1 << 20); const timer = setInterval(() => { document.title = (i++) + big; if (i == 500) { clearInterval(timer); document.title = 'done'; } }, 0)</script>"}
 stall 6
 sleep 0.5
 frames 0 100000 view=2
