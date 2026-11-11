@@ -11,13 +11,13 @@
     {"wait": "until", "pred": "(ladybird-live-page-p \"events\")", "timeout": 60},
 
     {"group": "console", "comment": "console output is collected once it is turned on"},
-    {"keys": "C-c C-l"},
+    {"keys": "C-c C-t"},
     {"eval": "(progn (delete-other-windows (get-buffer-window (ladybird-live-buffer))) t)", "comment": "the console buffer was shown in a second window"},
     {"wait": "until", "pred": "(eql (ladybird-live-in-page (cdr ladybird--canvas-size)) (window-body-height (get-buffer-window (ladybird-live-buffer)) t))"},
     {"mouse": "click", "x": 60, "y": 20, "button": 1},
     {"wait": "until", "pred": "(eql (ladybird-live-number \"logged\") 1)"},
     {"wait": "text", "pattern": "\\[log\\] clicked 1\\n.*\\[warn\\] a warning", "buffer": "*ladybird-console*"},
-    {"keys": "C-c C-l"},
+    {"keys": "C-c C-t"},
     {"assert": {"eval": "(ladybird-live-in-page (not ladybird--console))"}},
 
     {"group": "popup", "comment": "a window the page opens is blocked and remembered"},

@@ -11,10 +11,8 @@
     {"wait": "until", "pred": "(ladybird-live-page-p \"form\")", "timeout": 60},
 
     {"group": "keep", "comment": "a buffer killed with its page kept leaves the page on the server"},
-    {"keys": "i"},
     {"type": "kept"},
     {"wait": "until", "pred": "(equal (ladybird-live-field \"value\") \"kept\")"},
-    {"keys": "C-c C-c"},
     {"eval": "(progn (setq ladybird-live-scratch (ladybird-live-conn)) (let ((ladybird-keep-view-on-kill t)) (kill-buffer (ladybird-live-buffer))) t)"},
     {"assert": {"eval": "(and (null (ladybird--buffers)) (null ladybird--conns))"}, "comment": "the connection went with its last buffer"},
     {"assert": {"eval": "(equal (seq-take ladybird-live-sent 2) (quote (\"set_focus\" \"set_visibility\")))"}, "comment": "the page was told it is hidden"},
@@ -27,11 +25,9 @@
     {"assert": {"eval": "(equal (ladybird-live-field \"value\") \"kept\")"}, "comment": "what was typed is still there"},
     {"assert": {"eval": "(= (ladybird-live-sent-count \"create_view\") 1)"}, "comment": "no new page was opened"},
     {"assert": {"eval": "(ladybird-live-in-page (= ladybird--view 1))"}},
-    {"keys": "i"},
     {"keys": "<end>"},
     {"type": " on"},
     {"wait": "until", "pred": "(equal (ladybird-live-field \"value\") \"kept on\")", "comment": "and typing goes on"},
-    {"keys": "C-c C-c"},
 
     {"group": "replaced", "comment": "a second client detaches this one, which takes the page back on request"},
     {"eval": "(progn (ladybird-live-intrude) t)"},

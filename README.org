@@ -170,81 +170,119 @@ or ssh wrote to standard error; the buffer =" *ladybird-stderr*"= has all of it.
 
 * Keys
 
-The mouse and the wheel always act on the page.  Keys are Emacs commands:
+Keys go to the page, as in a terminal emulator: what inserts itself, =RET=, =TAB=, =DEL=,
+=S-SPC=, the cursor and function keys with any modifiers, and =<escape>= in a graphical
+frame.  The Emacs editing and motion keys of =ladybird-translated-keys= are translated to
+what does the same in a browser on the server's platform (table below).  The mouse and the
+wheel always act on the page.  Everything else keeps its Emacs meaning, in particular
+=C-x=, =C-c=, =C-h=, =M-x=, =M-:=, =C-u= and =C-g=, and the keys of =ladybird-emacs-keys=:
+=<f1>= (help), =<f3>= and =<f4>= (keyboard macros), =<f10>= (the menu bar) and =<f11>=
+(full screen).  A key in that option stays with Emacs also when it is in
+=ladybird-translated-keys=.  A numeric prefix argument repeats a key (=C-u 3 a= types
+three), and a keyboard macro recorded with =<f3>= and =<f4>= replays its keys into the
+page.  With an input method the characters it produces are sent.
 
-| Key                            | Command                                         |
+With evil or meow the keymaps of their states take keys before =ladybird-mode= sees them;
+for keys to go to the page, start page buffers in Emacs state, for example with
+=(evil-set-initial-state 'ladybird-mode 'emacs)=.
+
+The package's commands are under =C-c=:
+
+| Key                            | Command                                           |
+|--------------------------------+---------------------------------------------------|
+| =C-c C-l=                      | open a URL; with =C-u= in a new buffer            |
+| =C-c C-o=                      | activate a link, button or field by its label     |
+| =C-c C-b=, =C-c C-f=           | back, forward                                     |
+| =C-c C-r=                      | reload; with =C-u= without the cache              |
+| =C-c C-k=                      | stop loading                                      |
+| =C-c C-w=                      | copy the page's URL                               |
+| =C-c C-t=                      | page console output on or off                     |
+| =C-c C-n=, =C-c C-p=           | focus the next, the previous link or field (=TAB=, =S-TAB=) |
+| =C-c C-q=, =C-q=               | send the next key to the page as it is            |
+| =C-c C-y=, =C-y=               | paste the latest kill into the page               |
+| =M-w=                          | copy the page's selection                         |
+| =C-x h=                        | select all                                        |
+| =C-s=, =C-r=                   | find in page                                      |
+| =M-s n=, =M-s p=               | next, previous match                              |
+| =C-x C-+=, =C-x C-==, =C-x C--=, =C-x C-0= | zoom in, in, out, reset; then =+=, =-=, =0= go on |
+| =C-c C-e=                      | =ladybird-command-mode=                             |
+| =C-c C-j=                      | back to page mode                                 |
+
+Killing the buffer closes the page.  =C-c C-q= or =C-q= reads one key and sends it
+untranslated, so that =C-x=, =C-c=, =C-g= or =C-s= reach the page; in a terminal =ESC=
+with a key right behind it is that key with Meta.  A mouse or wheel event after =C-c C-q=
+is handled as usual.
+
+=ladybird-command-mode= (=C-c C-e=) makes single keys commands, as in eww; the =C-c=
+commands, the mouse and the wheel work as in page mode, and =i=, =RET= or =C-c C-j= send
+keys to the page again.  The mode line shows =:Page= or =:Command=; a click on it
+switches.  =ladybird-initial-mode= says which mode a new buffer starts in.
+
+| Key in command mode            | Command                                         |
 |--------------------------------+-------------------------------------------------|
 | =l=, =g=                       | =ladybird-goto-url=                               |
 | =r=, =R=                       | reload, reload without the cache                |
 | =s=                            | stop loading                                    |
 | =b=, =f=                       | back, forward                                   |
-| =n=, =p=, =<down>=, =<up>=     | scroll by =ladybird-scroll-step=                  |
-| =<left>=, =<right>=            | scroll sideways                                 |
+| =n=, =p=, =<down>=, =<up>=, =C-n=, =C-p= | scroll by =ladybird-scroll-step=        |
+| =<left>=, =<right>=, =C-b=, =C-f= | scroll sideways                              |
 | =SPC=, =<next>=, =C-v=         | scroll a page down                              |
 | =DEL=, =S-SPC=, =<prior>=, =M-v= | scroll a page up                              |
 | =<=, =>=, =M-<=, =M->=         | top, bottom                                     |
 | =+=, ===, =-=, =0=             | zoom in, in, out, reset                         |
-| =C-s=, =C-r=                   | find in page                                    |
-| =M-s n=, =M-s p=               | next, previous match                            |
-| =o=, =C-c C-o=                 | activate a link, button or field by its label; =C-u= opens a link in a new buffer |
-| =i=, =RET=                     | =ladybird-insert-mode=: type into the page        |
-| =C-y=                          | paste the latest kill into the page             |
-| =M-w=                          | copy the page's selection                       |
-| =C-x h=                        | select all                                      |
+| =o=                            | =ladybird-follow-hint=                            |
 | =w=                            | copy the page's URL                             |
 | =c=                            | the same URL in a new buffer                    |
 | =S=                            | screenshot, saved on the server's machine       |
-| =C-c C-l=                      | page console output on or off                   |
 | =q=                            | bury the buffer; the page stays open            |
 | =Q=                            | close the page and kill the buffer              |
+| =i=, =RET=                     | back to page mode                               |
 
-In =ladybird-insert-mode= the keys that insert themselves, =RET=, =TAB=, =DEL= and the
-cursor and function keys with any modifiers go to the page as they are.  Everything else
-keeps its Emacs meaning, in particular =C-x=, =C-c=, =M-x=, =C-h=, =C-u= and =C-g=;
-=<escape>= is the page's cancel key in a graphical frame.  =C-y= pastes, =M-w= copies the
-page's selection, =C-c C-o= activates a link, button or field by its label, and
-=C-c C-c= or a click on =:Insert= in the mode line leaves the mode.  With an input method the characters it produces are sent.
+Another key that inserts itself says how to get back to the page.
 
-The Emacs editing keys in =ladybird-insert-mode-forward-keys= edit the page's text field.
-A browser has other keys for what they do, and those differ between platforms, so each
-is translated for the platform the server runs on:
+The keys of =ladybird-translated-keys= do in the page what they do in Emacs.  A browser
+has other keys for that, and those differ between platforms, so each is translated for
+the platform the server runs on:
 
-| Key                                    | In the text field       | Sent to a macOS server    | Sent to another server    |
-|----------------------------------------+-------------------------+---------------------------+---------------------------|
-| =C-a=, =C-e=                           | start, end of the line  | Home, End                 | Home, End                 |
-| =C-d=                                  | delete a character      | Delete                    | Delete                    |
-| =C-k=                                  | delete to the line's end | Shift+End, Delete        | Shift+End, Delete         |
-| =M-b=, =M-f=                           | a word left, right      | Alt+Left, Alt+Right       | Ctrl+Left, Ctrl+Right     |
-| =M-d=                                  | delete a word forward   | Alt+Delete                | Ctrl+Delete               |
-| =M-DEL=, =M-<backspace>=, =C-<backspace>= | delete a word backward | Alt+Backspace           | Ctrl+Backspace            |
-| =C-z=, =C-/=, =C-_=                    | undo                    | the page's undo           | the page's undo           |
-| =C-?=                                  | redo                    | the page's redo           | the page's redo           |
+| Key                                    | In a text field          | Without a focused field | Sent to a macOS server    | Sent to another server    |
+|----------------------------------------+--------------------------+-------------------------+---------------------------+---------------------------|
+| =C-a=, =C-e=                           | start, end of the line   | top, bottom             | Home, End                 | Home, End                 |
+| =C-d=                                  | delete a character       |                         | Delete                    | Delete                    |
+| =C-k=                                  | delete to the line's end | bottom                  | Shift+End, Delete         | Shift+End, Delete         |
+| =M-b=, =M-f=                           | a word left, right       |                         | Alt+Left, Alt+Right       | Ctrl+Left, Ctrl+Right     |
+| =M-d=                                  | delete a word forward    |                         | Alt+Delete                | Ctrl+Delete               |
+| =M-DEL=, =M-<backspace>=, =C-<backspace>= | delete a word backward |                       | Alt+Backspace             | Ctrl+Backspace            |
+| =C-z=, =C-/=, =C-_=                    | undo                     |                         | the page's undo           | the page's undo           |
+| =C-?=                                  | redo                     |                         | the page's redo           | the page's redo           |
+| =C-n=, =C-p=                           | next, previous line      | scroll down, up         | Down, Up                  | Down, Up                  |
+| =C-f=, =C-b=                           | a character right, left  | scroll right, left      | Right, Left               | Right, Left               |
+| =C-v=, =M-v=                           | scroll the page          | a page down, up         | PageDown, PageUp          | PageDown, PageUp          |
+| =M-<=, =M->=                           | start, end of the field  | top, bottom             | Command+Up, Command+Down  | Ctrl+Home, Ctrl+End       |
 
-At the end of a line =C-k= removes the line break.  =C-b=, =C-f=, =C-p= and =C-n= (the
-cursor keys) and =C-M-_= and =C-S-z= (redo) are translated too once they are added to
-the option; other keys added to it are sent as they are.  With the option nil all of
-them stay Emacs commands.  The macOS column was tried against a Ladybird server; the
-other one was not.
+At the end of a line =C-k= removes the line break.  =C-M-_= and =C-S-z= (redo) are
+translated too once they are added to the option; other keys added to it are sent as
+they are.  A key taken out of it keeps its Emacs meaning.  Both columns were tried
+against Ladybird servers on macOS and on Linux.
 
 =C-s= reads the search string in the minibuffer.  The page shows the matches while the
 string is typed and the minibuffer shows their number; =C-s= and =C-r= move to the next
 and the previous match, =RET= leaves the matches highlighted, =C-g= ends the search.
 Ladybird turns the match the search ended on into the page's selection.
 
-=o= follows a link from the keyboard.  The page puts a label made of the characters of
-=ladybird-hint-alphabet= on every link, button and field in the window, and typing a
-label activates its element: a link or a button is clicked, a field gets the focus and
-=ladybird-insert-mode= turns on.  Each character narrows the labels the page shows; the
-echo area shows what has been typed, how many labels are left and, for the last one,
-its text or URL.  A character that continues no label is refused with a beep, =DEL=
-takes the last one back, and =C-g= or =<escape>= (in a graphical frame; in a terminal
-=ESC= starts a Meta key) ends without a choice.  Any other key, a click or the wheel
-ends the hints too and then does what it does otherwise; moving the mouse does not.
-With =C-u o= a link opens in a new buffer, if it is an http or https URL, or a file URL
-on a page that is a file itself; another one is refused with a message.  Characters
-typed before the labels arrive count.  When the page ends the hints (it navigates, crashes or does not answer in time)
-or the server refuses them, they end here too, with a message.  It needs a server whose
-welcome lists the =hints= feature.
+=C-c C-o= (=o= in command mode) follows a link from the keyboard.  The page puts a label
+made of the characters of =ladybird-hint-alphabet= on every link, button and field in the
+window, and typing a label activates its element: a link or a button is clicked, a field
+gets the focus and command mode is left, so that typing goes into it.  Each character
+narrows the labels the page shows; the echo area shows what has been typed, how many
+labels are left and, for the last one, its text or URL.  A character that continues no
+label is refused with a beep, =DEL= takes the last one back, and =C-g= or =<escape>= (in
+a graphical frame; in a terminal =ESC= starts a Meta key) ends without a choice.  Any
+other key, a click or the wheel ends the hints too and then does what it does otherwise;
+moving the mouse does not.  With =C-u C-c C-o= a link opens in a new buffer, if it is an
+http or https URL, or a file URL on a page that is a file itself; another one is refused
+with a message.  Characters typed before the labels arrive count.  When the page ends the
+hints (it navigates, crashes or does not answer in time) or the server refuses them, they
+end here too, with a message.  It needs a server whose welcome lists the =hints= feature.
 
 What a page asks comes to the minibuffer: alerts (in the echo area; =ladybird-alert-style=
 makes them wait for a key), confirmations, prompts, the choices of a select element,
@@ -254,12 +292,15 @@ for it.  A question the server withdraws closes by itself.
 
 A permission and a URL for another program are answered with a word typed or completed in
 full (=allow once=, =allow always=, =deny=; =open on server=, =open here=, =deny=), and
-keys typed before the question appeared are discarded.  =open here= hands the URL to
+keys typed before the question appeared are discarded.  =RET= on a part of a choice, or on
+any other text, asks again with the input gone, so keys meant for the page do not answer
+it; =RET= on nothing declines.  =open here= hands the URL to
 =browse-url-secondary-browser-function= and is offered for http, https and mailto URLs
 only.
 
 A right click pops up a menu for the link, image, selection or text field under the
-pointer.  Its "Open Link" and "Open Link in New Buffer" load the same URLs as =C-u o=.
+pointer.  Its "Open Link" and "Open Link in New Buffer" load the same URLs as
+=C-u C-c C-o=.
 
 The header line shows the page's URL first, at least its scheme and host, then the
 title in the room that is left.
@@ -303,9 +344,11 @@ Elsewhere the default is nil.
 | =ladybird-buffer-name-format=       | ="*ladybird: %t*"=   | =%t= title, =%u= URL, =%h= host                   |
 | =ladybird-alert-style=              | =echo=             | =echo= or =prompt=                                |
 | =ladybird-scroll-step=              | nil                | pixels per line scroll; nil is three text lines   |
-| =ladybird-insert-mode-forward-keys= | see above          | Emacs editing keys that edit the page's text field |
+| =ladybird-translated-keys=          | see above          | Emacs editing and motion keys done in the page    |
+| =ladybird-emacs-keys=               | =<f1>= =<f3>= =<f4>= =<f10>= =<f11>= | keys that keep their Emacs meaning |
+| =ladybird-initial-mode=             | =page=             | =page= or =command=: where a new buffer's keys go |
 | =ladybird-keep-view-on-kill=        | nil                | leave the page open when its buffer is killed     |
-| =ladybird-hint-alphabet=            | ="asdfghjkl"=      | characters of the labels of =o=; 2 to 36 of a-z and 0-9 |
+| =ladybird-hint-alphabet=            | ="asdfghjkl"=      | characters of the labels of =C-c C-o=; 2 to 36 of a-z and 0-9 |
 | =ladybird-reconnect=                | t                  | nil, t or =always=                                |
 | =ladybird-keepalive-interval=       | 30                 | idle seconds before a ping                        |
 | =ladybird-ping-timeout=             | 10                 | seconds to wait for its answer                    |

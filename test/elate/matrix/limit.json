@@ -24,10 +24,10 @@
     },
     {
       "group": "refused",
-      "comment": "c asks for a second page, which the server refuses: its buffer goes and the URL loads in the first page"
+      "comment": "c in command mode asks for a second page, which the server refuses: its buffer goes and the URL loads in the first page"
     },
     {
-      "keys": "c"
+      "keys": "C-c C-e c"
     },
     {
       "wait": "until",

@@ -143,10 +143,14 @@
     },
     {
       "group": "field",
-      "comment": "a text field gets the focus and insert mode types into it"
+      "comment": "a text field gets the focus and leaves command mode, so that typing goes into it"
     },
     {
-      "keys": "C-c C-o"
+      "keys": "C-c C-e"
+    },
+    {
+      "keys": "o",
+      "comment": "o in command mode"
     },
     {
       "wait": "until",
@@ -161,7 +165,7 @@
     },
     {
       "assert": {
-        "eval": "(ladybird-live-in-page ladybird-insert-mode)"
+        "eval": "(ladybird-live-in-page (not ladybird-command-mode))"
       }
     },
     {
@@ -173,7 +177,7 @@
     },
     {
       "keys": "C-c C-o",
-      "comment": "C-c C-o works in insert mode"
+      "comment": "C-c C-o works with a field focused"
     },
     {
       "wait": "until",
@@ -195,14 +199,6 @@
         "eval": "(equal (ladybird-live-field \"value\") \"hi\")"
       },
       "comment": "the label was not typed into the field"
-    },
-    {
-      "keys": "C-c C-c"
-    },
-    {
-      "assert": {
-        "eval": "(ladybird-live-in-page (not ladybird-insert-mode))"
-      }
     },
     {
       "group": "link",

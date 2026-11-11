@@ -114,7 +114,15 @@
                     ("C-k" (("End" 0 1) ("Delete" 127 0))
                      (("End" 0 1) ("Delete" 127 0)))
                     ("C-f" (("Right" 0 0)) (("Right" 0 0)))
+                    ("C-b" (("Left" 0 0)) (("Left" 0 0)))
                     ("C-p" (("Up" 0 0)) (("Up" 0 0)))
+                    ("C-n" (("Down" 0 0)) (("Down" 0 0)))
+                    ("C-v" (("PageDown" 0 0)) (("PageDown" 0 0)))
+                    ("M-v" (("PageUp" 0 0)) (("PageUp" 0 0)))
+                    ;; The ends of a field or the page: Ctrl+Home and
+                    ;; Ctrl+End, Command+Up and Command+Down on macOS.
+                    ("M-<" (("Home" 0 2)) (("Up" 0 8)))
+                    ("M->" (("End" 0 2)) (("Down" 0 8)))
                     ("M-b" (("Left" 0 2)) (("Left" 0 4)))
                     ("M-f" (("Right" 0 2)) (("Right" 0 4)))
                     ("M-d" (("Delete" 127 2)) (("Delete" 127 4)))

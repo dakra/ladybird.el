@@ -33,7 +33,7 @@
     {"group": "mini-window", "comment": "a minibuffer that grows does not resize the page"},
     {"eval": "(progn (sleep-for 0.5) t)"},
     {"eval": "(setq ladybird-live-scratch (list (ladybird-live-sent-count \"set_viewport\") (ladybird-live-number \"resizes\") (ladybird-live-number \"h\")))"},
-    {"keys": "l", "delivery": "events"},
+    {"keys": "C-c C-l", "delivery": "events"},
     {"wait": "prompt"},
     {"eval": "(with-selected-window (active-minibuffer-window) (insert (make-string 400 ?x)))"},
     {"eval": "(progn (sleep-for 0.6) t)"},

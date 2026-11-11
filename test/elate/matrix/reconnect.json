@@ -26,10 +26,8 @@
     {"assert": {"eval": "(= 1 (ladybird-elate-count \"create_view\"))"}, "comment": "and no new view"},
     {"assert": {"eval": "(equal (ladybird-elate-state 'url) \"mock://disconnect\")"}},
     {"assert": {"eval": "(not (string-match-p \"\\\\[\" (ladybird-elate-header)))"}},
-    {"keys": "i"},
     {"type": "k"},
     {"wait": "until", "pred": "(ladybird-elate-logged \"key\" 'key \"K\")", "comment": "and typing works again"},
-    {"keys": "C-c C-c"},
 
     {"group": "recreate", "comment": "another server process answers, with a view of the same id: that is another page, and the buffer gets a new view with its URL"},
     {"eval": "(setq ladybird-elate-canvas (ladybird-elate-buffer))"},

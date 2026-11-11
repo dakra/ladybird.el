@@ -10,8 +10,8 @@
     {"eval": "(progn (ladybird-live-start \"{{server}}\" \"index.html\") t)", "timeout": 120},
     {"wait": "until", "pred": "(ladybird-live-page-p \"index\")", "timeout": 60},
 
-    {"group": "refused", "comment": "c asks for a second page; its buffer goes and the URL loads in the first"},
-    {"keys": "c"},
+    {"group": "refused", "comment": "c in command mode asks for a second page; its buffer goes and the URL loads in the first"},
+    {"keys": "C-c C-e c"},
     {"wait": "until", "pred": "(ladybird-live-messages-p \"ladybird: .* opens no further page; .*index.html loaded in\")"},
     {"wait": "until", "pred": "(ladybird-live-received \"error\" (quote message) \"only one view is supported\")"},
     {"assert": {"eval": "(= (length (ladybird--buffers)) 1)"}},

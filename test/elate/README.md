@@ -18,13 +18,13 @@ native module from the checkout and fall back to `test/ladybird-fake-module.el`.
 
 | Scenario | Variants | Covers |
 |---|---|---|
-| `connect` | stdio, unix, tcp | opening a page, navigation, a second buffer, closing |
-| `input` | stdio, unix | insert mode keys, text, paste, selection, scroll commands |
+| `connect` | stdio, unix, tcp | opening a page, the `C-c` navigation commands, zoom, a second buffer, closing from command mode |
+| `input` | stdio, unix | page mode: typed and function keys, the editing and motion keys per platform, a prefix argument, text, paste, selection, `C-c C-q` (also `ESC x` on the terminal); command mode and its scroll commands |
 | `size` | stdio, tcp | viewport after window and frame changes, visibility, focus |
 | `ui` | stdio, unix | dialogs, pickers, permissions, withdrawn requests, a prompt that waits for the minibuffer, page events, find |
 | `reconnect` | unix, tcp | a lost connection, another server process, a second client, server exit |
-| `limit` | stdio | a server that shows one page: a second page loads in the first |
-| `hints` | stdio | following links by their labels: narrowing, refusal, `DEL`, buttons, links, `C-u`, fields, `C-g`, `<escape>`, `ESC x` on the terminal, wheel and mouse movement, a session the server ends, before or after its labels, a page's question and an alert that waits for a key during the hints, no labels |
+| `limit` | stdio | a server that shows one page: a second page (`c` in command mode) loads in the first |
+| `hints` | stdio | following links by their labels (`C-c C-o`, `o` in command mode): narrowing, refusal, `DEL`, buttons, links, `C-u`, fields, `C-g`, `<escape>`, `ESC x` on the terminal, wheel and mouse movement, a session the server ends, before or after its labels, a page's question and an alert that waits for a key during the hints, no labels |
 | `mouse` | (graphical frame) | clicks, wheel and movement at canvas positions |
 
 A variant is how the mock server is reached: started by the connection on standard
@@ -98,15 +98,15 @@ places, and `ladybird-live-color` reads a pixel through the module's test access
 | Scenario | Covers |
 |---|---|
 | `live-connect` | first frame's pixels, sizes, buffer name, header line, icon, shared memory or not |
-| `live-navigation` | link click, `l`, back and forward, reload, zoom, stop |
-| `live-scroll` | scroll keys, top and bottom, wheel; position and pixels |
-| `live-keyboard` | insert mode: letters, shift, text without a key, function keys, the Emacs editing keys, paste |
+| `live-navigation` | link click, `C-c C-l`, back and forward, reload with and without the cache, zoom with `C-x C-+` and its repeat keys, stop |
+| `live-scroll` | the page's own scrolling on the cursor keys, `SPC`, the page keys and the Emacs motion keys; the scroll commands of command mode; wheel; position and pixels |
+| `live-keyboard` | page mode: letters, shift, text without a key, function keys, the Emacs editing keys, paste, the motion keys in a textarea, `C-c C-q`; command mode round trip |
 | `live-mouse` | click, double click, drag selection and `M-w`, hover, context menu |
 | `live-dialogs` | alert, confirm, prompt, beforeunload, select, file, colour, date, a granted permission |
 | `live-permission` | a stray key, dismissal and refusal of a permission; geolocation |
 | `live-crash` | a prompt withdrawn by a crash, the crash message, the page coming back |
 | `live-find` | counting, stepping, case, the selection left by `C-g` |
-| `live-hints` | the list and its labels in the frames, cancelling, a button, a text field, a checkbox, a link |
+| `live-hints` | the list and its labels in the frames, cancelling, a button, a text field from command mode, a checkbox, a link |
 | `live-viewport` | split, frame resize, a growing minibuffer, visibility, focus |
 | `live-single` | a second page on a server that shows one |
 | `live-events` | console, blocked popup, refused download, clipboard, screenshot |

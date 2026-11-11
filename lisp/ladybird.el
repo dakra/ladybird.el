@@ -20,11 +20,14 @@
 ;; the page and sends the changed pixels, and the native module
 ;; `ladybird-module' paints them into the buffer's canvas.
 ;;
-;; In a page buffer the keys are Emacs commands: n and p scroll, SPC and
-;; DEL page, o activates a link, button or field by the label the page
-;; puts on it, q buries the buffer, Q closes the page.  `ladybird-insert-mode'
-;; (i or RET) sends typed keys to the page; C-c C-c leaves it.  The mouse
-;; and the wheel always go to the page.
+;; In a page buffer the keys go to the page, the Emacs editing and
+;; motion keys translated to what does the same in a browser, while
+;; C-x, C-h, M-x and the like keep their Emacs meaning.  The package's
+;; commands are under C-c: C-c C-l opens a URL, C-c C-o activates a
+;; link, button or field by the label the page puts on it, C-c C-b and
+;; C-c C-f go back and forward.  `ladybird-command-mode' (C-c C-e) makes
+;; single keys commands, as in eww; i goes back.  The mouse and the
+;; wheel always go to the page.
 
 ;;; Code:
 
@@ -226,7 +229,7 @@ has them set for a selected page window or a drag; else nil.")
   "The hint session of `ladybird-follow-hint' in progress, or nil.")
 (defvar ladybird--hint-shown nil "The hint prompt last shown in the echo area.")
 
-(defvar ladybird-insert-mode)
+(defvar ladybird-command-mode)
 
 
 ;;; Module
@@ -876,15 +879,24 @@ page's title follows in the room that is left before the tags."
              tags))))
 
 (defun ladybird--mode-line-process ()
-  "Return the mode line tags of a page buffer."
+  "Return the mode line tags of a page buffer.
+The first says where keys go and switches that when clicked."
   (concat
-   (and ladybird-insert-mode
-        (propertize ":Insert"
-                    'mouse-face 'mode-line-highlight
-                    'help-echo "mouse-1: leave insert mode"
-                    'local-map (make-mode-line-mouse-map
-                                'mouse-1 #'ladybird-insert-mode)))
+   (propertize (if ladybird-command-mode ":Command" ":Page")
+               'mouse-face 'mode-line-highlight
+               'help-echo (if ladybird-command-mode
+                              "Keys are commands; mouse-1: send them to the page"
+                            "Keys go to the page; mouse-1: command mode")
+               'local-map (make-mode-line-mouse-map
+                           'mouse-1 #'ladybird-mode-line-toggle))
    (and (alist-get 'loading ladybird--state) ":Loading")))
+
+(defun ladybird-mode-line-toggle (event)
+  "Switch `ladybird-command-mode' in the window of the mode line EVENT clicked."
+  (declare (completion ignore))
+  (interactive "e")
+  (with-selected-window (posn-window (event-start event))
+    (ladybird-command-mode 'toggle)))
 
 
 ;;; Mouse
@@ -1149,14 +1161,14 @@ touchpad."
     prefixes)
   "Every combination of the C-, M-, S- and s- event prefixes.")
 
-(defconst ladybird--insert-function-keys
-  '(return tab backspace delete escape insert left right up down home end
+(defconst ladybird--function-keys
+  '(return tab backspace delete deletechar escape insert left right up down home end
     prior next f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12
     kp-0 kp-1 kp-2 kp-3 kp-4 kp-5 kp-6 kp-7 kp-8 kp-9 kp-add kp-subtract
     kp-multiply kp-divide kp-decimal kp-enter kp-equal kp-space kp-tab
     kp-left kp-right kp-up kp-down kp-home kp-end kp-prior kp-next
     kp-insert kp-delete)
-  "Function keys `ladybird-insert-mode' sends to the page, with any modifiers.")
+  "Function keys that go to the page with any modifiers.")
 
 (defvar ladybird--input-method-events nil
   "The events an input method made of a key.")
@@ -1196,17 +1208,24 @@ A key is pressed and released at once."
                         `(code_point . ,code-point)
                         `(modifiers . ,modifiers)))))
 
-(defun ladybird-insert-key ()
-  "Send the key that invoked this command to the page.
+(defun ladybird--meta-prefixed-p ()
+  "Return non-nil if the current key arrived as ESC and a key.
+A terminal sends a Meta key that way."
+  (let ((keys (this-single-command-keys)))
+    (and (> (length keys) 1) (eql (aref keys 0) ?\e))))
+
+(defun ladybird-send-key (&optional n)
+  "Send the key that invoked this command to the page, N times.
 With an input method the characters it produces are sent."
-  (interactive)
+  (declare (completion ignore))
+  (interactive "p")
   (setq ladybird--last-buffer (current-buffer))
-  (let* ((keys (this-command-keys-vector))
-         ;; In a terminal M-x arrives as ESC x.
-         (meta (and (> (length keys) 1) (eq (aref keys 0) ?\e))))
-    (dolist (event (ladybird--input-method-events last-command-event))
-      (when-let* ((spec (ladybird-keys-event event meta)))
-        (ladybird--send-key spec)))))
+  (let* ((meta (ladybird--meta-prefixed-p))
+         (specs (delq nil (mapcar (lambda (event) (ladybird-keys-event event meta))
+                                  (ladybird--input-method-events
+                                   last-command-event)))))
+    (dotimes (_ (max 1 (or n 1)))
+      (mapc #'ladybird--send-key specs))))
 
 (defun ladybird--platform ()
   "Return the platform of the current buffer's server: `macos' or `other'."
@@ -1218,31 +1237,61 @@ With an input method the characters it produces are sent."
       'macos
     'other))
 
-(defun ladybird-insert-edit-key ()
-  "Do in the page's text field what the invoking key does in Emacs.
+(defun ladybird-send-edit-key (&optional n)
+  "Do in the page what the invoking Emacs key does, N times.
 The key is translated for the server's platform by
 `ladybird-keys-editing'; a key that has no translation is sent as it is."
-  (interactive)
+  (declare (completion ignore))
+  (interactive "p")
   (setq ladybird--last-buffer (current-buffer))
-  (let* ((keys (this-command-keys-vector))
-         (event last-command-event)
-         ;; In a terminal M-x arrives as ESC x.
-         (event (if (and (> (length keys) 1) (eq (aref keys 0) ?\e)
-                         (integerp event))
+  (let* ((event last-command-event)
+         (event (if (and (ladybird--meta-prefixed-p) (integerp event))
                     (event-convert-list (list 'meta event))
                   event))
          (actions (ladybird-keys-editing event (ladybird--platform))))
     (if (null actions)
-        (ladybird-insert-key)
-      (dolist (action actions)
-        (pcase action
-          (`(edit ,op) (ladybird--send-view "edit" `(op . ,op)))
-          (_ (ladybird--send-key action)))))))
+        (ladybird-send-key n)
+      (dotimes (_ (max 1 (or n 1)))
+        (dolist (action actions)
+          (pcase action
+            (`(edit ,op) (ladybird--send-view "edit" `(op . ,op)))
+            (_ (ladybird--send-key action))))))))
 
-(defun ladybird-self-insert-hint ()
-  "Say how to type into the page."
-  (interactive)
-  (user-error "Press i to type into the page"))
+(defun ladybird--read-raw-key (prompt)
+  "Read a key with PROMPT and return it; \\`C-g' is read as a key too.
+A graphical frame gives the event as it is, passing over mouse
+movement.  In a terminal `read-key' decodes the escape sequences of
+function keys, and an ESC it reads with a key behind it, as a terminal
+sends a Meta key, is that key with Meta."
+  (let ((inhibit-quit t))
+    (prog1 (if (display-graphic-p)
+               (let (event)
+                 (while (mouse-movement-p (setq event (read-event prompt))))
+                 event)
+             (let ((key (read-key prompt))
+                   (keys (this-command-keys-vector)))
+               (if (and (eql key ?\e) (= (length keys) 2))
+                   (event-apply-modifier (aref keys 1) 'meta 27 "M-")
+                 key)))
+      (setq quit-flag nil))))
+
+(defun ladybird-send-next-key (&optional n)
+  "Read a key and send it to the page as it is, N times.
+The key goes to the page whatever Emacs binds it to, so that \\`C-x',
+\\`C-c', \\`C-g' or \\`C-s' reach it, untranslated.  A mouse or wheel
+event is handled as usual."
+  (interactive "p" ladybird-mode)
+  (ladybird--check-view)
+  (let* ((event (ladybird--read-raw-key "Key for the page: "))
+         (spec (and (not (consp event)) (ladybird-keys-event event))))
+    (cond
+     ((consp event) (push event unread-command-events))
+     ((null spec)
+      (message "ladybird: %s has no key for the page"
+               (key-description (vector event))))
+     (t (setq ladybird--last-buffer (current-buffer))
+        (dotimes (_ (max 1 (or n 1)))
+          (ladybird--send-key spec))))))
 
 (defun ladybird--paste (text)
   "Paste the string TEXT into the page."
@@ -1250,7 +1299,7 @@ The key is translated for the server's platform by
 
 (defun ladybird-yank ()
   "Paste the latest kill into the page."
-  (interactive)
+  (interactive nil ladybird-mode)
   (ladybird--paste (current-kill 0)))
 
 (defun ladybird-xterm-paste (event)
@@ -1262,7 +1311,7 @@ The key is translated for the server's platform by
 
 (defun ladybird-copy-selection ()
   "Copy the page's selected text to the kill ring."
-  (interactive)
+  (interactive nil ladybird-mode)
   (unless (and ladybird--view (ladybird--ready-p ladybird--conn))
     (user-error "This page is not connected"))
   (ladybird--request ladybird--conn "request_selection" `((view . ,ladybird--view))
@@ -1275,77 +1324,68 @@ The key is translated for the server's platform by
 
 (defun ladybird-select-all ()
   "Select everything in the page, or in its focused field."
-  (interactive)
+  (interactive nil ladybird-mode)
   (ladybird--send-view "edit" '(op . "select_all")))
 
-(defcustom ladybird-insert-mode-forward-keys
+(defun ladybird-focus-next (&optional n)
+  "Move the page's focus to the next link or field, N times.
+This is the page's \\`TAB'."
+  (interactive "p" ladybird-mode)
+  (ladybird--check-view)
+  (dotimes (_ (max 1 (or n 1)))
+    (ladybird--send-key '("Tab" 9 0))))
+
+(defun ladybird-focus-previous (&optional n)
+  "Move the page's focus to the previous link or field, N times.
+This is the page's \\`S-TAB'."
+  (interactive "p" ladybird-mode)
+  (ladybird--check-view)
+  (dotimes (_ (max 1 (or n 1)))
+    (ladybird--send-key `("Tab" 9 ,ladybird-keys-shift))))
+
+(defcustom ladybird-translated-keys
   '("C-a" "C-e" "C-k" "C-d" "M-b" "M-f" "M-d" "M-DEL" "M-<backspace>"
-    "C-<backspace>" "C-z" "C-/" "C-_" "C-?")
-  "Emacs editing keys that edit the page's text field in `ladybird-insert-mode'.
+    "C-<backspace>" "C-z" "C-/" "C-_" "C-?"
+    "C-n" "C-p" "C-b" "C-f" "C-v" "M-v" "M-<" "M->")
+  "Emacs editing and motion keys that do their job in the page.
 Each is a string for `kbd'.  A key is translated to what does the same
-in a text field of the server's platform: \\`C-a' and \\`C-e' move to the
-start and the end of the line, \\`C-d' deletes a character, \\`C-k' the
-rest of the line, \\`M-b' and \\`M-f' move by words, \\`M-d', \\`M-DEL' and
-\\`C-<backspace>' delete a word, \\`C-z', \\`C-/' and \\`C-_' undo and
-\\`C-?' redoes.  \\`C-b', \\`C-f', \\`C-p', \\`C-n', \\`C-M-_' and \\`C-S-z' can be
-added.  A key without a translation is sent as it is.  With nil all of
-these keep their Emacs meaning.  Set this with `setopt' or Custom,
-which rebuild the mode's keymap."
+in a browser on the server's platform: in a text field \\`C-a' and
+\\`C-e' move to the start and the end of the line, \\`C-d' deletes a
+character, \\`C-k' the rest of the line, \\`M-b' and \\`M-f' move by
+words, \\`M-d', \\`M-DEL' and \\`C-<backspace>' delete a word, \\`C-z',
+\\`C-/' and \\`C-_' undo and \\`C-?' redoes; \\`C-n', \\`C-p', \\`C-b' and
+\\`C-f' are the cursor keys, \\`C-v' and \\`M-v' page down and up, and
+\\`M-<' and \\`M->' go to the top and the bottom of the field or the
+page.  Without a focused field the cursor keys, the page keys, \\`C-a'
+and \\`C-e' scroll the page.  \\`C-M-_' and \\`C-S-z' (redo) can be added;
+a key without a translation is sent as it is.  A key not in the list
+keeps its Emacs meaning.  Set this with `setopt' or Custom, which
+rebuild the keymap."
   :type '(repeat string)
   :group 'ladybird
   :set (lambda (symbol value)
          (set-default symbol value)
-         (when (fboundp 'ladybird--rebuild-insert-map)
-           (ladybird--rebuild-insert-map))))
+         (when (fboundp 'ladybird--rebuild-page-map)
+           (ladybird--rebuild-page-map))))
 
-(defun ladybird--build-insert-map ()
-  "Return the keymap of `ladybird-insert-mode'.
-Self-inserting keys and the function keys with any modifiers go to the
-page; `ladybird-insert-mode-forward-keys' edit its text field."
-  (let ((map (make-sparse-keymap)))
-    (substitute-key-definition 'self-insert-command #'ladybird-insert-key
-                               map global-map)
-    (dolist (key '("RET" "TAB" "DEL" "<backtab>"))
-      (define-key map (kbd key) #'ladybird-insert-key))
-    (dolist (prefix ladybird--modifier-prefixes)
-      (dolist (key ladybird--insert-function-keys)
-        (define-key map (vector (intern (concat prefix (symbol-name key))))
-                    #'ladybird-insert-key)))
-    (dolist (key ladybird-insert-mode-forward-keys)
-      (define-key map (kbd key) #'ladybird-insert-edit-key))
-    (define-key map (kbd "C-y") #'ladybird-yank)
-    (define-key map (kbd "M-w") #'ladybird-copy-selection)
-    (define-key map (kbd "C-c C-c") #'ladybird-insert-mode)
-    (define-key map (kbd "C-c C-o") #'ladybird-follow-hint)
-    (define-key map [xterm-paste] #'ladybird-xterm-paste)
-    map))
+(defcustom ladybird-emacs-keys '("<f1>" "<f3>" "<f4>" "<f10>" "<f11>")
+  "Keys that keep their Emacs meaning in a page buffer.
+Each is a string for `kbd'.  The defaults are help, the keyboard macro
+keys, the menu bar and full screen; without them these keys go to the
+page.  A key here wins over `ladybird-translated-keys'.  Set this with
+`setopt' or Custom, which rebuild the keymap."
+  :type '(repeat string)
+  :group 'ladybird
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (when (fboundp 'ladybird--rebuild-page-map)
+           (ladybird--rebuild-page-map))))
 
-(defvar ladybird-insert-mode-map (ladybird--build-insert-map)
-  "Keymap of `ladybird-insert-mode'.")
-
-(defun ladybird--rebuild-insert-map ()
-  "Build `ladybird-insert-mode-map' again from the options."
-  (when (boundp 'ladybird-insert-mode-map)
-    (setcdr ladybird-insert-mode-map (cdr (ladybird--build-insert-map)))))
-
-(define-minor-mode ladybird-insert-mode
-  "Send typed keys to the page instead of running Emacs commands.
-Keys that insert themselves, the function keys and
-`ladybird-insert-mode-forward-keys' act on the page; other keys, such as
-\\`C-x', \\`C-c', \\`M-x' and \\`C-g', keep their Emacs meaning.
-\\<ladybird-insert-mode-map>\\[ladybird-yank] pastes the latest kill, \
-\\[ladybird-copy-selection] copies the page's selection,
-\\[ladybird-follow-hint] activates a link, button or field by its label
-and \\[ladybird-insert-mode] leaves the mode."
-  :lighter nil
-  :keymap ladybird-insert-mode-map
-  :interactive (ladybird-mode)
-  (force-mode-line-update))
-
-
-;;; Major mode
-
-(defvar ladybird-mode-map
+(defun ladybird--build-page-map ()
+  "Return the keymap of what `ladybird-mode' sends to the page.
+That is the mouse and the wheel, the keys that insert themselves, the
+function keys with any modifiers and `ladybird-translated-keys', less
+`ladybird-emacs-keys'."
   (let ((map (make-sparse-keymap)))
     (dolist (prefix ladybird--modifier-prefixes)
       (dolist (button '("1" "2" "3" "8" "9"))
@@ -1360,38 +1400,90 @@ and \\[ladybird-insert-mode] leaves the mode."
                       #'ladybird-mouse-up)))
       (dolist (wheel '("wheel-up" "wheel-down" "wheel-left" "wheel-right"
                        "mouse-4" "mouse-5" "mouse-6" "mouse-7"))
-        (define-key map (vector (intern (concat prefix wheel))) #'ladybird-wheel)))
+        (define-key map (vector (intern (concat prefix wheel))) #'ladybird-wheel))
+      (dolist (key ladybird--function-keys)
+        (define-key map (vector (intern (concat prefix (symbol-name key))))
+                    #'ladybird-send-key)))
     (define-key map [mouse-movement] #'ladybird-mouse-move)
-    (define-key map [remap self-insert-command] #'ladybird-self-insert-hint)
+    (define-key map [remap self-insert-command] #'ladybird-send-key)
+    ;; Without a binding of its own S-SPC would arrive as SPC.
+    (dolist (key '("RET" "TAB" "DEL" "<backtab>" "S-SPC"))
+      (define-key map (kbd key) #'ladybird-send-key))
+    (dolist (key ladybird-translated-keys)
+      (define-key map (kbd key) #'ladybird-send-edit-key))
+    (define-key map [xterm-paste] #'ladybird-xterm-paste)
+    (dolist (key ladybird-emacs-keys)
+      (define-key map (kbd key) nil t))
+    map))
+
+(defvar ladybird--page-map (ladybird--build-page-map)
+  "Keymap of what `ladybird-mode' sends to the page; the parent of its map.")
+
+(defun ladybird--rebuild-page-map ()
+  "Build `ladybird--page-map' again from the options."
+  (when (boundp 'ladybird--page-map)
+    (setcdr ladybird--page-map (cdr (ladybird--build-page-map)))))
+
+(defun ladybird-zoom-adjust ()
+  "Zoom the page by the last key typed, as `text-scale-adjust' does text.
+\\`+' and \\`=' zoom in, \\`-' out and \\`0' back to the normal size; after
+\\`C-x C-+', \\`C-x C--' or \\`C-x C-0' these keys alone zoom further."
+  (interactive nil ladybird-mode)
+  (pcase (event-basic-type last-command-event)
+    ((or ?- 'kp-subtract) (ladybird-zoom-out))
+    ((or ?0 'kp-0) (ladybird-zoom-reset))
+    (_ (ladybird-zoom-in)))
+  (set-transient-map
+   (let ((map (make-sparse-keymap)))
+     ;; The page map binds the keypad keys, which Emacs would otherwise
+     ;; translate to these characters.
+     (dolist (key '("+" "=" "-" "0" "<kp-add>" "<kp-equal>" "<kp-subtract>" "<kp-0>"))
+       (define-key map (kbd key) #'ladybird-zoom-adjust))
+     map)
+   nil nil "Use %k for further zooming"))
+
+
+;;; Command mode
+
+(defun ladybird-command-mode-self-insert ()
+  "Say how to type into the page again."
+  (declare (completion ignore))
+  (interactive)
+  (user-error "%s" (substitute-command-keys
+                    "Keys are commands here; \\`i' sends them to the page again")))
+
+(defvar ladybird-command-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [remap self-insert-command] #'ladybird-command-mode-self-insert)
+    (define-key map "i" #'ladybird-page-mode)
+    (define-key map (kbd "RET") #'ladybird-page-mode)
+    ;; The page map binds <return> and <backspace>, which Emacs would
+    ;; otherwise translate to RET and DEL.
+    (define-key map [return] #'ladybird-page-mode)
+    (define-key map [kp-enter] #'ladybird-page-mode)
+    (define-key map [backspace] #'ladybird-scroll-up-page)
     (define-key map "n" #'ladybird-scroll-down-line)
-    (define-key map [down] #'ladybird-scroll-down-line)
     (define-key map "p" #'ladybird-scroll-up-line)
-    (define-key map [up] #'ladybird-scroll-up-line)
-    (define-key map [left] #'ladybird-scroll-left)
-    (define-key map [right] #'ladybird-scroll-right)
     (define-key map " " #'ladybird-scroll-down-page)
-    (define-key map [next] #'ladybird-scroll-down-page)
-    (define-key map (kbd "DEL") #'ladybird-scroll-up-page)
     (define-key map (kbd "S-SPC") #'ladybird-scroll-up-page)
-    (define-key map [prior] #'ladybird-scroll-up-page)
+    (define-key map (kbd "DEL") #'ladybird-scroll-up-page)
     (define-key map "<" #'ladybird-scroll-top)
     (define-key map ">" #'ladybird-scroll-bottom)
-    (define-key map [remap scroll-up-command] #'ladybird-scroll-down-page)
-    (define-key map [remap scroll-down-command] #'ladybird-scroll-up-page)
-    (define-key map [remap scroll-up-line] #'ladybird-scroll-down-line)
-    (define-key map [remap scroll-down-line] #'ladybird-scroll-up-line)
-    (define-key map [remap next-line] #'ladybird-scroll-down-line)
-    (define-key map [remap previous-line] #'ladybird-scroll-up-line)
-    (define-key map [remap forward-char] #'ladybird-scroll-right)
-    (define-key map [remap backward-char] #'ladybird-scroll-left)
-    (define-key map [remap beginning-of-buffer] #'ladybird-scroll-top)
-    (define-key map [remap end-of-buffer] #'ladybird-scroll-bottom)
-    (define-key map "i" #'ladybird-insert-mode)
-    (define-key map (kbd "RET") #'ladybird-insert-mode)
-    (define-key map (kbd "M-w") #'ladybird-copy-selection)
-    (define-key map (kbd "C-y") #'ladybird-yank)
-    (define-key map [remap mark-whole-buffer] #'ladybird-select-all)
-    (define-key map [xterm-paste] #'ladybird-xterm-paste)
+    (dolist (binding '(([down] . ladybird-scroll-down-line)
+                       ([up] . ladybird-scroll-up-line)
+                       ([left] . ladybird-scroll-left)
+                       ([right] . ladybird-scroll-right)
+                       ([next] . ladybird-scroll-down-page)
+                       ([prior] . ladybird-scroll-up-page)
+                       ("\C-n" . ladybird-scroll-down-line)
+                       ("\C-p" . ladybird-scroll-up-line)
+                       ("\C-b" . ladybird-scroll-left)
+                       ("\C-f" . ladybird-scroll-right)
+                       ("\C-v" . ladybird-scroll-down-page)
+                       ("\M-v" . ladybird-scroll-up-page)
+                       ("\M-<" . ladybird-scroll-top)
+                       ("\M->" . ladybird-scroll-bottom)))
+      (define-key map (car binding) (cdr binding)))
     (define-key map "l" #'ladybird-goto-url)
     (define-key map "g" #'ladybird-goto-url)
     (define-key map "r" #'ladybird-reload)
@@ -1407,24 +1499,99 @@ and \\[ladybird-insert-mode] leaves the mode."
     (define-key map "c" #'ladybird-new-buffer)
     (define-key map "S" #'ladybird-screenshot)
     (define-key map "o" #'ladybird-follow-hint)
+    (define-key map "q" #'ladybird-quit)
+    (define-key map "Q" #'ladybird-close)
+    map)
+  "Keymap of `ladybird-command-mode'.")
+
+(define-minor-mode ladybird-command-mode
+  "Make single keys commands in a page buffer, the way eww has them.
+Keys that insert themselves and the motion keys are commands instead
+of going to the page; other self-inserting keys say how to type into
+the page again.  The page buffer's \\`C-c' commands, the mouse and the
+wheel work as in page mode.
+
+\\{ladybird-command-mode-map}"
+  :lighter nil
+  :keymap ladybird-command-mode-map
+  :interactive (ladybird-mode)
+  (force-mode-line-update))
+
+(defun ladybird-page-mode ()
+  "Send keys to the page again: turn `ladybird-command-mode' off."
+  (interactive nil ladybird-mode)
+  (ladybird-command-mode -1))
+
+
+;;; Major mode
+
+(defcustom ladybird-initial-mode 'page
+  "Where the keys of a new page buffer go.
+`page' sends them to the page; `command' starts the buffer in
+`ladybird-command-mode', where single keys are commands."
+  :type '(choice (const :tag "To the page" page)
+                 (const :tag "Command mode" command))
+  :group 'ladybird)
+
+(defvar ladybird-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map ladybird--page-map)
+    (define-key map (kbd "C-c C-l") #'ladybird-goto-url)
     (define-key map (kbd "C-c C-o") #'ladybird-follow-hint)
-    (define-key map (kbd "C-c C-l") #'ladybird-toggle-console)
+    (define-key map (kbd "C-c C-b") #'ladybird-back)
+    (define-key map (kbd "C-c C-f") #'ladybird-forward)
+    (define-key map (kbd "C-c C-r") #'ladybird-reload)
+    (define-key map (kbd "C-c C-k") #'ladybird-stop)
+    (define-key map (kbd "C-c C-w") #'ladybird-copy-url)
+    (define-key map (kbd "C-c C-t") #'ladybird-toggle-console)
+    (define-key map (kbd "C-c C-n") #'ladybird-focus-next)
+    (define-key map (kbd "C-c C-p") #'ladybird-focus-previous)
+    (define-key map (kbd "C-c C-q") #'ladybird-send-next-key)
+    (define-key map [remap quoted-insert] #'ladybird-send-next-key)
+    (define-key map (kbd "C-c C-y") #'ladybird-yank)
+    (define-key map (kbd "C-y") #'ladybird-yank)
+    (define-key map (kbd "C-c C-e") #'ladybird-command-mode)
+    (define-key map (kbd "C-c C-j") #'ladybird-page-mode)
     (define-key map (kbd "C-s") #'ladybird-find)
     (define-key map (kbd "C-r") #'ladybird-find-backward)
     (define-key map (kbd "M-s n") #'ladybird-find-next)
     (define-key map (kbd "M-s p") #'ladybird-find-previous)
-    (define-key map "q" #'ladybird-quit)
-    (define-key map "Q" #'ladybird-close)
+    (define-key map (kbd "M-w") #'ladybird-copy-selection)
+    (define-key map [remap mark-whole-buffer] #'ladybird-select-all)
+    (define-key map [remap text-scale-adjust] #'ladybird-zoom-adjust)
     map)
-  "Keymap of `ladybird-mode'.")
+  "Keymap of `ladybird-mode'.
+Its parent `ladybird--page-map' sends keys and mouse events to the page.")
 
-(define-derived-mode ladybird-mode special-mode "Ladybird"
+(define-derived-mode ladybird-mode nil "Ladybird"
   "Major mode of buffers that show a page rendered by a Ladybird server.
-The mouse and the wheel act on the page.  Keys are Emacs commands;
-\\[ladybird-insert-mode] sends typed keys to the page.
+Keys go to the page: those that insert themselves, \\`RET', \\`TAB',
+\\`DEL', the cursor and function keys, and the Emacs editing and motion
+keys of `ladybird-translated-keys', translated for the server's
+platform.  The mouse and the wheel act on the page.  Other keys, such
+as \\`C-x', \\`C-h', \\`M-x', \\`C-u' and \\`C-g', keep their Emacs meaning.
+\\<ladybird-mode-map>
+  \\[ladybird-goto-url]  open a URL; with a prefix argument in a new buffer
+  \\[ladybird-follow-hint]  activate a link, button or field by its label
+  \\[ladybird-back], \\[ladybird-forward]  back, forward
+  \\[ladybird-reload]  reload; with a prefix argument bypass the cache
+  \\[ladybird-stop]  stop loading
+  \\[ladybird-copy-url]  copy the page's URL
+  \\[ladybird-toggle-console]  console output on or off
+  \\[ladybird-focus-next], \\[ladybird-focus-previous]  focus the next, the previous link or field
+  \\[ladybird-send-next-key], \\`C-q'  send the next key to the page as it is
+  \\[ladybird-yank]  paste the latest kill
+  \\[ladybird-copy-selection]  copy the page's selection
+  \\[ladybird-select-all]  select all
+  \\[ladybird-find], \\[ladybird-find-backward]  find in the page
+  \\[ladybird-find-next], \\[ladybird-find-previous]  next, previous match
+  \\`C-x C-+', \\`C-x C--', \\`C-x C-0'  zoom in, out, back
+  \\[ladybird-command-mode]  `ladybird-command-mode': single keys are commands
+  \\[ladybird-page-mode]  send keys to the page again
 
-\\{ladybird-mode-map}"
+Killing the buffer closes the page."
   :interactive nil
+  (setq buffer-read-only t)
   (setq-local cursor-type nil
               cursor-in-non-selected-windows nil
               truncate-lines t
@@ -1447,7 +1614,11 @@ The mouse and the wheel act on the page.  Keys are Emacs commands;
   (add-hook 'kill-buffer-hook #'ladybird--kill nil t)
   (add-hook 'post-command-hook #'ladybird--after-command)
   (remove-function after-focus-change-function #'ladybird--focus-changed)
-  (add-function :after after-focus-change-function #'ladybird--focus-changed))
+  (add-function :after after-focus-change-function #'ladybird--focus-changed)
+  (when (eq ladybird-initial-mode 'command)
+    (ladybird-command-mode 1)))
+
+(put 'ladybird-mode 'mode-class 'special)
 
 
 ;;; Commands
@@ -1582,29 +1753,34 @@ ENDPOINT...) list; interactively it is read."
   (unless (and ladybird--view (ladybird--ready-p ladybird--conn))
     (user-error "This page is not connected")))
 
-(defun ladybird-goto-url (url)
-  "Load URL in the current page buffer.
+(defun ladybird-goto-url (url &optional new-buffer)
+  "Load URL in the current page buffer, or with NEW-BUFFER in a new one.
 Text that is no URL is searched for or taken as a host name, as the
-server sees fit."
+server sees fit.  Interactively NEW-BUFFER is the prefix argument; a
+new buffer opens on the current buffer's host."
   (interactive
-   (list (read-string "URL: " (ladybird--url) 'ladybird-url-history))
+   (list (read-string (if current-prefix-arg "URL in a new buffer: " "URL: ")
+                      (ladybird--url) 'ladybird-url-history)
+         current-prefix-arg)
    ladybird-mode)
-  (ladybird--check-view)
   (when (string-empty-p url)
     (user-error "No URL"))
-  (ladybird--send-view "load" `(url . ,url)))
+  (if new-buffer
+      (ladybird--open url ladybird--host)
+    (ladybird--check-view)
+    (ladybird--send-view "load" `(url . ,url))))
 
-(defun ladybird-reload ()
-  "Load the page again."
-  (interactive nil ladybird-mode)
+(defun ladybird-reload (&optional bypass-cache)
+  "Load the page again; with BYPASS-CACHE without using the cache.
+Interactively BYPASS-CACHE is the prefix argument."
+  (interactive "P" ladybird-mode)
   (ladybird--check-view)
-  (ladybird--send-view "reload" '(bypass_cache . :false)))
+  (ladybird--send-view "reload" `(bypass_cache . ,(ladybird--bool bypass-cache))))
 
 (defun ladybird-reload-bypass-cache ()
   "Load the page again without using the cache."
   (interactive nil ladybird-mode)
-  (ladybird--check-view)
-  (ladybird--send-view "reload" '(bypass_cache . t)))
+  (ladybird-reload t))
 
 (defun ladybird-stop ()
   "Stop loading the page."
@@ -1880,6 +2056,11 @@ another string than the one searched for is dropped."
                           #'ladybird-hint-add-char)
     (define-key map (kbd "DEL") #'ladybird-hint-delete-char)
     (define-key map [backspace] #'ladybird-hint-delete-char)
+    ;; The page map binds the keypad digits, which Emacs would otherwise
+    ;; translate to digits.
+    (dotimes (digit 10)
+      (define-key map (vector (intern (format "kp-%d" digit)))
+                  #'ladybird-hint-add-char))
     (define-key map (kbd "C-g") #'ladybird-hint-quit)
     (define-key map [escape] #'ladybird-hint-quit)
     map)
@@ -2050,7 +2231,7 @@ With NEW-BUFFER it opens in a new page buffer.  A URL that
   "End the session HINT by activating ITEM.
 With HINT's prefix argument a link opens in a new buffer instead, as
 `ladybird--follow-link' allows; a text field gets the focus and
-`ladybird-insert-mode'."
+`ladybird-command-mode' is turned off."
   (let* ((url (alist-get 'url item))
          (kind (alist-get 'kind item))
          (open (and (ladybird--hint-new-buffer hint) (equal kind "link")
@@ -2062,7 +2243,7 @@ With HINT's prefix argument a link opens in a new buffer instead, as
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (cond (open (ladybird--follow-link url t))
-              ((equal kind "input") (ladybird-insert-mode 1)))))))
+              ((equal kind "input") (ladybird-command-mode -1)))))))
 
 (defun ladybird--hint-add (char)
   "Add CHAR to the label typed in the hint session in progress.
@@ -2103,7 +2284,7 @@ The page labels what can be activated in its window with strings of
 the characters of `ladybird-hint-alphabet'.  Each character typed
 narrows the labels shown, and completing a label activates its
 element: a link or button is clicked, a text field gets the focus and
-`ladybird-insert-mode' turns on.  \\<ladybird-hint-map>\
+`ladybird-command-mode' turns off.  \\<ladybird-hint-map>\
 \\[ladybird-hint-delete-char] deletes the last character
 and \\[ladybird-hint-quit] ends the hints; a key that is not a character ends them
 and does what it does otherwise.
@@ -2138,13 +2319,19 @@ of a-z and 0-9"))
 (defun ladybird-hint-add-char ()
   "Add the character typed to the label of `ladybird-follow-hint'.
 A character that continues no label is refused."
-  (interactive nil ladybird-mode)
+  (declare (completion ignore))
+  (interactive)
   (when (ladybird--hint-here-p)
-    (ladybird--hint-add (downcase last-command-event))))
+    (let ((event last-command-event))
+      (ladybird--hint-add
+       (if (symbolp event)
+           (string-to-char (string-remove-prefix "kp-" (symbol-name event)))
+         (downcase event))))))
 
 (defun ladybird-hint-delete-char ()
   "Delete the last character typed of the label of `ladybird-follow-hint'."
-  (interactive nil ladybird-mode)
+  (declare (completion ignore))
+  (interactive)
   (when (ladybird--hint-here-p)
     (let* ((hint ladybird--hint)
            (prefix (ladybird--hint-prefix hint)))
@@ -2158,7 +2345,8 @@ A character that continues no label is refused."
 
 (defun ladybird-hint-quit ()
   "End `ladybird-follow-hint' without activating anything."
-  (interactive nil ladybird-mode)
+  (declare (completion ignore))
+  (interactive)
   (ladybird--hint-stop t))
 
 (ladybird--defhandler "hints_cancelled" (conn msg)
@@ -2509,14 +2697,22 @@ The paths name files on the server's machine."
 
 (defun ladybird--read-answer (prompt choices)
   "Read one of the strings CHOICES in the minibuffer and return it.
-PROMPT asks the question.  Return nil if nothing was chosen.  Keys
+PROMPT asks the question.  Return nil if the input is empty.  Keys
 typed before the prompt opened are discarded, and a choice has to be
-typed or completed and confirmed: what PROMPT asks is the server's
-question, and no stray key answers it."
-  (discard-input)
-  (let ((answer (completing-read
-                 (format "%s (%s) " prompt (string-join choices ", "))
-                 choices nil t)))
+typed or completed in full: \\`RET' on a part of one, or on anything
+else, asks again with the input gone.  What PROMPT asks is the server's
+question, and keys meant for the page do not answer it."
+  (let ((answer nil)
+        (asked nil))
+    (while (progn
+             (discard-input)
+             (setq answer (completing-read
+                           (format "%s%s (%s) "
+                                   (if asked "Type a choice in full: " "")
+                                   prompt (string-join choices ", "))
+                           choices nil nil)
+                   asked t)
+             (not (or (string-empty-p answer) (member answer choices)))))
     (car (member answer choices))))
 
 (ladybird--defhandler "permission" (conn msg)

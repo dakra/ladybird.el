@@ -21,8 +21,8 @@ Reference implementations to copy patterns from, all read-only:
 ## 1. Scope and non-goals
 
 v1 delivers: connecting to a server over the four transports, one view per buffer (several
-buffers = several views, each its own `create_view`), an Emacs-keys major mode and an
-insert minor mode, mouse/wheel/keyboard/paste input, viewport tracking, title/favicon/
+buffers = several views, each its own `create_view`), a major mode that sends keys to the
+page and a command minor mode, mouse/wheel/keyboard/paste input, viewport tracking, title/favicon/
 cursor/link hover, the dialogs and pickers of protocol section 7, find-in-page, history,
 zoom, screenshot, console, `browse-url` integration, reconnection with
 re-attachment to surviving views, ERT tests, a Python mock server, elate scenarios.
@@ -39,7 +39,7 @@ Repo `/Users/daniel/src/dakra/ladybird`, Elisp under `lisp/`:
 
 | File | Contents |
 | --- | --- |
-| `lisp/ladybird.el` | header (`Package-Requires: ((emacs "32.1"))`, Version 0.1.0), customization, module loading, `ladybird-mode`, `ladybird-insert-mode`, buffers/views, rendering, input commands, page UI, `browse-url`. Requires the two files below. |
+| `lisp/ladybird.el` | header (`Package-Requires: ((emacs "32.1"))`, Version 0.1.0), customization, module loading, `ladybird-mode`, `ladybird-command-mode`, buffers/views, rendering, input commands, page UI, `browse-url`. Requires the two files below. |
 | `lisp/ladybird-conn.el` | hosts/endpoints, record framing, connection struct and state machine, send/dispatch, keepalive, redial. No buffer knowledge beyond a view-id → buffer table and a handler table. |
 | `lisp/ladybird-keys.el` | pure functions: Emacs event → protocol key/mouse/wheel message fields, CSS cursor → pointer symbol. No process or buffer state; fully ERT-testable. |
 | `tools/mock-server.py` | protocol mock (section 7). |
@@ -78,7 +78,9 @@ of a canvas, and tests substitute the fake module.
 | `ladybird-ping-timeout` | `10` | Seconds to wait for `pong` (protocol section 2). |
 | `ladybird-connect-timeout` | `10` | Seconds a dial or hello may take. |
 | `ladybird-reconnect` | `t` | Redial a lost connection with backoff 1, 2, 4 … 30 s. |
-| `ladybird-insert-mode-forward-keys` | see 5.3 | Additional keys the insert mode forwards. |
+| `ladybird-translated-keys` | see 5.3 | Emacs editing and motion keys translated for the server's platform and sent to the page. |
+| `ladybird-emacs-keys` | `<f1> <f3> <f4> <f10> <f11>` | Keys the page map leaves to Emacs (help, keyboard macros, menu bar, full screen); they win over `ladybird-translated-keys`. Rebuilds the page map like it. |
+| `ladybird-initial-mode` | `page` | `page`: a new buffer sends its keys to the page; `command`: it starts in `ladybird-command-mode`. |
 | `ladybird-scroll-step` | `nil` | Pixels for `n`/`p`; `nil` = `(frame-char-height)` × 3. |
 | `ladybird-console-buffer` | `"*ladybird-console*"` | |
 | `ladybird-hint-alphabet` | `"asdfghjkl"` | Characters the server makes hint labels of (protocol §6.1): 2 to 36 different characters of `a`–`z`, `0`–`9`; `ladybird-follow-hint` refuses another value with a `user-error`. |
@@ -91,38 +93,60 @@ of a canvas, and tests substitute the fake module.
 | `ladybird-browse-url` (autoload) | `(url &optional new-session)`; `browse-url` handler (section 6.9). Reuses the most recently used ladybird buffer unless NEW-SESSION. |
 | `ladybird-connect` | Dial a host without opening a view (shows existing views as buffers). |
 | `ladybird-reconnect` | Redial this buffer's connection now (also after `replaced`). |
-| `ladybird-goto-url` (`l`, `g`) | `read-string` with current URL as default → `load`. |
-| `ladybird-reload` (`r`), `ladybird-reload-bypass-cache` (`R`), `ladybird-stop` (`s`) | |
-| `ladybird-back` (`b`), `ladybird-forward` (`f`) | `history` −1/+1; disabled when `can_go_back`/`can_go_forward` is false (`user-error`). |
-| `ladybird-scroll-down-line` (`n`, `<down>`), `ladybird-scroll-up-line` (`p`, `<up>`), `ladybird-scroll-down-page` (`SPC`, `<next>`), `ladybird-scroll-up-page` (`DEL`, `S-SPC`, `<prior>`), `ladybird-scroll-left`/`-right` (`<left>`/`<right>`), `ladybird-scroll-top` (`<`, `M-<`), `ladybird-scroll-bottom` (`>`, `M->`) | Send `mouse wheel` at the canvas center with `dy`/`dx` in device pixels; a page is `(window-body-height win t)` − one line; top/bottom send ±10⁶. Also `[remap scroll-up-command]` etc. as `xwidget-webkit-mode-map` lines 218–234. |
-| `ladybird-zoom-in` (`+`, `=`), `ladybird-zoom-out` (`-`), `ladybird-zoom-reset` (`0`) | `zoom` op. |
+| `ladybird-goto-url` (`C-c C-l`; `l`, `g` in command mode) | `read-string` with current URL as default → `load`; with a prefix argument the URL opens in a new buffer on the same host. |
+| `ladybird-reload` (`C-c C-r`; `r`), `ladybird-reload-bypass-cache` (`R`), `ladybird-stop` (`C-c C-k`; `s`) | `ladybird-reload` bypasses the cache with a prefix argument. |
+| `ladybird-back` (`C-c C-b`; `b`), `ladybird-forward` (`C-c C-f`; `f`) | `history` −1/+1; disabled when `can_go_back`/`can_go_forward` is false (`user-error`). |
+| `ladybird-scroll-down-line`, `-up-line`, `-down-page`, `-up-page`, `-left`, `-right`, `-top`, `-bottom` (command mode: `n`/`p`, `C-n`/`C-p`, `<down>`/`<up>`, `SPC`/`DEL`/`S-SPC`, `C-v`/`M-v`, `<next>`/`<prior>`, `<left>`/`<right>`, `C-b`/`C-f`, `<`/`>`, `M-<`/`M->`) | Send `mouse wheel` at the canvas center with `dy`/`dx` in device pixels; a page is `(window-body-height win t)` − one line; top/bottom send ±10⁶. Command mode also remaps `scroll-up-command` and the like to them. |
+| `ladybird-zoom-adjust` (`[remap text-scale-adjust]`: `C-x C-+`, `C-x C-=`, `C-x C--`, `C-x C-0`) | `zoom` in, out or reset by the last key's base character; a transient map lets `+ = - 0` repeat, as `text-scale-adjust` does. `ladybird-zoom-in` (`+`, `=`), `-out` (`-`), `-reset` (`0`) in command mode. |
 | `ladybird-find` (`C-s`), `ladybird-find-backward` (`C-r`) | Section 6.6. |
-| `ladybird-follow-hint` (`o`, `C-c C-o`, the latter also in insert mode) | Section 6, item 13. With a prefix argument a chosen link opens in a new buffer. |
-| `ladybird-insert-mode` (`i`, `RET`) | Enter insert mode; `C-c C-c` or the mode-line tag leaves it. |
-| `ladybird-copy-url` (`w`) | `kill-new` the URL, message it. |
-| `ladybird-copy-selection` (`M-w`, also in insert mode) | `request_selection` → `kill-new`. |
-| `ladybird-yank` (`C-y`, both modes) | `paste` with `(current-kill 0)`. |
-| `ladybird-select-all` (`C-x h`) | `edit select_all`. |
+| `ladybird-follow-hint` (`C-c C-o`; `o` in command mode) | Section 6, item 13. With a prefix argument a chosen link opens in a new buffer. |
+| `ladybird-command-mode` (`C-c C-e`, the mode-line tag), `ladybird-page-mode` (`C-c C-j`; `i`, `RET` in command mode) | Single keys are commands, or keys go to the page. |
+| `ladybird-send-next-key` (`C-c C-q`, `[remap quoted-insert]`) | Reads one key and sends it untranslated (`read-event` in a graphical frame, `read-key` in a terminal, where an `ESC` read with a key is that key with Meta); a mouse event is put back on `unread-command-events`. |
+| `ladybird-focus-next` (`C-c C-n`), `ladybird-focus-previous` (`C-c C-p`) | Send `Tab` / `Shift+Tab`. |
+| `ladybird-copy-url` (`C-c C-w`; `w`) | `kill-new` the URL, message it. |
+| `ladybird-copy-selection` (`M-w`) | `request_selection` → `kill-new`. |
+| `ladybird-yank` (`C-y`, `C-c C-y`) | `paste` with `(current-kill 0)`. |
+| `ladybird-select-all` (`C-x h` via `[remap mark-whole-buffer]`) | `edit select_all`. |
 | `ladybird-view-source` | v2 (section 6.10); not defined in v1. |
 | `ladybird-screenshot` (`S`) | `read-string` server path, `read-multiple-choice` visible/full. |
-| `ladybird-toggle-console` (`C-c C-l`) | `set_console`, pops the console buffer. |
+| `ladybird-toggle-console` (`C-c C-t`) | `set_console`, pops the console buffer. |
 | `ladybird-new-buffer` (`c`) | New view on the same host with the current URL (like `xwidget-webkit-clone-and-split-*` without the split). |
 | `ladybird-quit` (`q`) | `quit-window`; `Q` = `ladybird-close` (sends `close_view`, kills buffer). |
 | `ladybird-kill-buffer-hook` | `kill-buffer-hook`: sends `close_view` unless `ladybird-keep-view-on-kill` (`defcustom`, default `nil`; `t` leaves the view on the server to reappear in the next `welcome`). |
 
 ### 2.3 Keymaps
 
-`ladybird-mode` derives from `special-mode` (read-only, `q` quit); its keymap binds the
-letters above plus every mouse event (section 5.1) and wheel event (5.2). `C-g`, `C-x`,
-`C-c`, `M-x`, `C-h`, `C-u` are never bound by either map.
+`ladybird-mode` derives from no mode (it is read-only and has the `special` mode class) so
+that no inherited single-key binding shadows the page. Three maps, from the highest
+priority down:
 
-`ladybird-insert-mode` is a minor mode whose keymap is built once like
-`xwidget-webkit-edit-mode-map` (`xwidget.el` lines 968–1000):
-`(substitute-key-definition 'self-insert-command 'ladybird-insert-key map global-map)`
-so every self-inserting key becomes a page key; then the explicit list of 5.3; then
-`C-y` → `ladybird-yank`, `M-w` → `ladybird-copy-selection`, `C-c C-o` →
-`ladybird-follow-hint`, `C-c C-c` → `ladybird-insert-mode` (exit). Its lighter is a
-clickable `mode-line-process` tag `:Insert` like ghostel's.
+- `ladybird-command-mode-map`, the keymap of the minor mode `ladybird-command-mode`: the
+  single keys and motion keys of command mode, `[remap self-insert-command]` →
+  `ladybird-command-mode-self-insert` (a `user-error` saying that `i` sends keys to the page
+  again), `i`, `RET`, `<return>` and `<kp-enter>` → `ladybird-page-mode`, `<backspace>` as
+  `DEL`. The page map binds the function keys `<return>` and `<backspace>`, and Emacs
+  translates a function key to its ASCII key (`RET`, `DEL`) only when nothing binds it,
+  so a map that means the ASCII key binds the function key too: the hint map binds
+  `<backspace>` and the keypad digits, the zoom repeat map the keypad's `+ - = 0`.
+- `ladybird-mode-map`: the commands only — the `C-c` keys of 2.2, `C-y`, `C-s`, `C-r`,
+  `M-s n`, `M-s p`, `M-w`, `[remap mark-whole-buffer]`, `[remap text-scale-adjust]`.
+- its parent `ladybird--page-map`, built by `ladybird--build-page-map` and rebuilt when
+  `ladybird-translated-keys` changes: `[remap self-insert-command]` → `ladybird-send-key`;
+  `RET`, `TAB`, `DEL`, `<backtab>` and `S-SPC` (which Emacs would otherwise shift-translate
+  to `SPC`); the function keys of 5.3 and every mouse button, click count, drag and wheel
+  event in all `C- M- S- s-` combinations; `[mouse-movement]`; `[xterm-paste]`; and
+  `ladybird-translated-keys` → `ladybird-send-edit-key`; the keys of `ladybird-emacs-keys`
+  are unbound last.
+
+`C-g`, `C-x`, `C-h`, `M-x`, `M-:` and `C-u` are bound by none of them. `C-h m` stays short
+because nothing lists the generated bindings: the major mode's docstring is hand-written
+with `\\[command]` references (`define-derived-mode` appends `\\{map}` only to a docstring
+without `\\[` or `\\{`, and `\\{map}` would list the parent's bindings too), and the minor
+mode's docstring ends in `\\{ladybird-command-mode-map}`, which holds only its few keys.
+The map-only commands of hints and command mode are declared `(completion ignore)`, so they
+appear neither in `M-x` nor among describe-mode's unbound mode commands. The mode line
+tag `:Page`/`:Command` toggles the mode when clicked, in the window of the click
+(`ladybird-mode-line-toggle` selects `(posn-window (event-start EVENT))`).
 
 `ladybird-hint-map` is in force only while `ladybird-follow-hint` reads a label (section 6,
 item 13): every character from `SPC` up → `ladybird-hint-add-char`, `DEL` and
@@ -406,7 +430,7 @@ ladybird-buffer-name-format …))` only when the formatted name changed, `force-
 Header line (`ladybird-header-line`): `(:eval (ladybird--header-line))` → favicon image (if
 any, `(create-image (base64-decode-string png) 'png t :height (frame-char-height)
 :ascent 'center)`), title, `" — "`, URL, `[loading]`, `[detached]`/`[reconnecting in Ns]`.
-`mode-line-process` carries the insert-mode tag and `:Loading` as `ghostel--mode-line-refresh`.
+`mode-line-process` carries the `:Page`/`:Command` tag and `:Loading` as `ghostel--mode-line-refresh`.
 `favicon` arrives as base64 PNG; decode once per message.
 
 ## 5. Input (`ladybird-keys.el` + bindings in `ladybird.el`)
@@ -505,33 +529,40 @@ global bindings, so no `emulation-mode-map-alists` intercept is needed.
    §5, Ladybird's `Mod_Keypad`). `alt` (Emacs's own alt) → 4 too. Hyper is dropped.
 
 `ladybird--send-key SPEC` sends `key down` (`repeat false`) immediately followed by `key up`
-with the same fields (protocol section 5), or a `text` message. `ladybird-insert-key` is the
-interactive command bound in insert mode: it uses `last-command-event` with the
+with the same fields (protocol section 5), or a `text` message. `ladybird-send-key` is the
+command of the page keys: it repeats the key by its numeric prefix argument and uses
+`last-command-event` with the
 `xwidget-webkit-pass-command-event` input-method dance (`xwidget.el` line 171) so Quail
 input methods yield `text`. TTY meta via `ESC x` is detected with
-`this-command-keys-vector` as in `ghostel--send-event` (`ghostel.el` line 1766).
+`this-single-command-keys`, which leaves out the keys of a prefix argument.
 
-**Insert-mode rule.** A key reaches the page when its global binding is
-`self-insert-command` (substituted at map build), or it is in the explicit set
-`[return tab backspace delete escape insert left right up down home end prior next f1…f12
-kp-*]` in every `C- M- S- s-` combination (built with a loop, no hand list), or it is in
-`ladybird-insert-mode-forward-keys` (default `C-a C-e C-k C-d M-b M-f M-d M-DEL
-M-<backspace> C-<backspace> C-z C-/ C-_ C-?`, editing chords users expect in a text field;
-set to nil to keep them all for Emacs). These are not sent raw (Ladybird ignores Ctrl+A/E/K/D
-and types the letter of an Alt chord): `ladybird-keys-editing EVENT PLATFORM` translates each
-to an editing intent for the server's `welcome.host.platform`: `C-a`/`C-e` → Home/End, `C-d`
-→ Delete, `C-k` → Shift+End then Delete, `M-b`/`M-f` → Alt+Left/Right on macOS and
-Ctrl+Left/Right elsewhere, `M-d` → Alt/Ctrl+Delete, `M-DEL` `M-<backspace>` `C-<backspace>`
-→ Alt/Ctrl+Backspace, `C-z` `C-/` `C-_` → `edit undo`, `C-?` → `edit redo`. A key in the
-option without a table entry is sent raw. Everything else, in particular `C-g C-x C-c M-x C-h
+**Page-key rule.** A key reaches the page when its global binding is
+`self-insert-command` (through the page map's remap), or it is `RET TAB DEL <backtab>
+S-SPC`, or it is in the set `[return tab backspace delete escape insert left right up down
+home end prior next f1…f12 kp-*]` in every `C- M- S- s-` combination (built with a loop, no
+hand list), or it is in `ladybird-translated-keys` (default `C-a C-e C-k C-d M-b M-f M-d
+M-DEL M-<backspace> C-<backspace> C-z C-/ C-_ C-? C-n C-p C-b C-f C-v M-v M-< M->`; set to
+nil to keep them all for Emacs). These are not sent raw (Ladybird ignores Ctrl+A/E/K/D and
+types the letter of an Alt chord): `ladybird-keys-editing EVENT PLATFORM` translates each
+for the server's `welcome.host.platform`: `C-a`/`C-e` → Home/End, `C-d` → Delete, `C-k` →
+Shift+End then Delete, `M-b`/`M-f` → Alt+Left/Right on macOS and Ctrl+Left/Right elsewhere,
+`M-d` → Alt/Ctrl+Delete, `M-DEL` `M-<backspace>` `C-<backspace>` → Alt/Ctrl+Backspace,
+`C-z` `C-/` `C-_` → `edit undo`, `C-?` → `edit redo`, `C-n C-p C-b C-f` → the cursor keys,
+`C-v`/`M-v` → PageDown/PageUp, `M-<`/`M->` → Command+Up/Down on macOS and Ctrl+Home/End
+elsewhere. A key in the option without a table entry is sent raw. Ladybird scrolls the page
+itself on the cursor keys, `Space`, PageUp/PageDown and Home/End when no field has the
+focus (`EventHandler::handle_keydown`), so the client needs no fallback; in a field the
+same keys move the caret, Ctrl+Home/End (and Command+Up/Down on macOS) reach the field's
+ends, and plain PageUp/PageDown still scroll. Tried against the macOS and the Linux server
+(`live-scroll`, `live-keyboard`). Everything else, in particular `C-g C-x C-c M-x M-: C-h
 C-u C-l C-s C-r` and all `C-c …` sequences, keeps its Emacs meaning; `C-y` yanks into the
 page and `M-w` copies the page selection. `C-g` is never forwarded: `Escape` is the page's
-cancel key and reaches it in a GUI frame via `[escape]`. In Emacs-keys mode only the mode
-map's letters are commands; any unbound self-inserting key signals `user-error "Press i to
-type into the page"` through `ladybird-mode-map`'s `[remap self-insert-command]`.
+cancel key and reaches it in a GUI frame via `[escape]`; `C-c C-q` sends any key as it is.
+In command mode the single keys are commands; another self-inserting key signals the
+`user-error` of `ladybird-command-mode-self-insert`.
 
 Paste: `ladybird-yank` → `paste` with `(current-kill 0)`; `ladybird-xterm-paste` bound to
-`<xterm-paste>` in both maps extracts `(nth 1 event)` like `ghostel-xterm-paste` and sends
+`<xterm-paste>` in the page map extracts `(nth 1 event)` like `ghostel-xterm-paste` and sends
 `paste`. `yank-media` registers no handler in v1 (no uploads); the mode sets
 `yank-media-preferred-types` untouched.
 
@@ -553,11 +584,17 @@ All handlers below run via `ladybird--later` with an `on-quit` that cancels (3.8
    prompt noting the server's filesystem (TRAMP-based completion `/ssh:HOST:` is v2).
 4. `color_picker` → `read-color` → `#rrggbb`. `date_picker` → `read-string` with `value`
    as default; no validation beyond non-empty.
-5. `permission` → `(read-multiple-choice (format "Allow %s for %s? " name origin) …)` with
-   choices once/always/deny → `allow_once`/`allow_always`/`deny`; quit → `dismiss`;
-   `permission_cancelled` closes the prompt (protocol §7).
-6. `external_url` → `read-multiple-choice "URL for APPLICATION"` with `(?o "open on server")
-   (?h "open here")  (?d "deny")`: `open:true`, or `open:false` plus local `browse-url`
+5. `permission` → `ladybird--read-answer` with the choices `allow once`, `allow always`,
+   `deny` → `allow_once`/`allow_always`/`deny`; empty input or quit → `dismiss`;
+   `permission_cancelled` closes the prompt (protocol §7). `ladybird--read-answer` is
+   `completing-read` without require-match after `discard-input`: only a choice typed or
+   completed in full is taken, and any other non-empty input asks again (with
+   `discard-input` again), since keys typed for the page can arrive while it is open. An
+   extra time window that ignores keys after the prompt opens is not used: a full word
+   followed by `RET` is needed, and a window would delay a deliberate answer without
+   stopping slower stray typing.
+6. `external_url` → `ladybird--read-answer` with `open on server`, `open here` (http,
+   https and mailto only), `deny`: `open:true`, or `open:false` plus local `browse-url`
    with `browse-url-secondary-browser-function`, or `open:false`.
 7. `context_menu`: `popup-menu` (`x-popup-menu` at the mouse position) of a keymap built per
    message: with `link_url`: Open Link, Open Link in New Buffer, Copy Link; with
@@ -601,7 +638,7 @@ All handlers below run via `ladybird--later` with an `on-quit` that cancels (3.8
       `truncated`, whether a link opens in a new buffer). `ladybird-hint-map` is in force
       through `emulation-mode-map-alists`, keyed on `ladybird--hint`: exactly while a
       session exists, whatever binds `overriding-terminal-local-map` meanwhile, and above
-      the insert mode's and the major mode's maps. `ladybird--hint-pre-command` on
+      the command mode's and the major mode's maps. `ladybird--hint-pre-command` on
       `pre-command-hook` keeps the session for the map's own commands and for
       `mouse-movement`; any other command ends it (`hints_end` null) and then runs as
       usual, so a click, the wheel, `C-x b` or `C-c C-o` do what they do. The command
@@ -632,7 +669,7 @@ All handlers below run via `ladybird--later` with an `on-quit` that cancels (3.8
       whose own URL is a file URL, in a new buffer on the buffer's host, and refuses
       others with "ladybird: not opening URL". The context menu's "Open Link" and "Open
       Link in New Buffer" go through it too. A chosen `"input"` turns
-      `ladybird-insert-mode` on after `hints_end`.
+      `ladybird-command-mode` off after `hints_end`.
     - The session ends, sending nothing: on `hints_cancelled` naming its view and id,
       also while it waits for the labels ("The page ended the hint session"; dialog
       prompts are not touched, and `request_cancelled` does not end a session); on an
@@ -745,14 +782,17 @@ M ≈ 300, L ≈ 600 of code plus tests.
   log `mouse down`/`up` at the scaled coordinates and the next screenshot shows the square
   there; wheel events pushed on `unread-command-events` (shape from the memory note) → one
   `wheel` message each with `dy` −24/+24; `n`/`SPC` → wheel messages of line/page size.
-- **C3 Keys, insert mode, paste** (M): `ladybird-insert-mode`, `ladybird--build-insert-map`,
-  `ladybird-insert-key`, `ladybird--send-key`, `ladybird-yank`, `ladybird-xterm-paste`,
-  `ladybird-copy-selection`, `ladybird-select-all`, `[remap self-insert-command]` in
-  `ladybird-mode-map`. ERT: `(key-binding "a")` in insert mode is `ladybird-insert-key` and in
-  Emacs mode the remap; `C-x C-f`, `M-x`, `C-g` resolve to their global commands in insert
-  mode; `ladybird-insert-mode-forward-keys` nil unbinds `C-a`. elate (TTY ok): `i`, `type
-  'Hello!'`, `keys RET` → mock log has `key down` `H` `E` … `ExclamationPoint` `Return` with
-  code points; `C-y` after `(kill-new "x")` → `paste`; `C-c C-c` leaves insert mode.
+- **C3 Keys, page and command mode, paste** (M): `ladybird--build-page-map`,
+  `ladybird-send-key`, `ladybird-send-edit-key`, `ladybird-send-next-key`, `ladybird--send-key`,
+  `ladybird-command-mode`, `ladybird-yank`, `ladybird-xterm-paste`, `ladybird-copy-selection`,
+  `ladybird-select-all`, `ladybird-zoom-adjust`. ERT: `(key-binding "a")` is
+  `ladybird-send-key` and in command mode `ladybird-command-mode-self-insert`; `C-x C-f`,
+  `M-x`, `C-g` resolve to their global commands; `ladybird-translated-keys` nil unbinds
+  `C-a`; the translation table per platform; `C-c C-q` with `C-x`, `C-g`, a terminal's
+  `ESC x` and a mouse event; `C-u 3 a`; the zoom repeat keys; the `describe-mode` text has
+  no generated bindings. elate (TTY ok): `type 'Hello!'`, `keys RET` → mock log has `key
+  down` `H` `E` … `ExclamationPoint` `Return` with code points; `C-y` after `(kill-new "x")`
+  → `paste`; `C-c C-e` and `i` switch modes.
 - **C4 Page UI handlers** (M): `dialog`, `select`, `file_picker`, `color_picker`,
   `date_picker`, `permission`, `permission_cancelled`, `external_url`, `context_menu`,
   `popup_blocked`, `clipboard`, `cursor`, `link_hover`, `tooltip`, `favicon`, `console`,
@@ -880,7 +920,7 @@ Protocol feedback (for `plans/01-protocol.md`):
 | B1 connection | 500 | 300 | the largest and most delicate piece |
 | C1 buffers/canvas/sizing | 400 | 150 + elate | |
 | C2 mouse/wheel | 220 | 80 + elate | |
-| C3 keys/insert/paste | 180 | 80 + elate | |
+| C3 keys/modes/paste | 180 | 80 + elate | |
 | C4 page UI | 300 | 150 + elate | |
 | D1 navigation | 150 | elate | |
 | D2 find | 120 | elate | |

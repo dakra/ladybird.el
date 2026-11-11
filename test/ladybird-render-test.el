@@ -3,7 +3,7 @@
 ;;; Commentary:
 
 ;; ERT tests of the page buffers: canvas and sizing, mouse and wheel,
-;; keys and insert mode, dialogs and the other page events.  They use
+;; keys, page and command mode, dialogs and the other page events.  They use
 ;; the harness of ladybird-conn-test.el: a pipe process for the connection,
 ;; a recorder for what is sent, and the fake module.
 
@@ -339,7 +339,8 @@ the canvas."
      conn (ladybird-render-test-state '(url . "mock://a%20b") '(loading . t)))
     (should (equal (substring-no-properties (ladybird--header-line))
                    " mock://a%%20b — One [loading]"))
-    (should (equal (ladybird--mode-line-process) ":Loading"))
+    (should (equal (substring-no-properties (ladybird--mode-line-process))
+                   ":Page:Loading"))
     ;; A long URL is cut so that the tags stay in the window.
     (ladybird-test-receive
      conn (ladybird-render-test-state
@@ -372,10 +373,29 @@ the canvas."
     (ladybird-test-receive
      conn (ladybird-render-test-state '(url . "mock://a%20b") '(loading . t)))
     (ladybird-test-receive conn (ladybird-render-test-state))
-    (should (equal (ladybird--mode-line-process) ""))
-    (ladybird-insert-mode 1)
     (should (equal (substring-no-properties (ladybird--mode-line-process))
-                   ":Insert"))
+                   ":Page"))
+    (ladybird-command-mode 1)
+    (should (equal (substring-no-properties (ladybird--mode-line-process))
+                   ":Command"))
+    ;; A click on the tag switches the mode of the clicked window's buffer,
+    ;; also when another window is selected.
+    (let ((map (get-text-property 0 'local-map (ladybird--mode-line-process))))
+      (should (eq (lookup-key map [mode-line mouse-1]) #'ladybird-mode-line-toggle)))
+    (save-window-excursion
+      (delete-other-windows)
+      (set-window-buffer (selected-window) buffer)
+      (let ((page (selected-window))
+            (other (split-window)))
+        (with-temp-buffer
+          (set-window-buffer other (current-buffer))
+          (select-window other)
+          (ladybird-mode-line-toggle `(mouse-1 (,page mode-line (0 . 0) 0)))
+          (should (eq (selected-window) other))
+          (should-not (buffer-local-value 'ladybird-command-mode buffer))
+          (ladybird-mode-line-toggle `(mouse-1 (,page mode-line (0 . 0) 0)))
+          (should (buffer-local-value 'ladybird-command-mode buffer)))))
+    (ladybird-command-mode -1)
     (ladybird-test-receive conn '((type . "replaced")))
     (should (string-suffix-p " [detached]" (ladybird--header-line)))
     (ladybird--connect ladybird-test-host #'ignore)
@@ -744,14 +764,34 @@ the canvas."
                      `((20 15 0 20) (20 15 0 -40) (20 15 20 0) (20 15 -20 0)
                        (20 15 0 ,page) (20 15 0 ,(- page))
                        (20 15 0 -2000000) (20 15 0 2000000)))))
-    (should (eq (key-binding "n") #'ladybird-scroll-down-line))
-    (should (eq (key-binding " ") #'ladybird-scroll-down-page))
-    (should (eq (key-binding (kbd "C-v")) #'ladybird-scroll-down-page))
-    (should (eq (key-binding (kbd "M-<")) #'ladybird-scroll-top))
-    (should (eq (key-binding [down-mouse-1]) #'ladybird-mouse-down))
-    (should (eq (key-binding [C-M-S-s-triple-drag-mouse-3]) #'ladybird-mouse-up))
-    (should (eq (key-binding [M-wheel-left]) #'ladybird-wheel))
-    (should (eq (key-binding [mouse-movement]) #'ladybird-mouse-move))))
+    (dolist (command-mode '(nil t))
+      (ladybird-command-mode (if command-mode 1 -1))
+      (should (eq (key-binding [down-mouse-1]) #'ladybird-mouse-down))
+      (should (eq (key-binding [C-M-S-s-triple-drag-mouse-3]) #'ladybird-mouse-up))
+      (should (eq (key-binding [M-wheel-left]) #'ladybird-wheel))
+      (should (eq (key-binding [mouse-movement]) #'ladybird-mouse-move)))
+    ;; Command mode scrolls with single keys and the motion keys.
+    (dolist (binding '(("n" . ladybird-scroll-down-line) ("p" . ladybird-scroll-up-line)
+                       ("SPC" . ladybird-scroll-down-page)
+                       ("DEL" . ladybird-scroll-up-page)
+                       ("S-SPC" . ladybird-scroll-up-page)
+                       ("<" . ladybird-scroll-top) (">" . ladybird-scroll-bottom)
+                       ("<down>" . ladybird-scroll-down-line)
+                       ("<up>" . ladybird-scroll-up-line)
+                       ("<left>" . ladybird-scroll-left)
+                       ("<right>" . ladybird-scroll-right)
+                       ("<next>" . ladybird-scroll-down-page)
+                       ("<prior>" . ladybird-scroll-up-page)
+                       ("C-n" . ladybird-scroll-down-line)
+                       ("C-p" . ladybird-scroll-up-line)
+                       ("C-f" . ladybird-scroll-right)
+                       ("C-b" . ladybird-scroll-left)
+                       ("C-v" . ladybird-scroll-down-page)
+                       ("M-v" . ladybird-scroll-up-page)
+                       ("M-<" . ladybird-scroll-top) ("M->" . ladybird-scroll-bottom)))
+      (ert-info ((car binding))
+        (should (eq (key-binding (kbd (car binding))) (cdr binding)))))
+    (ladybird-command-mode -1)))
 
 (ert-deftest ladybird-render-test-tracking ()
   (ladybird-render-test-with-view
@@ -785,54 +825,107 @@ the canvas."
     (setq track-mouse nil)))
 
 
-;;; C3: keys, insert mode, paste
+;;; C3: keys, page and command mode, paste
 
 (ert-deftest ladybird-render-test-key-bindings ()
+  ;; Page mode: keys go to the page, a few stay with Emacs.
   (ladybird-render-test-with-view
-    (should (eq (key-binding "a") #'ladybird-self-insert-hint))
-    (should (eq (key-binding "é") #'ladybird-self-insert-hint))
-    (should-error (ladybird-self-insert-hint) :type 'user-error)
-    (should (eq (key-binding "i") #'ladybird-insert-mode))
-    (should (eq (key-binding (kbd "RET")) #'ladybird-insert-mode))
-    (should (eq (key-binding (kbd "C-y")) #'ladybird-yank))
-    (should (eq (key-binding (kbd "M-w")) #'ladybird-copy-selection))
-    (should (eq (key-binding (kbd "C-x h")) #'ladybird-select-all))
-    (should (eq (key-binding "q") #'ladybird-quit))
-    (should (eq (key-binding "Q") #'ladybird-close))
-    (ladybird-insert-mode 1)
-    (dolist (key '("a" "n" "q" "Q" "é" "!" "SPC" "RET" "TAB" "DEL" "<return>"
-                   "<backspace>" "<escape>" "<left>" "C-<left>" "C-M-S-s-<f5>"
-                   "S-<return>" "<kp-7>" "<backtab>" "M-<left>" "<home>"
-                   "<delete>" "S-<left>" "C-<delete>"))
+    (should-not ladybird-command-mode)
+    (dolist (key '("a" "n" "q" "Q" "o" "é" "!" "0" "-" "SPC" "RET" "TAB" "DEL"
+                   "<return>" "<backspace>" "<escape>" "<left>" "C-<left>"
+                   "C-M-S-s-<f5>" "S-<return>" "<kp-7>" "<backtab>" "M-<left>"
+                   "<home>" "<delete>" "S-<left>" "C-<delete>" "<next>" "<prior>"))
       (ert-info ((format "key %s" key))
-        (should (eq (key-binding (kbd key)) #'ladybird-insert-key))))
+        (should (eq (key-binding (kbd key)) #'ladybird-send-key))))
     (dolist (key '("C-a" "C-e" "C-k" "C-d" "M-b" "M-f" "M-d" "M-DEL"
-                   "M-<backspace>" "C-<backspace>" "C-z" "C-/" "C-_" "C-?"))
+                   "M-<backspace>" "C-<backspace>" "C-z" "C-/" "C-_" "C-?"
+                   "C-n" "C-p" "C-b" "C-f" "C-v" "M-v" "M-<" "M->"))
       (ert-info ((format "key %s" key))
-        (should (eq (key-binding (kbd key)) #'ladybird-insert-edit-key))))
-    ;; Editing keys outside the option stay with Emacs.
-    (should-not (eq (key-binding (kbd "C-f")) #'ladybird-insert-edit-key))
-    (should (eq (key-binding (kbd "C-x C-f")) #'find-file))
-    (should (eq (key-binding (kbd "M-x")) #'execute-extended-command))
-    (should (eq (key-binding (kbd "C-g")) #'keyboard-quit))
-    (should (eq (key-binding (kbd "C-h k")) #'describe-key))
-    (should (eq (key-binding (kbd "C-u")) #'universal-argument))
-    (should (eq (key-binding (kbd "C-l")) #'recenter-top-bottom))
-    (should (eq (key-binding (kbd "C-y")) #'ladybird-yank))
-    (should (eq (key-binding (kbd "M-w")) #'ladybird-copy-selection))
-    (should (eq (key-binding (kbd "C-c C-c")) #'ladybird-insert-mode))
+        (should (eq (key-binding (kbd key)) #'ladybird-send-edit-key))))
+    (dolist (binding '(("C-x C-f" . find-file) ("M-x" . execute-extended-command)
+                       ("C-g" . keyboard-quit) ("C-h k" . describe-key)
+                       ("C-u" . universal-argument) ("M-:" . eval-expression)
+                       ("C-l" . recenter-top-bottom)))
+      (ert-info ((car binding))
+        (should (eq (key-binding (kbd (car binding))) (cdr binding)))))
     (should (eq (key-binding [xterm-paste]) #'ladybird-xterm-paste))
-    (should (eq (key-binding [down-mouse-1]) #'ladybird-mouse-down))
+    (should (eq (key-binding [deletechar]) #'ladybird-send-key))
+    (should (eq (key-binding (kbd "C-q")) #'ladybird-send-next-key))
+    ;; The keys of `ladybird-emacs-keys' stay with Emacs, also when they are
+    ;; in `ladybird-translated-keys' too; a key with a modifier goes on.
+    (dolist (key '("<f1>" "<f3>" "<f4>" "<f10>" "<f11>"))
+      (ert-info ((format "key %s" key))
+        (should (eq (key-binding (kbd key)) (global-key-binding (kbd key))))))
+    (should (eq (key-binding (kbd "C-<f1>")) #'ladybird-send-key))
     (unwind-protect
-        (let ((ladybird-insert-mode-forward-keys nil))
-          (ladybird--rebuild-insert-map)
+        (let ((ladybird-emacs-keys '("C-a" "<f5>"))
+              (ladybird-translated-keys '("C-a" "C-e")))
+          (ladybird--rebuild-page-map)
+          (should (eq (key-binding (kbd "C-a")) #'move-beginning-of-line))
+          (should (eq (key-binding (kbd "<f5>")) (global-key-binding (kbd "<f5>"))))
+          (should (eq (key-binding (kbd "C-e")) #'ladybird-send-edit-key))
+          (should (eq (key-binding (kbd "<f1>")) #'ladybird-send-key)))
+      (ladybird--rebuild-page-map))
+    ;; The page's key commands are not offered by M-x.
+    (should (eq (function-get 'ladybird-send-key 'completion-predicate) #'ignore))
+    (should (eq (function-get 'ladybird-send-edit-key 'completion-predicate) #'ignore))
+    ;; An editing key outside the option keeps its Emacs meaning.
+    (unwind-protect
+        (let ((ladybird-translated-keys nil))
+          (ladybird--rebuild-page-map)
           (should (eq (key-binding (kbd "C-a")) #'move-beginning-of-line))
           (should (eq (key-binding (kbd "M-f")) #'forward-word))
-          (should (eq (key-binding "a") #'ladybird-insert-key)))
-      (ladybird--rebuild-insert-map))
-    (should (eq (key-binding (kbd "C-a")) #'ladybird-insert-edit-key))
-    (ladybird-insert-mode -1)
-    (should (eq (key-binding "a") #'ladybird-self-insert-hint))))
+          (should (eq (key-binding (kbd "C-n")) #'next-line))
+          (should (eq (key-binding "a") #'ladybird-send-key)))
+      (ladybird--rebuild-page-map))
+    (should (eq (key-binding (kbd "C-a")) #'ladybird-send-edit-key))
+    ;; Command mode: single keys are commands, others say how to type.
+    (ladybird-command-mode 1)
+    (should (eq (key-binding "a") #'ladybird-command-mode-self-insert))
+    (should (eq (key-binding "é") #'ladybird-command-mode-self-insert))
+    (should (equal (cadr (should-error (ladybird-command-mode-self-insert)
+                                       :type 'user-error))
+                   "Keys are commands here; i sends them to the page again"))
+    (should (eq (key-binding (kbd "<f5>")) #'ladybird-send-key))
+    (should (eq (key-binding (kbd "C-a")) #'ladybird-send-edit-key))
+    ;; Return and Backspace of a graphical frame do the jobs of RET and DEL.
+    (should (eq (key-binding [return]) #'ladybird-page-mode))
+    (should (eq (key-binding [kp-enter]) #'ladybird-page-mode))
+    (should (eq (key-binding (kbd "RET")) #'ladybird-page-mode))
+    (should (eq (key-binding [backspace]) #'ladybird-scroll-up-page))
+    (should (eq (key-binding (kbd "DEL")) #'ladybird-scroll-up-page))
+    (ladybird-command-mode -1)
+    (should (eq (key-binding [return]) #'ladybird-send-key))
+    (should (eq (key-binding [backspace]) #'ladybird-send-key))
+    (should (eq (key-binding "a") #'ladybird-send-key))))
+
+(ert-deftest ladybird-render-test-modes ()
+  ;; C-c C-e and C-c C-j switch, i and RET go back; the option sets
+  ;; where a new buffer starts.
+  (ladybird-render-test-with-view
+    (ladybird-render-test-show)
+    (ladybird-render-test-keys-in-page "C-c C-e")
+    (should ladybird-command-mode)
+    (ladybird-render-test-keys-in-page "i")
+    (should-not ladybird-command-mode)
+    (ladybird-render-test-keys-in-page "C-c C-e RET")
+    (should-not ladybird-command-mode)
+    (ladybird-render-test-keys-in-page "C-c C-e C-c C-j")
+    (should-not ladybird-command-mode)
+    (ladybird-render-test-keys-in-page "C-c C-e C-c C-e")
+    (should-not ladybird-command-mode)
+    (ladybird-render-test-keys-in-page "C-c C-j")
+    (should-not ladybird-command-mode)
+    (should-not (ladybird-test-sent))
+    (let ((ladybird-initial-mode 'command))
+      (with-current-buffer (ladybird--make-view-buffer conn 2 "mock://2")
+        (should ladybird-command-mode)))
+    (with-current-buffer (ladybird--make-view-buffer conn 3 "mock://3")
+      (should-not ladybird-command-mode))))
+
+(defun ladybird-render-test-keys-in-page (keys)
+  "Type KEYS, a string for `kbd', in the page buffer shown in the window."
+  (execute-kbd-macro (kbd keys)))
 
 (ert-deftest ladybird-render-test-send-key ()
   (ladybird-render-test-with-view
@@ -847,10 +940,19 @@ the canvas."
     (should (equal (ladybird-test-sent)
                    '(((type . "text") (view . 1) (text . "héllo")))))))
 
-(ert-deftest ladybird-render-test-insert-key ()
+(defun ladybird-render-test-key-downs ()
+  "Return the keys sent as (KEY CODE-POINT MODIFIERS) of their presses, or text."
+  (delq nil (mapcar (lambda (m)
+                      (cond ((alist-get 'text m))
+                            ((equal (alist-get 'kind m) "down")
+                             (list (alist-get 'key m) (alist-get 'code_point m)
+                                   (alist-get 'modifiers m)))))
+                    (ladybird-test-sent))))
+
+(ert-deftest ladybird-render-test-page-keys ()
   (ladybird-render-test-with-view
     (dolist (last-command-event (list ?H ?! ?\r ?é 'C-left 'lshift))
-      (ladybird-insert-key))
+      (ladybird-send-key))
     (should (equal (mapcar (lambda (m)
                              (or (alist-get 'text m)
                                  (list (alist-get 'kind m) (alist-get 'key m)
@@ -862,15 +964,37 @@ the canvas."
                      ("up" "ExclamationPoint" 33 0)
                      ("down" "Return" 10 0) ("up" "Return" 10 0)
                      "é"
-                     ("down" "Left" 0 2) ("up" "Left" 0 2))))))
+                     ("down" "Left" 0 2) ("up" "Left" 0 2))))
+    ;; Typed through the command loop, with no mode to switch first.
+    (ladybird-render-test-show)
+    (ladybird-render-test-keys-in-page "H i SPC 5 - q RET <f5>")
+    (should (equal (ladybird-render-test-key-downs)
+                   '(("H" 72 1) ("I" 105 0) ("Space" 32 0) ("5" 53 0)
+                     ("Minus" 45 0) ("Q" 113 0) ("Return" 10 0) ("F5" 0 0))))
+    ;; A numeric prefix argument repeats a key; C-u stays Emacs's.
+    (setq ladybird-test-sent nil)
+    (ladybird-render-test-keys-in-page "C-u 3 a C-u C-n")
+    (should (equal (ladybird-render-test-key-downs)
+                   '(("A" 97 0) ("A" 97 0) ("A" 97 0)
+                     ("Down" 0 0) ("Down" 0 0) ("Down" 0 0) ("Down" 0 0))))
+    ;; A keyboard macro replays the keys.
+    (setq ladybird-test-sent nil)
+    (let ((last-kbd-macro (kbd "x y")))
+      (execute-kbd-macro last-kbd-macro 2))
+    (should (equal (mapcar #'car (ladybird-render-test-key-downs))
+                   '("X" "Y" "X" "Y")))
+    ;; ESC and a key, as a terminal sends Meta, is the Meta key.
+    (setq ladybird-test-sent nil)
+    (ladybird-render-test-keys-in-page "ESC b ESC f")
+    (should (equal (ladybird-render-test-key-downs) '(("Left" 0 2) ("Right" 0 2))))))
 
 (defun ladybird-render-test-edit-keys (&rest keys)
-  "Run `ladybird-insert-edit-key' for each of KEYS; return what was sent.
+  "Run `ladybird-send-edit-key' for each of KEYS; return what was sent.
 A key press is (KEY MODIFIERS), an edit message its operation."
   (setq ladybird-test-sent nil)
   (dolist (key keys)
     (let ((last-command-event (aref (key-parse key) 0)))
-      (ladybird-insert-edit-key)))
+      (ladybird-send-edit-key)))
   (delq nil (mapcar (lambda (m)
                       (pcase (alist-get 'type m)
                         ("edit" (alist-get 'op m))
@@ -888,11 +1012,16 @@ A key press is (KEY MODIFIERS), an edit message its operation."
                    '(("Home" 0) ("End" 0) ("Delete" 0) ("End" 1) ("Delete" 0)
                      ("Left" 2) ("Right" 2) ("Delete" 2) ("Backspace" 2)
                      ("Backspace" 2) "undo" "undo" "redo")))
+    (should (equal (ladybird-render-test-edit-keys
+                    "C-n" "C-p" "C-b" "C-f" "C-v" "M-v" "M-<" "M->")
+                   '(("Down" 0) ("Up" 0) ("Left" 0) ("Right" 0)
+                     ("PageDown" 0) ("PageUp" 0) ("Home" 2) ("End" 2))))
     ;; Every press is released.
     (ladybird-render-test-edit-keys "C-k")
     (should (equal (mapcar (lambda (m) (alist-get 'kind m)) (ladybird-test-sent))
                    '("down" "up" "down" "up")))
-    ;; A server on macOS moves and deletes by words with the alt key.
+    ;; A server on macOS moves and deletes by words with the alt key and
+    ;; reaches the ends with the command key.
     (setf (ladybird--conn-server-info conn)
           '((host . ((hostname . "mac") (platform . "macos")))))
     (should (eq (ladybird--platform) 'macos))
@@ -902,8 +1031,110 @@ A key press is (KEY MODIFIERS), an edit message its operation."
                    '(("Home" 0) ("End" 0) ("End" 1) ("Delete" 0) ("Left" 4)
                      ("Right" 4) ("Delete" 4) ("Backspace" 4) ("Backspace" 4)
                      ("Backspace" 4) "undo")))
+    (should (equal (ladybird-render-test-edit-keys
+                    "C-n" "C-p" "C-b" "C-f" "C-v" "M-v" "M-<" "M->")
+                   '(("Down" 0) ("Up" 0) ("Left" 0) ("Right" 0)
+                     ("PageDown" 0) ("PageUp" 0) ("Up" 8) ("Down" 8))))
     ;; A key without a translation goes as it is.
     (should (equal (ladybird-render-test-edit-keys "C-o") '(("O" 2))))))
+
+(ert-deftest ladybird-render-test-send-next-key ()
+  ;; C-c C-q sends the next key as it is, whatever Emacs binds it to.
+  (ladybird-render-test-with-view
+    (ladybird-render-test-show)
+    (let ((keys nil)
+          (sequence nil))
+      (cl-letf (((symbol-function 'read-key)
+                 (lambda (&rest _)
+                   (setq sequence (vconcat keys))
+                   (prog1 (car keys) (setq keys nil))))
+                ((symbol-function 'this-command-keys-vector)
+                 (lambda () sequence)))
+        (dolist (case `((,(aref (kbd "C-x") 0) ("X" 120 2))
+                        (?\C-g ("G" 103 2))
+                        (,(aref (kbd "C-s") 0) ("S" 115 2))
+                        (,(aref (kbd "C-a") 0) ("A" 97 2))
+                        (f5 ("F5" 0 0))
+                        (,(aref (kbd "M-x") 0) ("X" 120 4))))
+          (setq keys (list (car case))
+                ladybird-test-sent nil)
+          (ladybird-send-next-key)
+          (should (equal (ladybird-render-test-key-downs) (list (cadr case)))))
+        ;; ESC and a key read as one sequence, as a terminal sends Meta.
+        (setq keys (list ?\e ?x) ladybird-test-sent nil)
+        (ladybird-send-next-key)
+        (should (equal (ladybird-render-test-key-downs) '(("X" 120 4))))
+        ;; A lone ESC is Escape.
+        (setq keys (list ?\e) ladybird-test-sent nil)
+        (ladybird-send-next-key)
+        (should (equal (ladybird-render-test-key-downs) '(("Escape" 27 0))))
+        ;; A prefix argument repeats it.
+        (setq keys (list ?\C-x) ladybird-test-sent nil)
+        (ladybird-send-next-key 2)
+        (should (= (length (ladybird-render-test-key-downs)) 2))
+        ;; A mouse event is handled as usual.
+        (let ((unread-command-events nil)
+              (click `(mouse-1 ,(ladybird-render-test-posn 3 3))))
+          (setq keys (list click) ladybird-test-sent nil)
+          (ladybird-send-next-key)
+          (should-not (ladybird-test-sent))
+          (should (equal unread-command-events (list click))))))
+    ;; In a graphical frame the event is read as it is, past mouse movement.
+    (let ((events (list `(mouse-movement ,(ladybird-render-test-posn 1 1)) ?\C-x)))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                ((symbol-function 'read-event) (lambda (&rest _) (pop events))))
+        (setq ladybird-test-sent nil)
+        (ladybird-send-next-key)
+        (should (equal (ladybird-render-test-key-downs) '(("X" 120 2))))))
+    ;; Through the command loop.
+    (setq ladybird-test-sent nil)
+    (ladybird-render-test-keys-in-page "C-c C-q C-s a C-c C-q C-c")
+    (should (equal (ladybird-render-test-key-downs)
+                   '(("S" 115 2) ("A" 97 0) ("C" 99 2))))))
+
+(ert-deftest ladybird-render-test-focus-and-zoom ()
+  (ladybird-render-test-with-view
+    (ladybird-render-test-show)
+    (ladybird-render-test-keys-in-page "C-c C-n C-u 2 C-c C-p")
+    (should (equal (ladybird-render-test-key-downs)
+                   '(("Tab" 9 0) ("Tab" 9 1) ("Tab" 9 1))))
+    ;; C-x C-+ zooms, and + - 0 alone go on zooming as text-scale-adjust
+    ;; does; the next other key goes to the page again.
+    (setq ladybird-test-sent nil)
+    (ladybird-render-test-keys-in-page
+     "C-x C-+ + = - 0 C-x C-- C-x C-0 C-x C-= <kp-add> <kp-subtract> <kp-0> a")
+    (should (equal (mapcar (lambda (m) (or (alist-get 'op m) (alist-get 'key m)))
+                           (seq-filter (lambda (m)
+                                         (member (alist-get 'kind m) '(nil "down")))
+                                       (ladybird-test-sent)))
+                   '("in" "in" "in" "out" "reset" "out" "reset" "in" "in" "out" "reset"
+                     "A")))))
+
+(ert-deftest ladybird-render-test-describe-mode ()
+  ;; C-h m lists the commands, not the generated mouse and key bindings.
+  (ladybird-render-test-with-view
+    (dolist (command-mode '(nil t))
+      (ladybird-command-mode (if command-mode 1 -1))
+      (save-window-excursion
+        (let ((help-window-select nil))
+          (describe-mode buffer)
+          (with-current-buffer (help-buffer)
+            (let* ((end (save-excursion
+                          (goto-char (point-min))
+                          (if (re-search-forward "^Global minor mode" nil t)
+                              (match-beginning 0)
+                            (point-max))))
+                   (text (buffer-substring-no-properties (point-min) end)))
+              (ert-info ((format "command mode %s:\n%s" command-mode text))
+                (should (string-match-p "C-c C-o  activate a link" text))
+                (should-not (string-match-p
+                             "down-mouse\\|wheel-\\|kp-[0-9]\\|kp-add\\|mouse-movement\\|<f5>"
+                             text))
+                (should (< (length (string-lines text)) (if command-mode 130 80)))
+                (should (equal (string-match-p "q\t+ladybird-quit" text)
+                               (and command-mode
+                                    (string-match-p "q\t+ladybird-quit" text))))))))))
+    (ladybird-command-mode -1)))
 
 (ert-deftest ladybird-render-test-paste ()
   (ladybird-render-test-with-view
@@ -1164,26 +1395,38 @@ prompts, newest first."
                       "permission" '(name . "geolocation")
                       '(origin . "https://example.org")))
             (ladybird-render-test-asked nil))
-        (dolist (case '(("allow once" . "allow_once")
-                        ("allow always" . "allow_always")
-                        ("deny" . "deny")
-                        ;; Nothing chosen, or something that is no choice.
-                        ("" . "dismiss")
-                        ("a" . "dismiss")
-                        (quit . "dismiss")))
-          (setq ladybird-test-sent nil)
-          (ladybird-render-test-answering (car case)
-            (ladybird-test-receive conn request))
+        (dolist (case '((("allow once") . "allow_once")
+                        (("allow always") . "allow_always")
+                        (("deny") . "deny")
+                        ;; Nothing chosen.
+                        (("") . "dismiss")
+                        ((quit) . "dismiss")
+                        ;; A part of a choice, or text typed for the page,
+                        ;; answers nothing: the question is asked again.
+                        (("d" "a" "allow a" "") . "dismiss")
+                        (("d" "deny") . "deny")))
+          (setq ladybird-test-sent nil
+                ladybird-render-test-asked nil)
+          (let ((answers (car case)))
+            (ladybird-render-test-answering (pop answers)
+              (ladybird-test-receive conn request)))
           (should (equal (ladybird-test-sent)
                          `(((type . "permission_closed") (view . 1) (id . 5)
-                            (outcome . ,(cdr case)))))))
-        ;; The answer is a word confirmed in the minibuffer, and keys typed
-        ;; before the prompt are discarded.
-        (should (equal (take 2 ladybird-render-test-asked)
+                            (outcome . ,(cdr case))))))
+          ;; Every question discards the keys typed before it.
+          (should (= (seq-count (lambda (entry) (eq entry 'discard-input))
+                                ladybird-render-test-asked)
+                     (length (car case)))))
+        ;; The answer is typed or completed in full: no require-match
+        ;; that would complete a part of a choice on RET.
+        (should (equal (take 2 (last ladybird-render-test-asked 2))
                        '(("Allow geolocation for https://example.org? \
 (allow once, allow always, deny) "
-                          ("allow once" "allow always" "deny") t)
+                          ("allow once" "allow always" "deny") nil)
                          discard-input)))
+        (should (equal (car (car ladybird-render-test-asked))
+                       "Type a choice in full: Allow geolocation for \
+https://example.org? (allow once, allow always, deny) "))
         ;; A request the page withdrew closes the prompt unanswered.
         (dolist (type '("permission_cancelled" "request_cancelled"))
           (setq ladybird-test-sent nil)
@@ -1255,7 +1498,7 @@ prompts, newest first."
                         (ladybird-render-test-request
                          "external_url" `(url . ,url) '(application . "Mail")))))
         (dolist (case '(("open on server" . t) ("open here" . nil)
-                        ("deny" . nil) ("" . nil) ("o" . nil) (quit . nil)))
+                        ("deny" . nil) ("" . nil) (quit . nil)))
           (setq ladybird-test-sent nil)
           (ladybird-render-test-answering (car case)
             (ladybird-test-receive conn (funcall request "mailto:a@example.org")))
@@ -1266,8 +1509,14 @@ prompts, newest first."
         (should (equal (take 2 ladybird-render-test-asked)
                        '(("Open mailto:a@example.org with Mail? \
 (open on server, open here, deny) "
-                          ("open on server" "open here" "deny") t)
+                          ("open on server" "open here" "deny") nil)
                          discard-input)))
+        ;; A part of a choice is asked again.
+        (setq ladybird-test-sent nil)
+        (let ((answers (list "o" "open " "open on server")))
+          (ladybird-render-test-answering (pop answers)
+            (ladybird-test-receive conn (funcall request "mailto:a@example.org"))))
+        (should (equal (alist-get 'open (car (ladybird-test-sent))) t))
         ;; Only web and mail addresses are opened here: for anything else
         ;; that choice is not offered, and it is refused if it is made.
         (dolist (url '("file:///etc/passwd" "javascript:alert(1)"
@@ -1276,8 +1525,9 @@ prompts, newest first."
           (setq opened nil
                 ladybird-test-sent nil
                 ladybird-render-test-asked nil)
-          (ladybird-render-test-answering "open here"
-            (ladybird-test-receive conn (funcall request url)))
+          (let ((answers (list "open here" "")))
+            (ladybird-render-test-answering (pop answers)
+              (ladybird-test-receive conn (funcall request url))))
           (should-not opened)
           (should (equal (nth 1 (car ladybird-render-test-asked))
                          '("open on server" "deny")))
@@ -1492,6 +1742,39 @@ prompts, newest first."
                      ((type . "zoom") (view . 1) (op . "out"))
                      ((type . "zoom") (view . 1) (op . "reset")))))
     (should-error (ladybird-goto-url "") :type 'user-error)
+    ;; A prefix argument bypasses the cache.
+    (setq ladybird-test-sent nil)
+    (ladybird-reload '(4))
+    (should (equal (ladybird-test-sent)
+                   '(((type . "reload") (view . 1) (bypass_cache . t)))))
+    ;; The C-c commands, in both modes.
+    (dolist (command-mode '(nil t))
+      (ladybird-command-mode (if command-mode 1 -1))
+      (dolist (binding '(("C-c C-l" . ladybird-goto-url)
+                         ("C-c C-o" . ladybird-follow-hint)
+                         ("C-c C-b" . ladybird-back) ("C-c C-f" . ladybird-forward)
+                         ("C-c C-r" . ladybird-reload) ("C-c C-k" . ladybird-stop)
+                         ("C-c C-w" . ladybird-copy-url)
+                         ("C-c C-t" . ladybird-toggle-console)
+                         ("C-c C-n" . ladybird-focus-next)
+                         ("C-c C-p" . ladybird-focus-previous)
+                         ("C-c C-q" . ladybird-send-next-key)
+                         ("C-c C-y" . ladybird-yank) ("C-y" . ladybird-yank)
+                         ("C-c C-e" . ladybird-command-mode)
+                         ("C-c C-j" . ladybird-page-mode)
+                         ("C-s" . ladybird-find) ("C-r" . ladybird-find-backward)
+                         ("M-s n" . ladybird-find-next)
+                         ("M-s p" . ladybird-find-previous)
+                         ("M-w" . ladybird-copy-selection)
+                         ("C-x h" . ladybird-select-all)
+                         ("C-x C-+" . ladybird-zoom-adjust)
+                         ("C-x C-=" . ladybird-zoom-adjust)
+                         ("C-x C--" . ladybird-zoom-adjust)
+                         ("C-x C-0" . ladybird-zoom-adjust)))
+        (ert-info ((format "%s in %s mode" (car binding)
+                           (if command-mode "command" "page")))
+          (should (eq (key-binding (kbd (car binding))) (cdr binding))))))
+    ;; The single keys of command mode.
     (dolist (binding '(("l" . ladybird-goto-url) ("g" . ladybird-goto-url)
                        ("r" . ladybird-reload) ("R" . ladybird-reload-bypass-cache)
                        ("s" . ladybird-stop) ("b" . ladybird-back)
@@ -1499,11 +1782,11 @@ prompts, newest first."
                        ("=" . ladybird-zoom-in) ("-" . ladybird-zoom-out)
                        ("0" . ladybird-zoom-reset) ("w" . ladybird-copy-url)
                        ("c" . ladybird-new-buffer) ("S" . ladybird-screenshot)
-                       ("C-c C-l" . ladybird-toggle-console)
-                       ("C-s" . ladybird-find) ("C-r" . ladybird-find-backward)
-                       ("M-s n" . ladybird-find-next)
-                       ("M-s p" . ladybird-find-previous)))
-      (should (eq (key-binding (kbd (car binding))) (cdr binding))))))
+                       ("o" . ladybird-follow-hint) ("q" . ladybird-quit)
+                       ("Q" . ladybird-close) ("i" . ladybird-page-mode)
+                       ("RET" . ladybird-page-mode)))
+      (should (eq (key-binding (kbd (car binding))) (cdr binding))))
+    (ladybird-command-mode -1)))
 
 (ert-deftest ladybird-render-test-history ()
   (ladybird-render-test-with-view
@@ -1718,7 +2001,7 @@ The keys typed go through the command loop; `ding' counts in
                       (lambda (&rest _) (cl-incf ladybird-render-test-beeps))))
              ,@body)
          (ladybird--hint-stop)
-         (setq ladybird-insert-mode nil)))))
+         (setq ladybird-command-mode nil)))))
 
 (defmacro ladybird-render-test-hint-messages (&rest body)
   "Run BODY and return the messages it showed that are not empty."
@@ -1742,8 +2025,8 @@ ID defaults to the last one sent, ITEMS to the test items."
     (truncated . ,(ladybird--bool truncated))))
 
 (defun ladybird-render-test-hint-start (&optional keys)
-  "Start hints with KEYS, by default o, and answer them; return the id."
-  (ladybird-render-test-keys (or keys "o"))
+  "Start hints with KEYS, by default C-c C-o, and answer them; return the id."
+  (ladybird-render-test-keys (or keys "C-c C-o"))
   (let ((id (ladybird-render-test-hint-id)))
     (ladybird-test-receive ladybird--conn (ladybird-render-test-hints-list id))
     (setq ladybird-test-sent nil)
@@ -1762,12 +2045,12 @@ ID defaults to the last one sent, ITEMS to the test items."
 
 (ert-deftest ladybird-render-test-hint-bindings ()
   (ladybird-render-test-with-view
+    (should (eq (key-binding (kbd "C-c C-o")) #'ladybird-follow-hint))
+    (should (eq (key-binding "o") #'ladybird-send-key))
+    (ladybird-command-mode 1)
+    (should (eq (key-binding (kbd "C-c C-o")) #'ladybird-follow-hint))
     (should (eq (key-binding "o") #'ladybird-follow-hint))
-    (should (eq (key-binding (kbd "C-c C-o")) #'ladybird-follow-hint))
-    (ladybird-insert-mode 1)
-    (should (eq (key-binding (kbd "C-c C-o")) #'ladybird-follow-hint))
-    (should (eq (key-binding "o") #'ladybird-insert-key))
-    (ladybird-insert-mode -1))
+    (ladybird-command-mode -1))
   (dolist (key '("a" "z" "0" "A" "é" "SPC" "!"))
     (should (eq (lookup-key ladybird-hint-map (kbd key)) #'ladybird-hint-add-char)))
   (should (eq (lookup-key ladybird-hint-map (kbd "DEL")) #'ladybird-hint-delete-char))
@@ -1787,7 +2070,7 @@ ID defaults to the last one sent, ITEMS to the test items."
 
 (ert-deftest ladybird-render-test-hint-narrow ()
   (ladybird-render-test-with-hints
-    (let ((messages (ladybird-render-test-hint-messages (ladybird-render-test-keys "o"))))
+    (let ((messages (ladybird-render-test-hint-messages (ladybird-render-test-keys "C-c C-o"))))
       (should (equal messages '("Hint:   [waiting for the labels]"))))
     (let ((id (ladybird-render-test-hint-id)))
       (should (equal (ladybird-test-sent)
@@ -1828,6 +2111,23 @@ ID defaults to the last one sent, ITEMS to the test items."
                      '("a" "")))
       (should (equal (ladybird--hint-id ladybird--hint) id)))))
 
+(ert-deftest ladybird-render-test-hint-keypad ()
+  ;; The keypad's digits are label characters too.
+  (ladybird-render-test-with-hints
+    (let ((ladybird-hint-alphabet "12"))
+      (ladybird-render-test-keys "C-c C-o")
+      (let ((id (ladybird-render-test-hint-id)))
+        (ladybird-test-receive
+         conn (ladybird-render-test-hints-list
+               id '(((index . 0) (label . "11") (kind . "button"))
+                    ((index . 1) (label . "12") (kind . "button")))))
+        (setq ladybird-test-sent nil)
+        (ladybird-render-test-keys "<kp-1> <kp-2>")
+        (should (equal (ladybird-test-sent)
+                       `(((type . "hints_narrow") (view . 1) (id . ,id) (prefix . "1"))
+                         ((type . "hints_end") (view . 1) (id . ,id)
+                          (activate . 1)))))))))
+
 (ert-deftest ladybird-render-test-hint-prompt ()
   (ladybird-render-test-with-hints
     (ladybird-render-test-hint-start)
@@ -1838,7 +2138,7 @@ ID defaults to the last one sent, ITEMS to the test items."
            (list (car ladybird-render-test-hint-items)
                  (nth 4 ladybird-render-test-hint-items))))
       (ladybird-render-test-keys "C-g")
-      (ladybird-render-test-keys "o")
+      (ladybird-render-test-keys "C-c C-o")
       (should (equal (ladybird-render-test-hint-messages
                        (ladybird-test-receive conn (ladybird-render-test-hints-list))
                        (ladybird-render-test-keys "s"))
@@ -1848,7 +2148,7 @@ ID defaults to the last one sent, ITEMS to the test items."
                      '("Hint: a  [1 left] Home"))))
     ;; A list the server cut says so; a prefix argument says where links go.
     (ladybird-render-test-keys "C-g")
-    (ladybird-render-test-keys "C-u o")
+    (ladybird-render-test-keys "C-u C-c C-o")
     (should (equal (ladybird-render-test-hint-messages
                      (ladybird-test-receive
                       conn (ladybird-render-test-hints-list nil nil t)))
@@ -1872,11 +2172,11 @@ ID defaults to the last one sent, ITEMS to the test items."
       (should-not ladybird--hint)
       (should-not (ladybird-render-test-hint-map-active-p))
       (should-not (memq #'ladybird--hint-minibuffer minibuffer-setup-hook))
-      (should-not ladybird-insert-mode)
-      ;; The keys are Emacs commands again.
+      (should-not ladybird-command-mode)
+      ;; The keys go to the page again.
       (setq ladybird-test-sent nil)
       (ladybird-render-test-keys "n")
-      (should (equal (alist-get 'kind (car (ladybird-test-sent))) "wheel")))
+      (should (equal (alist-get 'key (car (ladybird-test-sent))) "N")))
     ;; Index 0 is activated as any other; a link loads in the page.
     (let ((id (ladybird-render-test-hint-start)))
       (ladybird-render-test-keys "aa")
@@ -1886,14 +2186,15 @@ ID defaults to the last one sent, ITEMS to the test items."
                         (activate . 0))))))))
 
 (ert-deftest ladybird-render-test-hint-input ()
-  ;; A text field gets insert mode, also when it was started from there.
+  ;; A text field leaves command mode, so that keys go to it.
   (ladybird-render-test-with-hints
+    (ladybird-command-mode 1)
     (let ((id (ladybird-render-test-hint-start)))
       (ladybird-render-test-keys "ad")
       (should (equal (ladybird-test-sent)
                      `(((type . "hints_narrow") (view . 1) (id . ,id) (prefix . "a"))
                        ((type . "hints_end") (view . 1) (id . ,id) (activate . 2)))))
-      (should ladybird-insert-mode)
+      (should-not ladybird-command-mode)
       (setq ladybird-test-sent nil)
       (ladybird-render-test-keys "x")
       (should (equal (alist-get 'key (car (ladybird-test-sent))) "X")))
@@ -1904,11 +2205,11 @@ ID defaults to the last one sent, ITEMS to the test items."
       (should (equal (ladybird-test-sent)
                      `(((type . "hints_narrow") (view . 1) (id . ,id) (prefix . "s"))
                        ((type . "hints_end") (view . 1) (id . ,id) (activate . 3)))))
-      (should ladybird-insert-mode))))
+      (should-not ladybird-command-mode))))
 
 (ert-deftest ladybird-render-test-hint-new-buffer ()
   (ladybird-render-test-with-hints
-    (let ((id (ladybird-render-test-hint-start "C-u o")))
+    (let ((id (ladybird-render-test-hint-start "C-u C-c C-o")))
       (ladybird-render-test-keys "aa")
       (should (equal (ladybird-test-sent "hints_end")
                      `(((type . "hints_end") (view . 1) (id . ,id) (activate)))))
@@ -1919,7 +2220,7 @@ ID defaults to the last one sent, ITEMS to the test items."
       (set-window-buffer (selected-window) buffer))
     ;; Anything but a link is activated in the page.
     (setq ladybird-test-sent nil)
-    (let ((id (ladybird-render-test-hint-start "C-u o")))
+    (let ((id (ladybird-render-test-hint-start "C-u C-c C-o")))
       (ladybird-render-test-keys "as")
       (should (equal (ladybird-test-sent)
                      `(((type . "hints_narrow") (view . 1) (id . ,id) (prefix . "a"))
@@ -1941,7 +2242,7 @@ ID defaults to the last one sent, ITEMS to the test items."
           (should-not (ladybird-render-test-hint-map-active-p))
           (setq ladybird-test-sent nil))))
     ;; While the labels are awaited too.
-    (ladybird-render-test-keys "o")
+    (ladybird-render-test-keys "C-c C-o")
     (let ((id (ladybird-render-test-hint-id)))
       (setq ladybird-test-sent nil)
       (ladybird-render-test-keys "C-g")
@@ -1981,13 +2282,13 @@ ID defaults to the last one sent, ITEMS to the test items."
                    '("hints_end" "down" "up")))
     (setq ladybird-test-sent nil
           track-mouse nil)
-    ;; A control key: RET turns insert mode on.
+    ;; A control key: RET goes to the page.
     (ladybird-render-test-hint-start)
     (ladybird-render-test-keys "RET")
     (should-not ladybird--hint)
-    (should ladybird-insert-mode)
-    (should (equal (mapcar (lambda (m) (alist-get 'type m)) (ladybird-test-sent))
-                   '("hints_end")))))
+    (should (equal (mapcar (lambda (m) (or (alist-get 'key m) (alist-get 'type m)))
+                           (ladybird-test-sent))
+                   '("hints_end" "Return" "Return")))))
 
 (ert-deftest ladybird-render-test-hint-second ()
   ;; A second `ladybird-follow-hint' ends the first session.
@@ -2019,7 +2320,7 @@ ID defaults to the last one sent, ITEMS to the test items."
 (ert-deftest ladybird-render-test-hint-typed-ahead ()
   ;; Characters typed before the labels arrive are taken up then.
   (ladybird-render-test-with-hints
-    (ladybird-render-test-keys "o")
+    (ladybird-render-test-keys "C-c C-o")
     (let ((id (ladybird-render-test-hint-id)))
       (setq ladybird-test-sent nil)
       (should (equal (ladybird-render-test-hint-messages (ladybird-render-test-keys "a"))
@@ -2039,7 +2340,7 @@ ID defaults to the last one sent, ITEMS to the test items."
       (should (equal (ladybird--hint-prefix ladybird--hint) "s"))
       (setq ladybird-test-sent nil)
       ;; Typed ahead in full, a label is activated at once.
-      (ladybird-render-test-keys "C-g o s d")
+      (ladybird-render-test-keys "C-g C-c C-o s d")
       (let ((id (ladybird-render-test-hint-id)))
         (setq ladybird-test-sent nil)
         (ladybird-test-receive conn (ladybird-render-test-hints-list id))
@@ -2053,7 +2354,7 @@ ID defaults to the last one sent, ITEMS to the test items."
 
 (ert-deftest ladybird-render-test-hint-empty ()
   (ladybird-render-test-with-hints
-    (ladybird-render-test-keys "o")
+    (ladybird-render-test-keys "C-c C-o")
     (setq ladybird-test-sent nil)
     (should (equal (ladybird-render-test-hint-messages
                      (ladybird-test-receive
@@ -2088,12 +2389,12 @@ ID defaults to the last one sent, ITEMS to the test items."
       (should-not ladybird--hint)
       (should-not (ladybird-render-test-hint-map-active-p))
       (should-not (ladybird-test-sent))
-      ;; The keys are Emacs commands again.
+      ;; Keys go to the page again.
       (ladybird-render-test-keys "s")
-      (should (equal (ladybird-test-sent) '(((type . "stop") (view . 1))))))
+      (should (equal (alist-get 'key (car (ladybird-test-sent))) "S")))
     ;; It can come in place of the labels.
     (setq ladybird-test-sent nil)
-    (ladybird-render-test-keys "o")
+    (ladybird-render-test-keys "C-c C-o")
     (let ((id (ladybird-render-test-hint-id)))
       (setq ladybird-test-sent nil)
       (ladybird-test-receive conn `((type . "hints_cancelled") (view . 1)
@@ -2137,7 +2438,7 @@ ID defaults to the last one sent, ITEMS to the test items."
       (should-not (ladybird-render-test-hint-map-active-p))
       (should-not (ladybird-test-sent)))
     ;; Also while the labels are awaited.
-    (ladybird-render-test-keys "o")
+    (ladybird-render-test-keys "C-c C-o")
     (let ((id (ladybird-render-test-hint-id)))
       (setq ladybird-test-sent nil)
       (ladybird-test-receive conn `((type . "error") (view . 1) (id . ,id)
@@ -2148,7 +2449,7 @@ ID defaults to the last one sent, ITEMS to the test items."
 (ert-deftest ladybird-render-test-hint-map-hidden ()
   ;; A session that ends while a prompt hides the keymaps, as `read-key'
   ;; does for an alert of `ladybird-alert-style' `prompt', leaves no
-  ;; keymap behind: the next key is an Emacs command again.
+  ;; keymap behind: the next key goes to the page again.
   (dolist (end (list (lambda (id) `((type . "hints_cancelled") (view . 1) (id . ,id)))
                      (lambda (id) `((type . "error") (view . 1) (id . ,id)
                                     (message . "refused")))
@@ -2163,7 +2464,7 @@ ID defaults to the last one sent, ITEMS to the test items."
         (if (eq (funcall end 0) 'drop)
             (ladybird-render-test-hint-start)
           ;; The empty list has to be the first answer.
-          (ladybird-render-test-keys "o")
+          (ladybird-render-test-keys "C-c C-o")
           (unless (equal (alist-get 'type (funcall end 0)) "hints_list")
             (ladybird-test-receive conn (ladybird-render-test-hints-list))))
         (setq id (ladybird--hint-id ladybird--hint))
@@ -2185,7 +2486,7 @@ ID defaults to the last one sent, ITEMS to the test items."
         (unless (eq (funcall end 0) 'drop)
           (setq ladybird-test-sent nil)
           (ladybird-render-test-keys "n")
-          (should (equal (alist-get 'kind (car (ladybird-test-sent))) "wheel")))))))
+          (should (equal (alist-get 'key (car (ladybird-test-sent))) "N")))))))
   ;; A command of the map that finds no session drops its key.
   (ladybird-render-test-with-hints
     (let ((unread-command-events nil))
@@ -2211,7 +2512,7 @@ ID defaults to the last one sent, ITEMS to the test items."
                      ,(vconcat (append ladybird-render-test-hint-items
                                        '(((index . 5) (label . "Sd")))))))
       (ert-info ((format "items %S" items))
-        (ladybird-render-test-keys "o")
+        (ladybird-render-test-keys "C-c C-o")
         (let ((id (ladybird-render-test-hint-id)))
           (setq ladybird-test-sent nil)
           (should (equal (ladybird-render-test-hint-messages
@@ -2226,7 +2527,7 @@ ID defaults to the last one sent, ITEMS to the test items."
                             (activate))))))))
     ;; Nulls are fine, and so is a label of another session's alphabet's
     ;; characters as long as this one's has them.
-    (ladybird-render-test-keys "o")
+    (ladybird-render-test-keys "C-c C-o")
     (ladybird-test-receive
      conn (ladybird-render-test-hints-list
            nil '(((index . 0) (label . "aa") (kind) (text) (url)))))
@@ -2258,7 +2559,7 @@ ID defaults to the last one sent, ITEMS to the test items."
                        '("ladybird: test: late" "ladybird: test: elsewhere")))
         ;; The connection keeps the last 16.
         (dotimes (_ 20)
-          (ladybird-render-test-keys "o C-g"))
+          (ladybird-render-test-keys "C-c C-o C-g"))
         (should (= (length (ladybird--conn-hints-ended conn)) 16))
         (should-not (member (cons 1 first) (ladybird--conn-hints-ended conn)))))))
 
@@ -2274,7 +2575,7 @@ ID defaults to the last one sent, ITEMS to the test items."
       (pcase-let ((`(,url ,page ,opened) case))
         (ert-info ((format "%s from %s" url page))
           (setq ladybird--state `((url . ,page)))
-          (ladybird-render-test-keys "C-u o")
+          (ladybird-render-test-keys "C-u C-c C-o")
           (let ((id (ladybird-render-test-hint-id)))
             (ladybird-test-receive
              conn (ladybird-render-test-hints-list
@@ -2959,9 +3260,8 @@ loaded in *ladybird: mock://one*")))
                         (= (ladybird-module-canvas-pixel ladybird--canvas 40 10)
                            #xffffffff)))
                 ;; Typing, the selection and a dialog make the round trip.
-                (ladybird-insert-mode 1)
                 (dolist (last-command-event '(?H ?i ?! ?\r))
-                  (ladybird-insert-key))
+                  (ladybird-send-key))
                 (ladybird-copy-selection)
                 (ladybird-test-wait conn (lambda () kill-ring))
                 (should (equal (current-kill 0) "mock selection"))
@@ -3115,7 +3415,7 @@ loaded in *ladybird: mock://one*")))
               (let ((conn ladybird--conn))
                 (ladybird-test-wait conn (lambda () ladybird--canvas))
                 (should-not (= (funcall label-pixel) #xffffffff))
-                (execute-kbd-macro "o")
+                (execute-kbd-macro (kbd "C-c C-o"))
                 (ladybird-test-wait conn (lambda () (and ladybird--hint
                                                          (ladybird--hint-items
                                                           ladybird--hint))))
@@ -3134,30 +3434,30 @@ loaded in *ladybird: mock://one*")))
                  conn (lambda () (funcall logged "_hint_activated"
                                           'index 9 'kind "button")))
                 ;; A link loads in the page.
-                (execute-kbd-macro "oaa")
+                (execute-kbd-macro (kbd "C-c C-o a a"))
                 (ladybird-test-wait
                  conn (lambda () (equal (alist-get 'url ladybird--state)
                                         "https://mock.invalid/link/1")))
                 ;; With a prefix argument it opens in a new buffer.
-                (execute-kbd-macro (kbd "C-u o a g"))
+                (execute-kbd-macro (kbd "C-u C-c C-o a g"))
                 (ladybird-test-wait
                  conn (lambda () (funcall logged "create_view"
                                           'url "https://mock.invalid/link/5")))
                 (should (funcall logged "hints_end" 'activate nil))
                 (should (= (length (ladybird--buffers conn)) 2))
                 (set-window-buffer (selected-window) buffer)
-                ;; A field gets insert mode.
-                (execute-kbd-macro "oad")
+                ;; A field leaves command mode.
+                (ladybird-command-mode 1)
+                (execute-kbd-macro (kbd "C-c C-o a d"))
                 (ladybird-test-wait
                  conn (lambda () (funcall logged "_hint_activated" 'index 2)))
-                (should ladybird-insert-mode)
-                (ladybird-insert-mode -1)
+                (should-not ladybird-command-mode)
                 ;; The server ends a session through the real timers.
                 (ladybird-goto-url "mock://hints-expire")
                 (ladybird-test-wait
                  conn (lambda () (equal (alist-get 'url ladybird--state)
                                         "mock://hints-expire")))
-                (execute-kbd-macro "o")
+                (execute-kbd-macro (kbd "C-c C-o"))
                 (ladybird-test-wait conn (lambda () (and ladybird--hint
                                                          (ladybird--hint-items
                                                           ladybird--hint))))
@@ -3171,7 +3471,7 @@ loaded in *ladybird: mock://one*")))
                 (ladybird-test-wait
                  conn (lambda () (equal (alist-get 'url ladybird--state)
                                         "mock://hints-timeout")))
-                (execute-kbd-macro "o")
+                (execute-kbd-macro (kbd "C-c C-o"))
                 (should (ladybird--hint-waiting ladybird--hint))
                 (let ((id (ladybird--hint-id ladybird--hint)))
                   (ladybird-test-wait conn (lambda () (null ladybird--hint)))
@@ -3179,7 +3479,7 @@ loaded in *ladybird: mock://one*")))
                 ;; The server refuses a session: its error ends it.
                 (cl-letf (((symbol-function 'ladybird--hint-alphabet-p) #'always))
                   (let ((ladybird-hint-alphabet "aa"))
-                    (execute-kbd-macro "o")))
+                    (execute-kbd-macro (kbd "C-c C-o"))))
                 (let ((id (ladybird--hint-id ladybird--hint)))
                   (ladybird-test-wait conn (lambda () (null ladybird--hint)))
                   (should (funcall logged "hints" 'id id 'alphabet "aa"))

@@ -63,7 +63,8 @@
     {"assert": {"state": {"minibuffer.prompt": "Allow geolocation for mock://permission? (allow once, allow always, deny) "}}},
     {"keys": "a RET", "delivery": "events"},
     {"wait": "idle", "min_idle": 0.5},
-    {"assert": {"eval": "(null (ladybird-elate-logged \"permission_closed\" 'id 8))"}, "comment": "a single key does not answer"},
+    {"assert": {"eval": "(null (ladybird-elate-logged \"permission_closed\" 'id 8))"}, "comment": "a part of a choice does not answer"},
+    {"assert": {"state": {"minibuffer.prompt": "Type a choice in full: Allow geolocation for mock://permission? (allow once, allow always, deny) "}}, "comment": "the question is asked again"},
     {"keys": "C-a C-k", "delivery": "events"},
     {"type": "allow always"},
     {"keys": "RET", "delivery": "events"},
@@ -112,7 +113,7 @@
     {"wait": "until", "pred": "(ladybird-elate-in-page (equal ladybird--blocked-popup \"mock://popped\"))"},
     {"eval": "(ladybird-elate-load \"mock://hover\")"},
     {"wait": "until", "pred": "(ladybird-elate-in-page (eq (get-text-property 1 'pointer) 'hand))"},
-    {"keys": "C-c C-l"},
+    {"keys": "C-c C-t"},
     {"wait": "text", "pattern": "\\[log\\] console enabled", "buffer": "*ladybird-console*"},
     {"assert": {"eval": "(ladybird-elate-logged \"set_console\" 'enabled t)"}},
 

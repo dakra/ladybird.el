@@ -180,6 +180,12 @@ META adds the alt modifier."
       ("C-f" (("Right" 0 0)))
       ("C-p" (("Up" 0 0)))
       ("C-n" (("Down" 0 0)))
+      ("C-v" (("PageDown" 0 0)))
+      ("M-v" (("PageUp" 0 0)))
+      ;; The start and the end of a text field, or the top and the bottom
+      ;; of the page.
+      ("M-<" (("Home" 0 2)) (("Up" 0 8)))
+      ("M->" (("End" 0 2)) (("Down" 0 8)))
       ("C-d" (("Delete" 127 0)))
       ;; Select to the end of the line and delete; at the end of a line
       ;; nothing is selected and the line break goes.
@@ -196,18 +202,20 @@ META adds the alt modifier."
       ("C-?" ,redo)
       ("C-M-_" ,redo)
       ("C-S-z" ,redo)))
-  "Emacs editing keys and what a page's text field is sent for them.
+  "Emacs editing and motion keys and what the page is sent for them.
 A list of (KEY ACTIONS [MACOS-ACTIONS]).  KEY is a string for
 `key-parse'.  An action is a key spec (KEY-NAME CODE-POINT MODIFIERS)
 or (edit OP) for the protocol's `edit' message.  MACOS-ACTIONS apply to
 a server on macOS, where words are moved over and deleted with the alt
-key and elsewhere with the control key.")
+key and the ends of a field or the page are reached with the command
+key, and elsewhere with the control key.")
 
 (defun ladybird-keys-editing (event platform)
-  "Return what a text field is sent for the Emacs editing key EVENT.
+  "Return what the page is sent for the Emacs editing or motion key EVENT.
 PLATFORM is the server's platform, the symbol `macos' or anything
 else.  The value is a list of key specs (KEY CODE-POINT MODIFIERS) and
-of (edit OP) for an `edit' message, or nil if EVENT is no editing key."
+of (edit OP) for an `edit' message, or nil if EVENT is not in the
+table."
   (when-let* ((entry (seq-find (lambda (entry)
                                  (equal (aref (key-parse (car entry)) 0) event))
                                ladybird-keys--editing)))

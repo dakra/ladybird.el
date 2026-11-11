@@ -20,7 +20,7 @@
     {"eval": "(ladybird-elate-load (concat \"mock://\" (make-string 300 ?x)))"},
     {"wait": "until", "pred": "(= 307 (length (ladybird-elate-state 'url)))"},
     {"wait": "until", "pred": "(not (ladybird-elate-state 'loading))"},
-    {"keys": "l", "delivery": "events"},
+    {"keys": "C-c C-l", "delivery": "events"},
     {"wait": "prompt"},
     {"wait": "idle", "min_idle": 0.5},
     {"assert": {"eval": "(> (window-total-height (minibuffer-window)) 1)"}, "comment": "the prompt takes several lines"},
