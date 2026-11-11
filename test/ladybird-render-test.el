@@ -523,7 +523,7 @@ the canvas."
                               (reason . "closed"))))))
       (should (equal messages
                      '("ladybird: the page in *ladybird: mock://one* crashed: oom"
-                       "ladybird: *ladybird: mock://one* closed (closed)"))))
+                       "ladybird: *ladybird: mock://one* was closed by its page"))))
     (should-not (buffer-live-p buffer))
     (should-not (ladybird-test-sent "close_view"))))
 
@@ -1613,8 +1613,30 @@ https://example.org? (allow once, allow always, deny) "))
                       (ladybird-test-receive
                        conn '((type . "popup_blocked") (view . 1)
                               (url . "mock://popped"))))))
-      (should (string-prefix-p "Popup blocked: mock://popped" (car messages))))
+      (should (equal messages '("Popup blocked: mock://popped  (M-x ladybird-open-blocked-popup opens it)"))))
     (should (equal ladybird--blocked-popup "mock://popped"))
+    ;; A window without a URL is reported and forgets nothing.
+    (should (equal (ladybird-render-test-messages
+                     (ladybird-test-receive conn '((type . "popup_blocked") (view . 1)
+                                                   (url))))
+                   '("Popup blocked: a window without a URL")))
+    (should (equal ladybird--blocked-popup "mock://popped"))
+    ;; A server that holds no more pages: the message says so.
+    (ladybird-render-test-max-views conn 2)
+    (ladybird--make-view-buffer conn 2 "mock://2")
+    (should (equal (ladybird-render-test-messages
+                     (ladybird-test-receive conn '((type . "popup_blocked") (view . 1)
+                                                   (url . "mock://popped"))))
+                   '("Popup blocked: mock://popped  (test holds no more pages)")))
+    (kill-buffer (gethash 2 (ladybird--conn-views conn)))
+    ;; On a server that holds one page the command loads it there.
+    (ladybird-render-test-one-page-server conn)
+    (should (equal (ladybird-render-test-messages
+                     (ladybird-test-receive conn '((type . "popup_blocked") (view . 1)
+                                                   (url . "mock://popped"))))
+                   '("Popup blocked: mock://popped  (M-x ladybird-open-blocked-popup loads it here)")))
+    (setf (ladybird--conn-server-info conn) (ladybird-test-welcome))
+    (setq ladybird-test-sent nil)
     (save-window-excursion
       (let ((popup (ladybird-open-blocked-popup)))
         (should (equal (map-delete
@@ -2877,7 +2899,8 @@ ID defaults to the last one sent, ITEMS to the test items."
         (with-current-buffer four (ladybird--create-view))
         (ladybird-test-receive conn '((type . "view_created") (view . 6)
                                       (opener . 1)))
-        (should-not (buffer-local-value 'ladybird--view four))))))
+        (should-not (buffer-local-value 'ladybird--view four))
+        (should (buffer-live-p (gethash 6 (ladybird--conn-views conn))))))))
 
 (ert-deftest ladybird-render-test-several-pages ()
   ;; A server that holds several pages gets a view for each new page,
@@ -3023,14 +3046,170 @@ left by killed buffers, which C-c C-s or M-x ladybird-connect shows again; close
           (should (seq-find (lambda (name) (string-suffix-p "https://example.org/two" name))
                             names)))))))
 
-(ert-deftest ladybird-render-test-opener-closed ()
-  ;; A view a page opened is closed until such views are taken.
+(defun ladybird-render-test-opened (conn view &optional opener)
+  "Make CONN receive the `view_created' of VIEW, which OPENER's page opened.
+OPENER defaults to view 1.  Return the messages shown."
+  (ladybird-render-test-messages
+    (ladybird-test-receive conn `((type . "view_created") (view . ,view)
+                                  (opener . ,(or opener 1)) (url . "about:blank")
+                                  (title . "") (width . 40) (height . 30) (dpr . 1.0)))))
+
+(defun ladybird-render-test-annotation (name)
+  "Return the annotation `ladybird-switch-to-page' gives the page NAME."
+  (let (annotation)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (setq annotation
+                       (funcall (alist-get 'annotation-function
+                                           (cdr (funcall table "" nil 'metadata)))
+                                name))
+                 name)))
+      (call-interactively #'ladybird-switch-to-page))
+    annotation))
+
+(ert-deftest ladybird-render-test-page-opened ()
+  ;; A page that a page opens gets a buffer in the background: no window
+  ;; shows it or is selected for it, the server learns at once that it is
+  ;; hidden, and the message names the opener and the way there.
   (ladybird-render-test-with-view
-    (ladybird-test-receive conn '((type . "view_created") (view . 4) (opener . 1)
-                                  (url . "about:blank")))
-    (should (equal (ladybird-test-sent "close_view")
-                   '(((type . "close_view") (view . 4)))))
-    (should-not (gethash 4 (ladybird--conn-views conn)))))
+    (save-window-excursion
+      (delete-other-windows)
+      (set-window-buffer (selected-window) buffer)
+      (ladybird-render-test-max-views conn 8)
+      (let ((window (selected-window)))
+        (should (equal (ladybird-render-test-opened conn 4)
+                       '("ladybird: *ladybird: mock://one* opened a page in the \
+background; C-c C-s switches to it")))
+        (let ((popup (gethash 4 (ladybird--conn-views conn))))
+          (should (buffer-live-p popup))
+          (should (eq (buffer-local-value 'ladybird--conn popup) conn))
+          (should (equal (buffer-local-value 'ladybird--host popup) ladybird--host))
+          (should (eq (selected-window) window))
+          (should (equal (window-list) (list window)))
+          (should (eq (window-buffer window) buffer))
+          (should-not (get-buffer-window popup t))
+          (should (equal (ladybird-test-sent)
+                         '(((type . "set_visibility") (view . 4) (visible))
+                           ((type . "set_focus") (view . 4) (focused)))))
+          ;; Its state and frame go to its buffer.
+          (ladybird-test-receive conn '((type . "state") (view . 4) (url . "mock://popped")
+                                        (title . "Popped") (loading . :false))
+                                 (ladybird-test-frame 1 4 40 30 nil 0 t))
+          (should (equal (buffer-name popup) "*ladybird: Popped*"))
+          (should (= (buffer-local-value 'ladybird--frame-count popup) 1))
+          ;; C-c C-s says which page opened it.
+          (should (equal (ladybird-render-test-annotation "Popped  mock://popped")
+                         "  opened by *ladybird: mock://one*"))
+          (should (eq (window-buffer window) popup))
+          (should (equal (ladybird-render-test-annotation "mock://one") ""))
+          (should (eq (window-buffer window) buffer))
+          ;; Many in a row: still no window, no selection, one line each.
+          (setq ladybird-test-sent nil)
+          (let ((messages (apply #'append
+                                 (mapcar (lambda (view) (ladybird-render-test-opened conn view))
+                                         '(5 6 7 8)))))
+            (should (= (length messages) 4))
+            (should-not (seq-find (lambda (m) (string-search "\n" m)) messages)))
+          (should (equal (window-list) (list window)))
+          (should (eq (window-buffer window) buffer))
+          (should (eq (selected-window) window))
+          (should (= (length (ladybird-test-sent "set_visibility")) 4))
+          (should-not (ladybird-test-sent "set_viewport"))
+          (should (= (ladybird--view-count conn) 6))
+          ;; The page closing its window kills its buffer.
+          (should (equal (ladybird-render-test-messages
+                           (ladybird-test-receive conn '((type . "view_closed") (view . 4)
+                                                         (reason . "closed"))))
+                         '("ladybird: *ladybird: Popped* was closed by its page")))
+          (should-not (buffer-live-p popup))
+          (should-not (ladybird-test-sent "close_view"))
+          ;; The user's kill closes the view as for any page.
+          (kill-buffer (gethash 5 (ladybird--conn-views conn)))
+          (should (equal (ladybird-test-sent "close_view")
+                         '(((type . "close_view") (view . 5))))))))))
+
+(ert-deftest ladybird-render-test-page-opened-shown ()
+  ;; A rule of `display-buffer-alist' on the category shows such a page;
+  ;; its window is not selected.  When the page closes itself the window
+  ;; made for it goes, and the window the user selected meanwhile stays
+  ;; selected.
+  (ladybird-render-test-with-view
+    (save-window-excursion
+      (delete-other-windows)
+      (set-window-buffer (selected-window) buffer)
+      (let* ((window (selected-window))
+             (display-buffer-alist '(((category . ladybird-popup)
+                                      (display-buffer-pop-up-window))))
+             other)
+        (should (equal (ladybird-render-test-opened conn 4)
+                       '("ladybird: *ladybird: mock://one* opened a page")))
+        (let ((popup (gethash 4 (ladybird--conn-views conn))))
+          (should (get-buffer-window popup))
+          (should (eq (selected-window) window))
+          (should (equal (mapcar (lambda (m) (alist-get 'type m)) (ladybird-test-sent))
+                         '("set_viewport" "set_visibility" "set_focus")))
+          (should (equal (ladybird-test-sent "set_visibility")
+                         '(((type . "set_visibility") (view . 4) (visible . t)))))
+          (setq other (split-window window))
+          (set-window-buffer other (get-buffer-create " *ladybird-test-other*"))
+          (select-window other)
+          (ladybird-test-receive conn '((type . "view_closed") (view . 4)
+                                        (reason . "closed")))
+          (should-not (buffer-live-p popup))
+          (should (eq (selected-window) other))
+          (should (= (length (window-list)) 2))
+          (should (window-live-p window))
+          (should (eq (window-buffer window) buffer)))))))
+
+(ert-deftest ladybird-render-test-closed-keeps-selection ()
+  ;; A page shown in a window the user left closes itself: that window
+  ;; shows what it showed before and the selection stays where it is.
+  (ladybird-render-test-with-view
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((window (selected-window))
+            (before (get-buffer-create " *ladybird-test-before*"))
+            other)
+        (set-window-buffer window before)
+        (pop-to-buffer-same-window buffer)
+        (setq other (split-window-right))
+        (set-window-buffer other (get-buffer-create " *ladybird-test-other*"))
+        (select-window other)
+        (ladybird-test-receive conn '((type . "view_closed") (view . 1)
+                                      (reason . "closed")))
+        (should-not (buffer-live-p buffer))
+        (should (eq (selected-window) other))
+        (should (eq (window-buffer window) before))))))
+
+(ert-deftest ladybird-render-test-display-error ()
+  ;; A rule whose action fails still leaves the server told the page is
+  ;; hidden.
+  (ladybird-render-test-with-view
+    (save-window-excursion
+      (let ((display-buffer-alist `(((category . ladybird-popup)
+                                     ,(lambda (&rest _) (error "Boom"))))))
+        (ladybird-render-test-opened conn 4)
+        (should (buffer-live-p (gethash 4 (ladybird--conn-views conn))))
+        (should (equal (ladybird-test-sent "set_visibility")
+                       '(((type . "set_visibility") (view . 4) (visible)))))))))
+
+(ert-deftest ladybird-render-test-opened-download ()
+  ;; A window whose first navigation is a download: the server's error
+  ;; about it is the last word, the window goes without a message.
+  (ladybird-render-test-with-view
+    (let ((messages (ladybird-render-test-messages
+                      (ladybird-render-test-opened conn 4)
+                      (ladybird-test-receive
+                       conn '((type . "state") (view . 4) (url . "about:blank")
+                              (title . "") (loading . t))
+                       '((type . "error") (view . 4)
+                         (message . "download blocked: file.bin"))
+                       '((type . "view_closed") (view . 4) (reason . "closed"))))))
+      (should (equal (car (last messages)) "ladybird: test: download blocked: file.bin"))
+      (should-not (gethash 4 (ladybird--conn-views conn)))
+      (should-not (seq-find (lambda (b) (eql (buffer-local-value 'ladybird--view b) 4))
+                            (ladybird--buffers)))
+      (should-not (ladybird-test-sent "close_view")))))
 
 (ert-deftest ladybird-render-test-one-page-background ()
   ;; On a server that holds one page, a new page in the background loads
@@ -3881,6 +4060,83 @@ running until it is stopped where it runs"))))))
                 (ladybird-test-wait conn (lambda ()
                                            (> (buffer-local-value 'ladybird--frame-count one)
                                               (+ count 3)))))))
+        (mapc #'kill-buffer (ladybird--buffers))
+        (delete-file log)))))
+
+(ert-deftest ladybird-mock-test-page-opened ()
+  ;; Pages that a page opens get buffers in the background until the
+  ;; limit, then are blocked; one that closes itself takes its buffer
+  ;; along; a kept page brought back has its state.
+  :tags '(mock)
+  (skip-unless (executable-find "python3"))
+  (let* ((log (make-temp-file "ladybird-mock" nil ".log"))
+         (ladybird--conns nil)
+         (ladybird--keepalive-timer nil)
+         (ladybird--last-buffer nil)
+         (ladybird-device-pixel-ratio 1.0)
+         (inhibit-message t)
+         (host (ladybird-test-mock-host log "--max-views" "3"))
+         (logged (lambda (type &rest fields)
+                   (seq-filter (lambda (m)
+                                 (and (equal (alist-get 'type m) type)
+                                      (cl-loop for (key value) on fields by #'cddr
+                                               always (equal (alist-get key m) value))))
+                               (ladybird-test-log log))))
+         one)
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (delete-other-windows)
+            (setq one (ladybird "mock://one" host))
+            (let* ((conn (buffer-local-value 'ladybird--conn one))
+                   (opened (lambda ()
+                             (seq-filter (lambda (buffer)
+                                           (buffer-local-value 'ladybird--opener buffer))
+                                         (ladybird--buffers conn))))
+                   (window (selected-window)))
+              (ladybird-test-wait conn (lambda () (buffer-local-value 'ladybird--canvas one)))
+              (with-current-buffer one
+                (ladybird--send-view "load" '(url . "mock://popup")))
+              (ladybird-test-wait conn (lambda () (funcall opened)))
+              (let* ((popup (car (funcall opened)))
+                     (view (buffer-local-value 'ladybird--view popup)))
+                (should (= (buffer-local-value 'ladybird--opener popup)
+                           (buffer-local-value 'ladybird--view one)))
+                (should-not (get-buffer-window popup t))
+                (should (eq (selected-window) window))
+                (should (eq (window-buffer window) one))
+                (ladybird-test-wait conn (lambda ()
+                                           (funcall logged "set_visibility"
+                                                    'view view 'visible nil)))
+                (ladybird-test-wait conn (lambda ()
+                                           (equal (alist-get 'url (buffer-local-value
+                                                                   'ladybird--state popup))
+                                                  "mock://popped")))
+                ;; A burst opens what fits and the rest is blocked.
+                (with-current-buffer one
+                  (ladybird--send-view "load" '(url . "mock://popups-3")))
+                (ladybird-test-wait conn (lambda ()
+                                           (buffer-local-value 'ladybird--blocked-popup one)))
+                (should (= (length (funcall opened)) 2))
+                (should (equal (window-list) (list window)))
+                (should (eq (window-buffer window) one))
+                (with-current-buffer one
+                  (should-error (ladybird-open-blocked-popup) :type 'user-error))
+                ;; Kept and brought back, it has its state.
+                (let ((ladybird-keep-view-on-kill t))
+                  (kill-buffer popup))
+                (ladybird-connect host)
+                (should (equal (alist-get 'url (buffer-local-value
+                                                'ladybird--state
+                                                (gethash view (ladybird--conn-views conn))))
+                               "mock://popped"))
+                ;; One that closes itself.
+                (kill-buffer (gethash view (ladybird--conn-views conn)))
+                (with-current-buffer one
+                  (ladybird--send-view "load" '(url . "mock://popup-close")))
+                (ladybird-test-wait conn (lambda () (= (length (funcall opened)) 2)))
+                (ladybird-test-wait conn (lambda () (= (length (funcall opened)) 1)))
+                (should (ladybird--ready-p conn)))))
         (mapc #'kill-buffer (ladybird--buffers))
         (delete-file log)))))
 

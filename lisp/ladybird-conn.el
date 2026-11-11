@@ -450,6 +450,7 @@ CALLBACK is called once with the message that answers it."
                          (dpr . ,(float dpr))))
             (encodings . ["zstd" "raw"])
             (shm . ,(ladybird--bool (ladybird--shm-p (ladybird--conn-dialed conn))))
+            (popups . t)
             (token . :null)))))
 
 

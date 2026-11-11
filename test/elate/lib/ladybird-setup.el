@@ -101,11 +101,14 @@ A `stdio' server starts with the connection."
                      (unless ladybird-elate-port
                        (setq ladybird-elate-port (ladybird-elate--free-port)))
                      (list "--tcp" (format "127.0.0.1:%d" ladybird-elate-port)))))
+       ;; A killed server leaves its socket behind.
+       (when (and (eq variant 'unix) (file-exists-p ladybird-elate-socket))
+         (delete-file ladybird-elate-socket))
        (setq ladybird-elate-server
              (make-process :name "ladybird-elate-mock" :buffer nil :noquery t
                            :command (apply #'ladybird-elate--command
                                            (append listen arguments))))
-       ;; The listener is up once the log file exists.
+       ;; The listener is up once its socket exists or takes a connection.
        (with-timeout (5 (error "The mock server did not start"))
          (while (not (if (eq variant 'unix)
                          (file-exists-p ladybird-elate-socket)

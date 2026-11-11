@@ -38,9 +38,14 @@ is animating, and the pages a socket server kept coming back with =ladybird-conn
 server whose welcome names no number, or the number 1, holds one page: a command that
 opens a second page on it loads the URL in the page there is and says so.
 
-Not there yet: popups (a page that opens a window is reported, and
-=ladybird-open-blocked-popup= opens it), view source, uploads from this machine (the file
-picker returns paths on the server's machine), downloads, bookmarks and profiles.
+A page can open pages of its own (=window.open=, a link with a =target=, a middle click),
+which get buffers in the background (see Several pages).  The live matrix tries them on
+both servers over all four connections (=live-popups=): a link with =target=_blank=,
+=window.open= with =window.opener=, a page closing its window or itself, the limit giving
+a blocked popup, and a hinted click.
+
+Not there yet: view source, uploads from this machine (the file picker returns paths on
+the server's machine), downloads, bookmarks and profiles.
 
 * Requirements
 
@@ -196,6 +201,26 @@ server is asked; the message counts the pages that buffers killed with
 those pages buffers again, with their current titles and URLs.  A server whose welcome
 names no number, or the number 1, holds one page, and a further page loads the URL in it.
 
+A page that a page opens, after a click or key of the user in it, gets a buffer of its
+own on the same server, and the echo area names the page that opened it and says that
+=C-c C-s= gets there.  It appears in no window, so a page that opens one on every click
+takes no window and no focus; it is told it is hidden and renders nothing until a window
+shows it.  =C-c C-s= annotates it with the page that opened it.  A page that closes its
+window takes its buffer along: a window made for it is deleted and any other shows the
+buffer it showed before (=quit-restore-window=); the selected window stays selected.  The buffer goes through =display-buffer= with the
+category =ladybird-popup=, so a rule of =display-buffer-alist= can show it, without
+selecting its window:
+
+#+begin_src emacs-lisp
+(add-to-list 'display-buffer-alist
+             '((category . ladybird-popup) (display-buffer-pop-up-window)))
+#+end_src
+
+When the server makes no view for the page, the echo area says the popup was blocked and
+what =ladybird-open-blocked-popup= does with its URL: open it as a new page, load it in the
+page there is on a server that holds one page, or nothing while a server holds all the
+pages it can.
+
 A page in no window is told it is hidden, and its server sends it no frames until a
 window shows it again; then it repaints in full.  Iconifying a frame or showing it
 again counts as hiding or showing its pages.  After a reconnect the pages that were
@@ -220,6 +245,15 @@ other gets a new one.
 (add-to-list 'display-buffer-alist
              '("\\`\\*ladybird: " (display-buffer-in-tab)
                (reusable-frames . t)))
+#+end_src
+
+That rule also takes the pages that pages open, and selects their tabs.  A rule for
+their category that comes first keeps them in the background:
+
+#+begin_src emacs-lisp
+(add-to-list 'display-buffer-alist
+             '((category . ladybird-popup) (display-buffer-no-window)
+               (allow-no-window . t)))
 #+end_src
 
 * Keys
@@ -403,7 +437,7 @@ Elsewhere the default is nil.
 | =ladybird-emacs-keys=               | =<f1>= =<f3>= =<f4>= =<f10>= =<f11>= | keys that keep their Emacs meaning |
 | =ladybird-initial-mode=             | =page=             | =page= or =command=: where a new buffer's keys go |
 | =ladybird-keep-view-on-kill=        | nil                | leave the page open when its buffer is killed     |
-| =ladybird-new-page-display=         | =selected-window=  | where a new page appears: =selected-window=, =other-window=, =background= |
+| =ladybird-new-page-display=         | =selected-window=  | where a page a command opens appears: =selected-window=, =other-window=, =background= |
 | =ladybird-hint-alphabet=            | ="asdfghjkl"=      | characters of the labels of =C-c C-o=; 2 to 36 of a-z and 0-9 |
 | =ladybird-reconnect=                | t                  | nil, t or =always=                                |
 | =ladybird-keepalive-interval=       | 30                 | idle seconds before a ping                        |

@@ -1,6 +1,6 @@
 {
   "name": "ui",
-  "comment": "What a page asks of the user: alert, confirm, prompt and a quit out of it, select, file picker, permission and its withdrawal, external URL, a request the server withdraws, a prompt that waits for the minibuffer, and the page's events: clipboard, blocked popup, hover, console; and find in page.",
+  "comment": "What a page asks of the user: alert, confirm, prompt and a quit out of it, select, file picker, permission and its withdrawal, external URL, a request the server withdraws, a prompt that waits for the minibuffer, and the page's events: clipboard, hover, console; and find in page.",
   "params": {"host": "stdio"},
   "variants": {
     "stdio": {"host": "stdio"},
@@ -106,11 +106,9 @@
     {"wait": "until", "pred": "(ladybird-elate-logged \"dialog_closed\" 'id 12 'accepted t)"},
     {"eval": "(setq enable-recursive-minibuffers t)"},
 
-    {"group": "events", "comment": "clipboard, blocked popup, pointer shape and console output"},
+    {"group": "events", "comment": "clipboard, pointer shape and console output"},
     {"eval": "(ladybird-elate-load \"mock://clipboard\")"},
     {"wait": "until", "pred": "(equal (current-kill 0) \"mock clipboard\")"},
-    {"eval": "(ladybird-elate-load \"mock://popup\")"},
-    {"wait": "until", "pred": "(ladybird-elate-in-page (equal ladybird--blocked-popup \"mock://popped\"))"},
     {"eval": "(ladybird-elate-load \"mock://hover\")"},
     {"wait": "until", "pred": "(ladybird-elate-in-page (eq (get-text-property 1 'pointer) 'hand))"},
     {"keys": "C-c C-t"},

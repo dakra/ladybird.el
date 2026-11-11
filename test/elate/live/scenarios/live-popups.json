@@ -1,0 +1,338 @@
+{
+  "name": "live-popups",
+  "comment": "Pages that pages open on a real server: a link with target=_blank opening a page in the background, told it is hidden; C-c C-s showing it; a page closing its window and the window going back to the opener; window.open with window.opener reaching the opener; a page closing itself at once; the limit giving popup_blocked; and a hinted click opening a page.",
+  "params": {
+    "server": "stdio"
+  },
+  "variants": {
+    "stdio": {
+      "server": "stdio"
+    },
+    "socket": {
+      "server": "socket"
+    },
+    "ssh": {
+      "server": "ssh"
+    },
+    "forward": {
+      "server": "forward"
+    }
+  },
+  "defaults": {
+    "timeout": 20
+  },
+  "session": {
+    "ui": "gui",
+    "size": "100x35",
+    "eval_file": [
+      "../lib/ladybird-live.el"
+    ]
+  },
+  "steps": [
+    {
+      "group": "setup"
+    },
+    {
+      "eval": "(progn (setq ladybird-live-server-arguments (list \"--emacs-max-views=3\")) (ladybird-live-start \"{{server}}\" \"popups.html\") t)",
+      "timeout": 120
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-live-page-p \"popups\")",
+      "timeout": 60
+    },
+    {
+      "eval": "(progn (delete-other-windows (get-buffer-window (ladybird-live-buffer))) (select-window (get-buffer-window (ladybird-live-buffer))) t)"
+    },
+    {
+      "group": "target-blank",
+      "comment": "a link with target=_blank opens a page in a buffer of its own, in the background: no window shows it, the server is told it is hidden, and the message says how to get there"
+    },
+    {
+      "mouse": "click",
+      "x": 60,
+      "y": 20,
+      "button": 1
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-live-received \"view_created\" (quote opener) (buffer-local-value (quote ladybird--view) (car (ladybird-live-pages))))"
+    },
+    {
+      "wait": "until",
+      "pred": "(and (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"blank\")) (ladybird-live-pages)) t)",
+      "comment": "its page loads all the same"
+    },
+    {
+      "assert": {
+        "eval": "(eq (window-buffer (selected-window)) (car (ladybird-live-pages)))"
+      },
+      "comment": "the selected window still shows the opener"
+    },
+    {
+      "assert": {
+        "eval": "(= 1 (length (window-list)))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(null (get-buffer-window (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"blank\")) (ladybird-live-pages)) t))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(null (buffer-local-value (quote ladybird--visible) (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"blank\")) (ladybird-live-pages))))"
+      }
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-field-in (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"blank\")) (ladybird-live-pages)) \"vis\") \"hidden\")",
+      "comment": "the page sees itself hidden"
+    },
+    {
+      "assert": {
+        "eval": "(ladybird-live-messages-p \"opened a page in the background; C-c C-s switches to it\")"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(equal (ladybird-live-field-in (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"blank\")) (ladybird-live-pages)) \"opener\") \"no\")"
+      },
+      "comment": "a link with target=_blank opens without an opener"
+    },
+    {
+      "group": "switch",
+      "comment": "C-c C-s shows it; it is told it is visible and paints"
+    },
+    {
+      "keys": "C-c C-s",
+      "delivery": "events"
+    },
+    {
+      "wait": "prompt"
+    },
+    {
+      "type": "via=blank"
+    },
+    {
+      "keys": "TAB RET",
+      "delivery": "events"
+    },
+    {
+      "wait": "until",
+      "pred": "(eq (window-buffer (selected-window)) (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"blank\")) (ladybird-live-pages)))"
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-live-page-in-p (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"blank\")) (ladybird-live-pages)) \"popup\")"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-field-in (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"blank\")) (ladybird-live-pages)) \"vis\") \"visible\")"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-color-in (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"blank\")) (ladybird-live-pages)) 400 300) \"#00ff00\")"
+    },
+    {
+      "group": "close-itself",
+      "comment": "the page closes its window with window.close(): its buffer goes and the window shows the opener again"
+    },
+    {
+      "mouse": "click",
+      "x": 60,
+      "y": 20,
+      "button": 1
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-live-received \"view_closed\" (quote reason) \"closed\")"
+    },
+    {
+      "wait": "until",
+      "pred": "(= 1 (length (ladybird-live-pages)))"
+    },
+    {
+      "assert": {
+        "eval": "(eq (window-buffer (selected-window)) (car (ladybird-live-pages)))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(ladybird-live-messages-p \"was closed by its page\")"
+      }
+    },
+    {
+      "group": "window-open",
+      "comment": "window.open returns a window the opener holds, and the opened page reaches its opener through window.opener"
+    },
+    {
+      "mouse": "click",
+      "x": 60,
+      "y": 80,
+      "button": 1
+    },
+    {
+      "wait": "until",
+      "pred": "(and (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"open\")) (ladybird-live-pages)) t)"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-field-in (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"open\")) (ladybird-live-pages)) \"opener\") \"yes\")"
+    },
+    {
+      "wait": "until",
+      "pred": "(equal (ladybird-live-field-in (car (ladybird-live-pages)) \"child\") \"open\")",
+      "comment": "written by the opened page into its opener"
+    },
+    {
+      "assert": {
+        "eval": "(equal (ladybird-live-field-in (car (ladybird-live-pages)) \"opened\") \"window\")"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(eq (window-buffer (selected-window)) (car (ladybird-live-pages)))"
+      }
+    },
+    {
+      "group": "auto-close",
+      "comment": "a page that closes itself soon after it opened takes its buffer along"
+    },
+    {
+      "eval": "(setq ladybird-live-saved (length (seq-filter (lambda (m) (equal (alist-get (quote reason) m) \"closed\")) (seq-filter (lambda (m) (equal (alist-get (quote type) m) \"view_closed\")) ladybird-live-received))))"
+    },
+    {
+      "mouse": "click",
+      "x": 60,
+      "y": 140,
+      "button": 1
+    },
+    {
+      "wait": "until",
+      "pred": "(> (length (seq-filter (lambda (m) (equal (alist-get (quote reason) m) \"closed\")) (seq-filter (lambda (m) (equal (alist-get (quote type) m) \"view_closed\")) ladybird-live-received))) ladybird-live-saved)"
+    },
+    {
+      "wait": "until",
+      "pred": "(= 2 (length (ladybird-live-pages)))"
+    },
+    {
+      "assert": {
+        "eval": "(eq (window-buffer (selected-window)) (car (ladybird-live-pages)))"
+      }
+    },
+    {
+      "group": "limit",
+      "comment": "the server holds 3 pages: a third opens, a fourth is blocked and offered with ladybird-open-blocked-popup"
+    },
+    {
+      "mouse": "click",
+      "x": 60,
+      "y": 80,
+      "button": 1
+    },
+    {
+      "wait": "until",
+      "pred": "(= 3 (length (ladybird-live-pages)))"
+    },
+    {
+      "mouse": "click",
+      "x": 60,
+      "y": 80,
+      "button": 1
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-live-received \"popup_blocked\" (quote view) (buffer-local-value (quote ladybird--view) (car (ladybird-live-pages))))"
+    },
+    {
+      "assert": {
+        "eval": "(ladybird-live-messages-p \"Popup blocked: \")"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(= 3 (length (ladybird-live-pages)))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(equal (buffer-local-value (quote ladybird--blocked-popup) (car (ladybird-live-pages))) (ladybird-live-url \"popup.html?via=open\"))"
+      },
+      "comment": "the URL the page tried"
+    },
+    {
+      "assert": {
+        "eval": "(condition-case err (progn (with-current-buffer (car (ladybird-live-pages)) (ladybird-open-blocked-popup)) nil) (user-error (string-match-p \"has 3 pages open, the most it holds\" (cadr err))))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(= 1 (length (window-list)))"
+      },
+      "comment": "no window was taken"
+    },
+    {
+      "eval": "(progn (dolist (buffer (cdr (ladybird-live-pages))) (kill-buffer buffer)) t)"
+    },
+    {
+      "wait": "until",
+      "pred": "(= 1 (length (ladybird-live-pages)))"
+    },
+    {
+      "group": "hint",
+      "comment": "a hint on the link clicks it as the user does, which opens a page"
+    },
+    {
+      "eval": "(progn (select-window (get-buffer-window (car (ladybird-live-pages)))) t)"
+    },
+    {
+      "keys": "C-c C-o"
+    },
+    {
+      "wait": "until",
+      "pred": "(and ladybird--hint (not (ladybird--hint-waiting ladybird--hint)))"
+    },
+    {
+      "assert": {
+        "eval": "(equal (car (ladybird-live-hint-values (quote kind))) \"link\")"
+      }
+    },
+    {
+      "keys": "a"
+    },
+    {
+      "wait": "until",
+      "pred": "(and (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"blank\")) (ladybird-live-pages)) t)"
+    },
+    {
+      "assert": {
+        "eval": "(eq (window-buffer (selected-window)) (car (ladybird-live-pages)))"
+      }
+    },
+    {
+      "assert": {
+        "eval": "(null (get-buffer-window (seq-find (lambda (b) (equal (ladybird-live-field-in b \"via\") \"blank\")) (ladybird-live-pages)) t))"
+      }
+    },
+    {
+      "group": "health",
+      "comment": "every frame was acknowledged and none dropped"
+    },
+    {
+      "eval": "(progn (sleep-for 0.5) t)"
+    },
+    {
+      "assert": {
+        "eval": "(ladybird-live-healthy-p)"
+      }
+    },
+    {
+      "group": "cleanup"
+    },
+    {
+      "eval": "(ladybird-live-cleanup)",
+      "timeout": 60
+    }
+  ]
+}

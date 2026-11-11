@@ -37,6 +37,8 @@
     {"wait": "until", "pred": "(= 2 (ladybird-elate-count \"create_view\"))"},
     {"assert": {"eval": "(ladybird-elate-logged \"create_view\" 'url \"mock://disconnect\")"}},
     {"wait": "until", "pred": "(with-current-buffer ladybird-elate-canvas (and ladybird--canvas (eql ladybird--view 2)))"},
+    {"wait": "until", "pred": "(= 4 (ladybird-elate-count \"hello\"))", "comment": "the new view opened mock://disconnect too, which drops this connection once more"},
+    {"wait": "until", "pred": "(with-current-buffer ladybird-elate-canvas (ladybird--ready-p ladybird--conn))", "comment": "and it is dialled again before a second client comes"},
     {"assert": {"eval": "(= 2 (length (ladybird--buffers)))"}, "comment": "the server's own page has a buffer of its own"},
     {"assert": {"eval": "(equal (sort (mapcar (lambda (b) (alist-get 'url (buffer-local-value 'ladybird--state b))) (ladybird--buffers)) #'string<) '(\"mock://disconnect\" \"mock://view/1\"))"}},
     {"eval": "(kill-buffer (seq-find (lambda (b) (not (eq b ladybird-elate-canvas))) (ladybird--buffers)))"},

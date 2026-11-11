@@ -43,6 +43,15 @@ Loading a mock:// URL makes the server emit a request or event:
 mock://alert, confirm, prompt, beforeunload, select, file, files, color,
 date, permission, permission-cancel, external, context, popup, crash,
 hover, favicon, console, clipboard, background, error, close.
+mock://close-later closes its view half a second after it loads.
+
+mock://popup opens a view at mock://popped, as a page that opens a
+window does (protocol section 3.1): when the client's hello had "popups":
+true and there is room (--max-views, --max-area), with view_created
+naming the opener, the opener's size, a state and a frame; otherwise with
+popup_blocked.  mock://popup-close opens one at mock://close-later, and
+mock://popups-N opens N in a row, as N clicks would.
+
 mock://cancel-NAME emits the request of mock://NAME and withdraws it
 half a second later with request_cancelled; mock://disconnect drops the
 client and keeps the views.
@@ -323,6 +332,7 @@ class Client:
         self.encoding = "raw"
         self.shm = False
         self.viewport = (800, 600, 1.0)
+        self.popups = False
         self.writing = False
 
 
@@ -741,7 +751,17 @@ class Server:
         elif name == "context":
             self.context_menu(view, 10, 10)
         elif name == "popup":
-            self.tell({"type": "popup_blocked", "view": v, "url": "mock://popped"})
+            self.open_popup(view, "mock://popped")
+        elif name == "popup-close":
+            self.open_popup(view, "mock://close-later")
+        elif name.startswith("popups-") and name[len("popups-"):].isdigit():
+            for _ in range(int(name[len("popups-"):])):
+                self.open_popup(view, "mock://popped")
+        elif name == "close-later":
+            def close_later():
+                if self.views.get(v) is view:
+                    self.close_by_page(view)
+            self.after(0.5, close_later)
         elif name == "crash":
             self.tell({"type": "crashed", "view": v, "reason": "mock crash"})
         elif name == "hover":
@@ -760,9 +780,33 @@ class Server:
         elif name == "error":
             self.tell({"type": "error", "view": v, "message": "mock error"})
         elif name == "close":
-            self.cancel_hints(view)
-            del self.views[v]
-            self.tell({"type": "view_closed", "view": v, "reason": "closed"})
+            self.close_by_page(view)
+
+    def close_by_page(self, view):
+        """Close VIEW as a page does with window.close()."""
+        self.cancel_hints(view)
+        del self.views[view.id]
+        self.drop_bands(view, "closed")
+        for segment in (view.shm, view.old_shm):
+            self.release(segment)
+        self.tell({"type": "view_closed", "view": view.id, "reason": "closed"})
+
+    def open_popup(self, opener, url):
+        """Open a view at URL as a page of OPENER opens a window."""
+        area = (opener.width * opener.height
+                + sum(v.width * v.height for v in self.views.values()))
+        if (not (self.client and self.client.ready and self.client.popups)
+                or len(self.views) >= self.max_views()
+                or (self.args.max_area and area > self.args.max_area)):
+            self.tell({"type": "popup_blocked", "view": opener.id, "url": url})
+            return
+        view = self.add_view("about:blank", opener.width, opener.height, opener.dpr)
+        view.title = ""
+        self.tell({"type": "view_created", "view": view.id, "opener": opener.id,
+                   "url": view.url, "title": view.title, "width": view.width,
+                   "height": view.height, "dpr": view.dpr})
+        self.navigate(view, url)
+        self.pump(view)
 
     def context_menu(self, view, x, y):
         self.tell({"type": "context_menu", "view": view.id, "x": x, "y": y,
@@ -796,6 +840,7 @@ class Server:
                 and lp.zstd_available()):
             client.encoding = "zstd"
         client.shm = bool(self.args.shm and m.get("shm"))
+        client.popups = m.get("popups") is True
         client.ready = True
         features = {} if self.args.no_hints else {"features": ["hints"]}
         if not self.args.no_max_views:
@@ -1392,6 +1437,7 @@ def selftest():
 
     selftest_hints(serve, hello)
     selftest_views(serve, hello)
+    selftest_popups(serve, hello)
     print("ok" + "".join(f" ({note})" for note in notes))
 
 
@@ -1545,6 +1591,75 @@ def selftest_views(serve, hello):
     client.frame()
     create(2, "mock://b")
     assert client.expect("error")["message"] == "only one view is supported"
+    client.sock.close()
+    thread.join(5)
+
+
+def selftest_popups(serve, hello):
+    def collect(client, done):
+        """Read records, acknowledging frames, until DONE(records) holds."""
+        records = []
+        while not done(records):
+            record = client.receive()
+            if isinstance(record, tuple):
+                client.ack(record[0])
+            records.append(record)
+        return records
+
+    def messages(records, message_type, **fields):
+        return [r for r in records if isinstance(r, dict) and r["type"] == message_type
+                and all(r.get(k) == v for k, v in fields.items())]
+
+    def opened(client, opener, url):
+        client.send({"type": "load", "view": opener, "url": url})
+        records = collect(client, lambda rs: messages(rs, "view_created")
+                          and any(isinstance(r, tuple)
+                                  and r[0].view == messages(rs, "view_created")[0]["view"]
+                                  for r in rs))
+        return records, messages(records, "view_created")[0]
+
+    # A client that did not say "popups" gets popup_blocked.
+    client, thread = serve()
+    client.send(hello)
+    client.expect("welcome")
+    client.send({"type": "create_view", "url": "mock://a", "width": 40,
+                 "height": 30, "dpr": 2.0})
+    a = client.expect("view_created")["view"]
+    client.send({"type": "load", "view": a, "url": "mock://popup"})
+    records = collect(client, lambda rs: messages(rs, "popup_blocked"))
+    assert messages(records, "popup_blocked") == [
+        {"type": "popup_blocked", "view": a, "url": "mock://popped"}]
+    assert not messages(records, "view_created")
+    client.sock.close()
+    thread.join(5)
+
+    # One that did gets a view with the opener's size, state and frame,
+    # until the limit.
+    client, thread = serve("--max-views", "3")
+    client.send({**hello, "popups": True})
+    client.expect("welcome")
+    client.send({"type": "create_view", "url": "mock://a", "width": 40,
+                 "height": 30, "dpr": 2.0})
+    a = client.expect("view_created")["view"]
+    records, created = opened(client, a, "mock://popup")
+    popped = created["view"]
+    assert created["opener"] == a and "request" not in created, created
+    assert (created["width"], created["height"], created["dpr"]) == (40, 30, 2.0)
+    assert messages(records, "state", view=popped)[0]["url"] == "mock://popped"
+    frame = next(r for r in records if isinstance(r, tuple) and r[0].view == popped)
+    assert frame[0].full and (frame[0].frame_width, frame[0].frame_height) == (40, 30)
+    # A burst opens what fits; the rest is blocked.
+    client.send({"type": "load", "view": a, "url": "mock://popups-3"})
+    records = collect(client, lambda rs: len(messages(rs, "popup_blocked")) == 2)
+    assert len(messages(records, "view_created", opener=a)) == 1
+    # A page that closes its window.
+    for view in (popped, messages(records, "view_created")[0]["view"]):
+        client.send({"type": "close_view", "view": view})
+        collect(client, lambda rs, view=view: messages(rs, "view_closed", view=view))
+    records, created = opened(client, a, "mock://popup-close")
+    records = collect(client, lambda rs: messages(rs, "view_closed"))
+    assert messages(records, "view_closed") == [
+        {"type": "view_closed", "view": created["view"], "reason": "closed"}]
     client.sock.close()
     thread.join(5)
 

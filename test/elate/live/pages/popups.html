@@ -1,0 +1,26 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>page=popups</title>
+<style>
+html, body { margin: 0; background: #ffffff; }
+a, button { position: absolute; left: 0; width: 300px; height: 40px; box-sizing: border-box; display: block; }
+#blank { top: 0; background: #ffff00; } #open { top: 60px; } #auto { top: 120px; }
+</style>
+<script src="/live.js"></script></head>
+<body>
+<a id="blank" href="/popup.html?via=blank" target="_blank">blank</a>
+<button id="open">open</button>
+<button id="auto">open and close</button>
+<script>
+// Each control opens popup.html, which writes its "via" into live.child
+// here when it can reach this page through window.opener.
+live.page = 'popups';
+live.child = 'none';
+live.opened = 'none';
+function openPopup(query) {
+  var w = window.open('/popup.html?' + query);
+  live.opened = w ? 'window' : 'null';
+}
+document.getElementById('open').addEventListener('click', function () { openPopup('via=open'); });
+document.getElementById('auto').addEventListener('click', function () { openPopup('via=auto&autoclose=1'); });
+</script>
+</body></html>

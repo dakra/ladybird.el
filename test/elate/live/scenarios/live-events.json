@@ -1,13 +1,13 @@
 {
   "name": "live-events",
-  "comment": "What a page does by itself: console output, a window it tries to open, a download, text it puts on the clipboard; and a screenshot taken by the server.",
+  "comment": "What a page does by itself: console output, a window it tries to open where there is no room for it, a download, text it puts on the clipboard; and a screenshot taken by the server.",
   "params": {"server": "stdio"},
   "variants": {"stdio": {"server": "stdio"}, "socket": {"server": "socket"}, "ssh": {"server": "ssh"}, "forward": {"server": "forward"}},
   "defaults": {"timeout": 20},
   "session": {"ui": "gui", "size": "100x35", "eval_file": ["../lib/ladybird-live.el"]},
   "steps": [
     {"group": "setup"},
-    {"eval": "(progn (ladybird-live-start \"{{server}}\" \"events.html\") t)", "timeout": 120},
+    {"eval": "(progn (setq ladybird-live-server-arguments (list \"--emacs-max-views=1\")) (ladybird-live-start \"{{server}}\" \"events.html\") t)", "timeout": 120, "comment": "a server that holds one page blocks the window the page opens"},
     {"wait": "until", "pred": "(ladybird-live-page-p \"events\")", "timeout": 60},
 
     {"group": "console", "comment": "console output is collected once it is turned on"},
@@ -20,7 +20,7 @@
     {"keys": "C-c C-t"},
     {"assert": {"eval": "(ladybird-live-in-page (not ladybird--console))"}},
 
-    {"group": "popup", "comment": "a window the page opens is blocked and remembered"},
+    {"group": "popup", "comment": "a window the page opens, on a server with no room for it, is blocked and remembered"},
     {"mouse": "click", "x": 60, "y": 80, "button": 1},
     {"wait": "until", "pred": "(ladybird-live-received \"popup_blocked\" (quote url) (ladybird-live-url \"second.html?popup=1\"))"},
     {"assert": {"eval": "(ladybird-live-messages-p \"Popup blocked: http://127.0.0.1:[0-9]+/second.html\\\\?popup=1\")"}},

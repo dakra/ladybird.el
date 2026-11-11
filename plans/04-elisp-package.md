@@ -27,8 +27,7 @@ cursor/link hover, the dialogs and pickers of protocol section 7, find-in-page, 
 zoom, screenshot, console, `browse-url` integration, reconnection with
 re-attachment to surviving views, ERT tests, a Python mock server, elate scenarios.
 
-Non-goals for v1: a tabs UI and popups (`popup_blocked` offers to open the URL in a new
-buffer), view source (`request_source` is protocol v2), file
+Non-goals for v1: a tabs UI, view source (`request_source` is protocol v2), file
 uploads (the file picker returns server-side paths), downloads UI, IME caret placement,
 bookmarks, cookies/profile management, `context_menu_action`, TRAMP path translation,
 Windows.
@@ -473,8 +472,34 @@ how many pages it found. `ladybird-connect` shows the page buffer used last if i
 of the connection's, else the one with the lowest view id (the welcome does not say which
 view was used last), and says how many pages the server has. Closing the last page of a
 socket connection says that the server keeps running, with how many pages it kept; the
-protocol has no message that stops a server. A `view_created` with `opener` answers no
-request and is answered with `close_view` until §3.1 is taken.
+protocol has no message that stops a server.
+
+Views opened by pages (protocol §3.1): the hello says `"popups": true`. A `view_created`
+with `opener` answers no request; `ladybird--page-opened` makes a buffer for the view
+on the opener's connection and host (`ladybird--make-view-buffer`), records the opener's
+view id in `ladybird--opener` and shows the buffer with `display-buffer`, the action
+`display-buffer-no-window` with `allow-no-window` and the category `ladybird-popup`:
+in no window unless a rule of `display-buffer-alist` says otherwise, and never selected,
+so pages that open one on every click take no window and no focus; the server's limit
+bounds how many there are, and each is one line in the echo area. The buffer is
+synced at once (`ladybird--sync-viewport`, `ladybird--sync-focus`), so a page in no
+window is told it is hidden before it renders more than its first frame. The message
+names the opener and says that `C-c C-s` gets there; the page is named only when
+`view_created` has a URL other than `about:blank`, which the protocol does not promise.
+`ladybird-switch-to-page` annotates such a page with its opener's name while the opener
+is open. `ladybird-new-page-display` is for pages that commands open.
+`view_closed` kills the buffer of any view the server closed, with a message unless the
+reason is `client` or the page was closed before it had a URL (a window whose first
+navigation was a download, whose `error` the server sends first), after quitting each
+window that showed it with `quit-restore-window` inside `save-selected-window`: a window
+made for the page is deleted, one that showed another buffer before shows it again (the
+opener, when the page was reached from there with `C-c C-s`), and the selected window
+stays selected unless it was deleted. `display-buffer` runs inside `unwind-protect`, so
+the view is told its visibility also when a rule's action fails.
+A `popup_blocked` remembers its URL for `ladybird-open-blocked-popup`, and its message
+says what that command will do: open a new page, load the URL in the page of a
+one-page server, or nothing on a server that holds all its pages. One with a null `url`
+is reported and remembers nothing.
 
 A view kept for a killed buffer on a connection that stays up (`kept`, an alist of view
 and its last `state`) counts against the limit, and the refusal says how many of the
@@ -482,9 +507,7 @@ pages are such. `state` messages for it update the kept state, `view_closed` dro
 `ladybird--restore-kept` gives such views buffers again: `ladybird-connect` on the open
 connection does it for all, `ladybird-switch-to-page` offers them among the pages and
 does it for the one chosen. The buffer has the kept state and gets its frame once a
-window shows it (`set_visibility`, then a full frame). The protocol has no message that
-asks for a view's state; state that changed while no `state` arrived for it, or before
-the client connected, is not known.
+window shows it (`set_visibility`, then a full frame).
 
 Page strings shown in Emacs pass `ladybird--clean`, which turns line breaks and tabs
 into spaces and drops other control characters and the bidirectional formatting
@@ -510,7 +533,11 @@ again, `ladybird-new-page-display` with `selected-window`, `other-window` and
 `background`, closing a page while it animates, the limit, and reattaching to the pages
 a socket server kept. Views that were visible before the reconnect send a full frame
 right after the welcome; pages the client hid, such as those of buffers killed with
-`ladybird-keep-view-on-kill`, send one when a window shows them again.
+`ladybird-keep-view-on-kill`, send one when a window shows them again. Pages that pages
+open are tried on the same servers and connections (`live-popups`, again with
+`--emacs-max-views=3`): a link with `target=_blank`, `window.open` with `window.opener`
+reaching the opener, a page closing its window or itself, the limit giving
+`popup_blocked`, and a hinted click.
 
 ## 5. Input (`ladybird-keys.el` + bindings in `ladybird.el`)
 
@@ -699,11 +726,11 @@ All handlers below run via `ladybird--later` with an `on-quit` that cancels (3.8
     reply opens `*ladybird-source: URL*` in `mhtml-mode` (or `html-mode`) read-only.
 11. `selection` reply → `kill-new` + message; `screenshot_saved` → message with path;
     `console` → append `[level] text` to `ladybird-console-buffer` (`special-mode`).
-12. `popup_blocked`: `(message "Popup blocked: %s" url)`; `ladybird-open-blocked-popup`
+12. `popup_blocked`: a "Popup blocked: URL" message (see 4.6); `ladybird-open-blocked-popup`
     opens the last blocked URL in a new buffer. `clipboard` → `kill-new`.
     `view_closed`/`crashed`: `crashed` is a message (the view keeps working);
-    `view_closed` with reason `closed`/`crashed` kills the buffer after a message, `client`
-    is our own close.
+    `view_closed` with reason `closed`/`crashed` quits the windows of the buffer and kills
+    it after a message (`closed`: "was closed by its page"), `client` is our own close.
 13. `ladybird-follow-hint` (protocol §6.1) is not a prompt of `ladybird--later`: the page
     draws the labels into its frames, so nothing may hold up the process filter while the
     user types, and the client draws nothing.
@@ -801,8 +828,9 @@ M ≈ 300, L ≈ 600 of code plus tests.
   (JSON lines of every received control message plus `{"type":"_frame_sent",...}`),
   `--no-pong`, `--exit-after SECONDS`, `--reject`, `--zstd`; `mock://` URLs (loading `mock://alert`,
   `mock://confirm`, `mock://prompt`, `mock://select`, `mock://file`, `mock://permission`,
-  `mock://external`, `mock://context` emits the matching request; `mock://popup` emits
-  `popup_blocked`; `mock://crash` emits `crashed`). Behavior: records per
+  `mock://external`, `mock://context` emits the matching request; `mock://popup` opens a
+  view with `opener` for a client whose hello had `"popups": true` while there is room,
+  else emits `popup_blocked`; `mock://crash` emits `crashed`). Behavior: records per
   protocol; `hello` → `welcome` (`encoding` raw unless `--zstd` and offered; never `shm`),
   then per view `state` + full frame; `create_view` → `view_created`, `state`, frame;
   `set_viewport` → full frame of the new size; `mouse down` paints a 24-px square at

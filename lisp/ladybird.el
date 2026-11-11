@@ -145,7 +145,11 @@ buffer's window is selected."
 `selected-window' shows it in the selected window, `other-window' in
 another window, and `background' nowhere: the buffer is made and its
 page loads.  The buffer goes through `display-buffer', so a rule of
-`display-buffer-alist' that matches it comes first."
+`display-buffer-alist' that matches it comes first.
+
+A page that a page opens appears nowhere unless such a rule shows it:
+it goes through `display-buffer' with the category `ladybird-popup',
+which the condition `(category . ladybird-popup)' matches."
   :type '(choice (const :tag "In the selected window" selected-window)
                  (const :tag "In another window" other-window)
                  (const :tag "Not shown" background))
@@ -201,6 +205,7 @@ a to z or a digit."
 (defvar-local ladybird--pending-move nil "The mouse movement event held back.")
 (defvar-local ladybird--bg-cookie nil "Face remapping of the page's background.")
 (defvar-local ladybird--blocked-popup nil "URL of the last popup the page tried.")
+(defvar-local ladybird--opener nil "Id of the view whose page opened this one.")
 (defvar-local ladybird--console nil
   "Non-nil while the page sends its console output.")
 (defvar-local ladybird--find-string nil "The string last searched for in the page.")
@@ -728,6 +733,7 @@ session of the buffer ends."
     (when-let* ((decoder (ladybird--conn-decoder ladybird--conn)))
       (ignore-errors (ladybird-module-forget-view decoder ladybird--view))))
   (setq ladybird--view nil
+        ladybird--opener nil
         ladybird--creating nil
         ladybird--requested-size nil
         ladybird--visible 'unknown
@@ -835,11 +841,42 @@ A hint session on CONN ends when CONN is no longer ready."
 (ladybird--defhandler "view_created" (conn msg)
   "Give the buffer that has waited longest the view the server created.
 This handles a `view_created' that does not name its request.  One
-that names an `opener' was made by a page, answers no request and is
-closed."
+that names an `opener' was made by a page and answers no request."
   (if (alist-get 'opener msg)
-      (ladybird--send conn `((type . "close_view") (view . ,(alist-get 'view msg))))
+      (ladybird--page-opened conn msg)
     (ladybird--view-created conn (ladybird--pop-creating conn) msg)))
+
+(defun ladybird--page-opened (conn msg)
+  "Make a buffer for the view that a page on CONN opened.
+MSG is the `view_created' that announces it.  The buffer goes through
+`display-buffer' with the category `ladybird-popup' and appears in no
+window unless a rule of `display-buffer-alist' shows it; no window is
+selected.  The server learns at once whether it is shown, so a page in
+the background does not render."
+  (let* ((opener (ladybird--view-buffer conn `((view . ,(alist-get 'opener msg)))))
+         (buffer (ladybird--make-view-buffer conn (alist-get 'view msg)
+                                             (alist-get 'url msg))))
+    (with-current-buffer buffer
+      (setq ladybird--opener (alist-get 'opener msg))
+      (ladybird--apply-state msg))
+    (let (shown)
+      (unwind-protect
+          (setq shown (display-buffer buffer '(display-buffer-no-window
+                                               (allow-no-window . t)
+                                               (category . ladybird-popup))))
+        (ladybird--sync-viewport buffer)
+        (ladybird--sync-focus buffer))
+      ;; The view starts at about:blank when it does not know its URL yet.
+      (message "ladybird: %s opened %s%s"
+               (if opener (buffer-name opener) "a page")
+               (if (member (alist-get 'url msg) '(nil "" "about:blank"))
+                   "a page"
+                 (buffer-name buffer))
+               (if shown
+                   ""
+                 (substitute-command-keys
+                  " in the background; \\<ladybird-mode-map>\\[ladybird-switch-to-page] \
+switches to it"))))))
 
 (ladybird--defhandler "state" (conn msg)
   "Record the state of a view on CONN.
@@ -852,14 +889,27 @@ buffer it gets again."
 
 (ladybird--defhandler "view_closed" (conn msg)
   "Kill the buffer of a view the server closed on CONN.
-A view left on the server by a killed buffer is forgotten."
+Each window that showed it is quit with `quit-restore-window': a window
+made for the page is deleted, any other shows the buffer it showed
+before.  The selected window stays selected if it is still live.  A
+page closed before it had a URL goes without a message.  A view left on
+the server by a killed buffer is forgotten."
   (setf (ladybird--conn-kept conn)
         (assq-delete-all (alist-get 'view msg) (ladybird--conn-kept conn)))
   (ladybird--with-view conn msg
-    (unless (equal (alist-get 'reason msg) "client")
-      (message "ladybird: %s closed (%s)" (buffer-name)
-               (alist-get 'reason msg)))
+    (pcase (alist-get 'reason msg)
+      ("client")
+      ;; Such as a window whose first navigation was a download, which
+      ;; the server reports itself.
+      ("closed" (unless (member (ladybird--url) '(nil "" "about:blank"))
+                  (message "ladybird: %s was closed by its page" (buffer-name))))
+      (reason (message "ladybird: %s closed (%s)" (buffer-name) reason)))
     (ladybird--forget-view)
+    ;; The page closes when it likes: the selection stays where the user
+    ;; has it, unless that window goes.
+    (save-selected-window
+      (dolist (window (get-buffer-window-list buffer nil t))
+        (quit-restore-window window)))
     (kill-buffer buffer))
   (when (ladybird--conn-lingering conn)
     (ladybird--linger-end conn)))
@@ -1925,13 +1975,25 @@ used last comes first, the current one last."
   "Return the connection of PAGE, a value of `ladybird--page-candidates'."
   (if (bufferp page) (buffer-local-value 'ladybird--conn page) (car page)))
 
+(defun ladybird--opener-name (page)
+  "Return the name of the open page that opened PAGE, or nil.
+PAGE is a value of `ladybird--page-candidates'."
+  (when-let* (((bufferp page))
+              (opener (buffer-local-value 'ladybird--opener page))
+              (conn (buffer-local-value 'ladybird--conn page)))
+    (if-let* ((buffer (ladybird--view-buffer conn `((view . ,opener)))))
+        (buffer-name buffer)
+      (when-let* ((state (cdr (assq opener (ladybird--conn-kept conn)))))
+        (ladybird--page-candidate (alist-get 'title state)
+                                  (or (alist-get 'url state) ""))))))
+
 (defun ladybird-switch-to-page (buffer)
   "Show the page BUFFER, read with completion over titles and URLs.
 The pages of every server are offered, also those a connected server
 keeps for buffers killed with `ladybird-keep-view-on-kill', which get a
-buffer again; with several servers each is annotated with its host.
-Any part of a title or URL completes, in the completion category
-`ladybird-page'."
+buffer again.  A page that a page opened is annotated with its opener,
+and with several servers each page with its host.  Any part of a title
+or URL completes, in the completion category `ladybird-page'."
   (interactive
    (let* ((candidates (or (ladybird--page-candidates)
                           (user-error "No page is open")))
@@ -1939,10 +2001,16 @@ Any part of a title or URL completes, in the completion category
                   (mapcar (lambda (candidate) (ladybird--page-conn (cdr candidate)))
                           candidates)))
           (annotate
-           (and (cdr hosts)
+           (and (or (cdr hosts)
+                    (seq-some (lambda (candidate) (ladybird--opener-name (cdr candidate)))
+                              candidates))
                 (lambda (name)
                   (when-let* ((page (cdr (assoc name candidates))))
-                    (format "  [%s]" (ladybird--conn-name (ladybird--page-conn page)))))))
+                    (concat (and (cdr hosts)
+                                 (format "  [%s]" (ladybird--conn-name
+                                                   (ladybird--page-conn page))))
+                            (and-let* ((opener (ladybird--opener-name page)))
+                              (format "  opened by %s" opener)))))))
           ;; A part of the title or of the URL picks a page.
           (completion-category-defaults
            (cons '(ladybird-page (styles substring basic))
@@ -2729,12 +2797,25 @@ does not name the request."
                (alist-get 'message msg)))))
 
 (ladybird--defhandler "popup_blocked" (conn msg)
-  "Remember the window a page on CONN tried to open."
+  "Remember the window a page on CONN tried to open.
+A window without a URL is reported and not remembered.  The message
+says what `ladybird-open-blocked-popup' does: open the URL as a new
+page, load it in the page of a server that holds one, or nothing on a
+server that has all the pages it can hold."
   (ladybird--with-view conn msg
-    (setq ladybird--blocked-popup (alist-get 'url msg))
-    (message "Popup blocked: %s%s" ladybird--blocked-popup
-             (substitute-command-keys
-              "  (\\[ladybird-open-blocked-popup] opens it)"))))
+    (let ((url (alist-get 'url msg))
+          (max (ladybird--max-views conn)))
+      (when (stringp url)
+        (setq ladybird--blocked-popup url))
+      (message "Popup blocked: %s%s"
+               (if (stringp url) (ladybird--clean url) "a window without a URL")
+               (cond ((not (stringp url)) "")
+                     ((and (> max 1) (>= (ladybird--view-count conn) max))
+                      (format "  (%s holds no more pages)" (ladybird--conn-name conn)))
+                     (t (substitute-command-keys
+                         (if (= max 1)
+                             "  (\\[ladybird-open-blocked-popup] loads it here)"
+                           "  (\\[ladybird-open-blocked-popup] opens it)"))))))))
 
 (defun ladybird-open-blocked-popup ()
   "Open the window the page last tried to open in a new page buffer."

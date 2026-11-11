@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>page=popup</title>
+<style>
+html, body { margin: 0; background: #00ff00; }
+#close { position: absolute; left: 0; top: 0; width: 300px; height: 40px; }
+</style>
+<script src="/live.js"></script></head>
+<body>
+<button id="close">close</button>
+<script>
+// popup.html?via=NAME reports NAME and whether it reaches its opener, to
+// which it writes NAME; with autoclose=1 it closes itself 300 ms after
+// loading, and the button closes it.
+var query = new URLSearchParams(location.search);
+live.page = 'popup';
+live.via = query.get('via') || 'none';
+live.opener = window.opener ? 'yes' : 'no';
+if (window.opener) window.opener.live.child = live.via;
+document.getElementById('close').addEventListener('click', function () { window.close(); });
+if (query.get('autoclose')) setTimeout(function () { window.close(); }, 300);
+function update() { live.vis = document.visibilityState; }
+</script>
+</body></html>

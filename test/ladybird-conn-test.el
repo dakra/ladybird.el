@@ -520,6 +520,7 @@ session.  A canvas of the first frame's size is attached to view 1."
                      '((width . 1600) (height . 1000) (dpr . 2.0))))
       (should (equal (alist-get 'encodings hello) ["zstd" "raw"]))
       (should (eq (alist-get 'shm hello) t))
+      (should (eq (alist-get 'popups hello) t))
       (should (string-search "\"token\":null" (car (last written))))
       (should (timerp (ladybird--conn-hello-timer conn))))))
 

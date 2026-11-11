@@ -1,0 +1,74 @@
+{
+  "name": "popups",
+  "comment": "Pages that pages open: a page opened in the background with a message and told it is hidden, reached with C-c C-s, which names its opener; a page that closes its window and the window going back to its opener; one that closes itself at once; a burst that stops at the limit with popup_blocked and steals no window; a kept page brought back with its state.",
+  "params": {"host": "unix"},
+  "variants": {
+    "stdio": {"host": "stdio"},
+    "unix": {"host": "unix"}
+  },
+  "defaults": {"timeout": 15},
+  "session": {"ui": "tty", "size": "120x36", "eval_file": ["../lib/ladybird-setup.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(ladybird-elate-start '{{host}} \"--fps\" \"10\" \"--max-views\" \"3\")"},
+    {"wait": "until", "pred": "(ladybird-elate-ready-p)"},
+    {"eval": "(select-window (get-buffer-window (ladybird-elate-buffer)))"},
+    {"eval": "(defun ladybird-elate-page (view) (seq-find (lambda (b) (eql (buffer-local-value 'ladybird--view b) view)) (ladybird--buffers)))"},
+    {"assert": {"eval": "(eq (alist-get 'popups (ladybird-elate-logged \"hello\")) t)"}, "comment": "the hello takes pages that pages open"},
+
+    {"group": "opened", "comment": "a page the page opens gets a buffer no window shows, is told it is hidden, and the message says where it is"},
+    {"eval": "(ladybird-elate-load \"mock://popup\")"},
+    {"wait": "until", "pred": "(ladybird-elate-page 2)"},
+    {"assert": {"eval": "(eq (window-buffer (selected-window)) (ladybird-elate-page 1))"}},
+    {"assert": {"eval": "(= 1 (length (window-list)))"}},
+    {"assert": {"eval": "(null (get-buffer-window (ladybird-elate-page 2) t))"}},
+    {"assert": {"eval": "(eql (buffer-local-value 'ladybird--opener (ladybird-elate-page 2)) 1)"}},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"set_visibility\" 'view 2 'visible nil)"},
+    {"assert": {"eval": "(ladybird-elate-messages-p \"ladybird: \\\\*ladybird: Mock: mock://popup\\\\* opened a page in the background; C-c C-s switches to it\")"}},
+    {"wait": "until", "pred": "(equal (alist-get 'url (buffer-local-value 'ladybird--state (ladybird-elate-page 2))) \"mock://popped\")"},
+
+    {"group": "switch", "comment": "C-c C-s names the opener and shows the page, which is told it is visible"},
+    {"keys": "C-c C-s", "delivery": "events"},
+    {"wait": "prompt"},
+    {"type": "popped"},
+    {"keys": "TAB", "delivery": "events"},
+    {"wait": "idle", "min_idle": 0.3},
+    {"assert": {"eval": "(with-current-buffer (window-buffer (minibuffer-window)) (equal (funcall (completion-metadata-get (completion-metadata \"\" minibuffer-completion-table nil) 'annotation-function) \"Mock: mock://popped  mock://popped\") \"  opened by *ladybird: Mock: mock://popup*\"))"}, "comment": "the candidate names its opener"},
+    {"keys": "RET", "delivery": "events"},
+    {"wait": "until", "pred": "(eq (window-buffer (selected-window)) (ladybird-elate-page 2))"},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"set_visibility\" 'view 2 'visible t)"},
+
+    {"group": "closed", "comment": "the page closes its window: its buffer goes and the window shows the opener again"},
+    {"eval": "(with-current-buffer (ladybird-elate-page 2) (ladybird-goto-url \"mock://close\"))"},
+    {"wait": "until", "pred": "(null (ladybird-elate-page 2))"},
+    {"assert": {"eval": "(eq (window-buffer (selected-window)) (ladybird-elate-page 1))"}},
+    {"assert": {"eval": "(ladybird-elate-messages-p \"ladybird: \\\\*ladybird: Mock: mock://close\\\\* was closed by its page\")"}},
+    {"assert": {"eval": "(= 0 (ladybird-elate-count \"close_view\"))"}, "comment": "the client closes nothing itself"},
+
+    {"group": "self-closing", "comment": "a page that closes itself soon after it opened"},
+    {"eval": "(ladybird-elate-load \"mock://popup-close\")"},
+    {"wait": "until", "pred": "(ladybird-elate-page 3)"},
+    {"wait": "until", "pred": "(null (ladybird-elate-page 3))"},
+    {"assert": {"eval": "(eq (window-buffer (selected-window)) (ladybird-elate-page 1))"}},
+
+    {"group": "burst", "comment": "a page that opens four: two fit under the limit of 3, two are blocked; no window is taken"},
+    {"eval": "(ladybird-elate-load \"mock://popups-4\")"},
+    {"wait": "until", "pred": "(ladybird-elate-in-page (equal ladybird--blocked-popup \"mock://popped\"))"},
+    {"wait": "until", "pred": "(= 3 (length (ladybird--buffers)))"},
+    {"assert": {"eval": "(= 1 (length (window-list)))"}},
+    {"assert": {"eval": "(eq (window-buffer (selected-window)) (ladybird-elate-page 1))"}},
+    {"assert": {"eval": "(eq (selected-window) (get-buffer-window (ladybird-elate-page 1)))"}},
+    {"wait": "until", "pred": "(and (ladybird-elate-logged \"set_visibility\" 'view 4 'visible nil) (ladybird-elate-logged \"set_visibility\" 'view 5 'visible nil))"},
+    {"assert": {"eval": "(ladybird-elate-messages-p \"Popup blocked: mock://popped\")"}},
+    {"eval": "(setq ladybird-elate-error (ladybird-elate-in-page (condition-case err (ladybird-open-blocked-popup) (user-error (cadr err)))))"},
+    {"assert": {"eval": "(equal ladybird-elate-error \"ladybird: mock has 3 pages open, the most it holds; close one first\")"}},
+
+    {"group": "kept", "comment": "a page kept on the server by its killed buffer comes back with M-x ladybird-connect, with its state"},
+    {"eval": "(let ((ladybird-keep-view-on-kill t)) (kill-buffer (ladybird-elate-page 4)))"},
+    {"eval": "(ladybird-connect \"mock\")"},
+    {"wait": "until", "pred": "(equal (alist-get 'url (buffer-local-value 'ladybird--state (ladybird-elate-page 4))) \"mock://popped\")"},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-elate-cleanup)"}
+  ]
+}
