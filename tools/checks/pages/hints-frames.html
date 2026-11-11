@@ -1,0 +1,25 @@
+<!doctype html>
+<title>frames</title>
+<style>
+  body { margin: 0; font: 16px sans-serif; }
+  iframe { position: absolute; border: 0; }
+  #overlay { position: absolute; left: 0; top: 390px; width: 400px; height: 200px; background: rgba(0, 0, 0, 0.3); }
+</style>
+<a href="#top" style="position: absolute; left: 20px; top: 10px">top link</a>
+<iframe id=cross style="left: 20px; top: 50px; width: 320px; height: 150px"></iframe>
+<iframe id=same style="left: 420px; top: 50px; width: 320px; height: 60px"></iframe>
+<iframe id=partial style="left: 650px; top: 250px; width: 320px; height: 60px"></iframe>
+<div style="position: absolute; left: 20px; top: 250px; opacity: 0"><iframe id=transparent style="position: static; width: 320px; height: 60px"></iframe></div>
+<iframe id=covered style="left: 20px; top: 420px; width: 320px; height: 60px"></iframe>
+<div id=overlay></div>
+<script>
+  // The frames show pages of another site, localhost instead of 127.0.0.1, except the one of the same origin.
+  const other = location.protocol + "//localhost:" + location.port + "/hints-frame.html?name=";
+  cross.src = other + "cross&nested=1";
+  same.src = "hints-frame.html?name=same";
+  partial.src = other + "partial";
+  transparent.src = other + "transparent";
+  covered.src = other + "covered";
+  addEventListener("message", event => document.title = event.data);
+  addEventListener("hashchange", () => document.title = "hash:" + location.hash);
+</script>

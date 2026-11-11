@@ -1,0 +1,41 @@
+# Pages a review used to break hints, each loaded in turn: run with --url hints-shift.html --viewport 800x600@1.
+
+# A page that moves the labels' host puts the labels on other elements, so nothing is activated.
+{"type":"set_focus","focused":true}
+settle 0.5
+{"type":"hints","id":1,"alphabet":"asdf"}
+expect hints_list id=1 items#=2
+settle 0.7
+color-in 400 200 400 400 fff3a3 6
+hint "one"
+{"type":"hints_end","id":1,"activate":"$hint.index"}
+expect error id=1 "message~=tampered"
+expect-no state 1
+
+# A press that went through and a release that did not leave nothing held: no element stays active, and moving the
+# pointer selects nothing.
+{"type":"load","url":"$pages/hints-stuck.html"}
+expect state loading=false
+settle 0.5
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2
+hint "mover"
+{"type":"hints_end","id":2,"activate":"$hint.index"}
+expect error id=2 "message~=before the click"
+{"type":"mouse","kind":"move","x":60,"y":210,"buttons":[],"modifiers":0}
+expect state 'title=active=0 hover=1 sel=""'
+{"type":"mouse","kind":"move","x":300,"y":310,"buttons":[],"modifiers":0}
+expect state 'title=active=0 hover=0 sel=""'
+
+# An overlay the page puts up when the labels go, over the element, gets nothing, and neither does the element.
+{"type":"load","url":"$pages/hints-release.html"}
+expect state title=start loading=false
+settle 0.5
+{"type":"hints","id":3,"alphabet":"asdf"}
+expect hints_list id=3
+hint "target button"
+{"type":"hints_end","id":3,"activate":"$hint.index"}
+expect error id=3 "message~=before the click"
+expect state "title=host seen,host removed"
+{"type":"ping","id":"after"}
+expect-no state 1

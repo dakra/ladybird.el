@@ -1,0 +1,43 @@
+<!doctype html>
+<title>hidden</title>
+<style>
+  body { margin: 0; font: 16px monospace; }
+  .p { position: absolute; left: 20px; }
+  .q { position: absolute; left: 420px; }
+  #modal { position: absolute; left: 400px; top: 300px; width: 400px; height: 300px; background: rgba(0, 0, 0, 0.4); }
+  #cover { display: none; position: absolute; left: 0; top: 470px; width: 400px; height: 50px; background: #dddddd; }
+</style>
+<nav class=p style="top: 20px; opacity: 0"><a href="#opacity">opacity link</a></nav>
+<div class=p style="top: 60px; max-height: 0; overflow: hidden"><a href="#collapsed">collapsed link</a></div>
+<div class=p style="top: 100px; transform: translateX(-2000px)"><a href="#moved">moved link</a></div>
+<a class=p style="top: 140px; pointer-events: none" href="#nopointer">no pointer link</a>
+<input class=p id=radio type=radio style="top: 180px; width: 1px; height: 1px; margin: 0; overflow: hidden" onchange="document.title = 'radio:' + this.checked">
+<label class=p for=radio style="top: 180px; left: 40px">radio label</label>
+<label class=p style="top: 220px"><input type=checkbox onchange="document.title = 'wrapped:' + this.checked"> wrapped check</label>
+<div class=p style="top: 260px; padding: 4px" onclick="document.title = 'wrapper'"><a href="#wrapped">wrapped link</a></div>
+<div class=p style="top: 300px" tabindex=0 role=button onclick="document.title = 'card:' + event.isTrusted">plain card</div>
+<p class=p style="top: 330px; width: 200px; margin: 0">Some words <a href="#wrap" id=wrap>a link that wraps</a></p>
+<div class=p id=closedhost style="top: 400px"></div>
+<button class=p id=removable style="top: 440px" onclick="document.title = 'removable'">removable button</button>
+<button class=p id=coverable style="top: 480px" onclick="document.title = 'coverable'">coverable button</button>
+<svg class=q style="top: 20px" width=150 height=30><a xlink:href="#svglink"><text x=0 y=20>svg link</text></a></svg>
+<div style="display: contents" role=button onclick="document.title = 'contents:' + event.isTrusted"><span class=q style="top: 60px">contents button</span></div>
+<button class=q style="left: 610px; top: 118px; height: 30px" onclick="document.title = 'peeking:' + event.isTrusted">peeking button</button>
+<div style="position: fixed; left: 600px; top: 100px; width: 200px; height: 40px; background: #cccccc"></div>
+<button class=q id=movable style="top: 180px" onclick="document.title = 'movable:' + event.isTrusted">movable button</button>
+<a class=q style="top: 320px" href="#under">under modal link</a>
+<div id=modal><button style="position: absolute; left: 20px; top: 60px" onclick="document.title = 'modal:' + event.isTrusted">modal button</button></div>
+<div id=cover></div>
+<script>
+  closedhost.attachShadow({ mode: "closed" }).innerHTML =
+    "<button onclick=\"document.title = 'closed:' + event.isTrusted\">closed shadow button</button>";
+  addEventListener("keydown", event => {
+    if (event.key === "r")
+      removable.remove();
+    if (event.key === "c")
+      cover.style.display = "block";
+    if (event.key === "m")
+      movable.style.top = "230px";
+  });
+  addEventListener("hashchange", () => document.title = "hash:" + location.hash);
+</script>

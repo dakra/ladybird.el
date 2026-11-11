@@ -229,79 +229,104 @@ runs, so the log location is identical for both. The log path is sent in `welcom
 
 ### 2.9 Hints
 
-Protocol §6.1. Everything lives in `EmacsWebView.cpp`; the parts without I/O
-(`is_valid_hint_alphabet`, `hint_session_id`, `hint_label_length`, `is_valid_hint_prefix`,
-`hint_labels`, `hint_label_mask`, `hint_activation_index`, `parse_hint_collection`) are in
-`EmacsProtocol.cpp` and unit-tested.
+Protocol §6.1. The work is split between the UI process (`EmacsWebView.cpp`, with the
+parts without I/O in `EmacsProtocol.cpp`, unit-tested: validation, labels, parsing the
+processes' answers and merging them with `merge_hint_answers`) and every WebContent process
+that hosts a document of the tab (`Services/WebContent/PageHints.cpp`, and the guarded
+click in `Libraries/LibWeb/Page/GuardedClick.cpp`). No script runs in the page.
 
-- **Route into the page.** The server runs its scripts with `ViewImplementation::js_console_input`
-  and reads the answers from `on_received_js_console_result` (the console route evaluates in
-  the top-level document and echoes nothing into `console` messages or the log). The answer
-  of a string-valued script is a `DebuggerValue` of type `String` with the text verbatim.
-  Answers carry no request id, and a script that throws gives none, so every script is wrapped
-  in a function that catches everything and returns `TOKEN "\n" RESULT`: a fresh random token
-  per script, a result that is a string of at most 20 M UTF-16 units (else `"null"`). A
-  token is known until its answer arrives or 60 s after it was due; an answer due more than
-  5 s ago is dropped. `run_javascript` is unusable: it returns nothing.
-- **Sharing the callback with DevTools.** `Application::evaluate_javascript` puts its own
-  callback in place and removes it once answered. Before each hint script the server puts
-  its dispatcher in place, keeping the callback it replaces; the dispatcher takes answers that
-  start with a known token and passes the others to the kept callback. Once no token is
-  outstanding, the kept callback is put back. A DevTools evaluation that starts while a hint
-  answer is outstanding replaces the dispatcher, so that answer goes to DevTools and the
-  session ends with `hints_cancelled` after 5 s; a clean fix needs request ids on the console
-  IPC.
-- **Three steps.** `hints` validates `id` and `alphabet`, ends any previous session silently,
-  and runs the collect script: it walks the document and every open shadow root (an element
-  of a shadow root right after its host), keeps what §6.1 lists (at most 1001 elements),
-  stores them with `draw`/`narrow`/`end` functions under a non-enumerable global whose name
-  is `__ladybird_hints_` plus 128 random bits, and returns
-  `{items:[{kind,text,url,x,y,width,height}]}`. The server parses that with
-  `parse_hint_collection` (wrong types become defaults, text is read as WTF-8 and cut to 200
-  code points, a link URL is reparsed with `URL::Parser` and dropped beyond 16 KiB, more
-  than 1000 items means `truncated`), makes the labels itself, and runs
-  `draw(labels, mask, typed)`. Once the page answers `"drawn"` it sends `hints_list`. An
-  empty collection is answered with an empty `hints_list` at once.
-- **What goes into scripts.** Only server-made values: the global's name and the tokens (hex),
-  the labels (from the validated alphabet, serialized by `JsonArray`), the narrowing mask (a
-  string of `0`/`1` that the server computes from `prefix`), the length of the typed part, and
-  a validated item index. Neither `id` nor `prefix` reaches the page.
-- **Labels.** A host element `ladybird-hints-<random>` is appended to the document element,
-  with inline `!important` styles (`all: initial`, absolute at 0,0, size 0, z-index
-  2147483647, `pointer-events: none`) and a closed shadow root that holds one box per label:
-  bold 11 px monospace, dark text on `#fff3a3`, 1 px border. A box sits at the top-left corner
-  of the element's first client rectangle in the viewport, moved inside the viewport, in
-  coordinates relative to the host, so it scrolls with the document and adds no scrollable
-  overflow. Styles are set through CSSOM, which a page's CSP does not block.
-- **Narrowing.** `prefix` must be characters of the session's alphabet and no longer than the
-  labels (before the labels exist: than the labels of 1000 items). The page hides the boxes
-  whose mask character is `0` and draws the typed part in `#d04000` whenever some label
-  matches. A `hints_narrow` that arrives before the labels exist is applied when they are
-  drawn; a `hints_end` then ends the session and activates nothing.
-- **Ending.** `hints_end` (and a silent end) runs `end(index)`: the host is removed, the
-  global deleted. With an index the page focuses the element; a text field (`textarea`, a
-  text-like `input`, an element with `contenteditable`) then gets its caret at the end and
-  nothing else. Anything else is hit-tested at nine points of its client rectangles inside
-  the viewport with `elementFromPoint`, descending into open shadow roots; the first point
-  that hits the element or a descendant is returned, and the server clicks there with a mouse
-  move, down and up through `enqueue_input_event` (CSS pixels times `dpr` times zoom), so the
-  page gets a trusted event with user activation: a `target=_blank` link goes to
-  `popup_blocked`, a `select` opens the `select` request. A point outside the view is not
-  clicked. The point comes from the page, which can move it (§6.1); checking it against the
-  item's rectangle would add nothing, as the page reports that rectangle too, and would
-  refuse legitimate clicks after the layout moved. An element covered everywhere is clicked
-  by the page (`click()`), which is untrusted.
-- **Session end.** Another active document sends `hints_cancelled` and runs `end` once more,
-  in case the collect script ran in the new document; earlier answers are dropped. A
-  WebContent crash and the page closing its view send `hints_cancelled` (before
-  `view_closed`). A collect or draw step that is not answered within 5 s, or answers
-  something unusable, sends `hints_cancelled` in place of `hints_list` and asks the page to
-  remove what it made. A disconnecting or replaced client ends the session silently and the
-  labels are removed. `close_view` destroys the view with `view_closed` alone. Errors that
-  answer `hints`, `hints_narrow` or `hints_end`, also for an unknown view, carry the `id` of
-  the message; no other error has one.
-- **Check:** `tools/checks/hints.sh` (run.sh name `hints`) with the pages
-  `hints.html`, `hints-target.html`, `hints-many.html`, `hints-close.html`.
+- **Messages.** `WebContentServer.ipc` has `hints_collect(request_id)`,
+  `hints_draw(labels)`, `hints_narrow(prefix)`, `hints_clear()`,
+  `hints_activate(request_id, node_id)`, `hints_guard_click(request_id, element, frame,
+  root, event_ids)` and `hints_cancel_click(request_id)`; `WebContentClient.ipc` answers
+  with `did_collect_hints`, `did_prepare_hint_activation` and `did_finish_hint_activation`,
+  which `WebContentPage` hands to the view's `on_hints_collected`,
+  `on_hint_activation_prepared` and `on_hint_activation_finished`.
+- **Collecting.** `hints` validates `id` and `alphabet`, ends any previous session silently
+  and sends `hints_collect` to every page of `CanonicalTraversable::for_each_hosting_page`.
+  The process hosting the top-level document has 5 s to answer, or the session ends with
+  `hints_cancelled`; once it answered, the others have 500 ms more, and the frames of a
+  process that has not answered by then are left out. Each process walks every local root it
+  hosts (also one inside a frame another process hosts) and, depth first, the documents of
+  same-process frames inside it, every shadow root included except user-agent ones. A
+  document that is not HTML (an SVG document) is not searched, as the labels would not show
+  in it. An element is a candidate by the kinds of §6.1, an SVG `a` with `href` or
+  `xlink:href` included; a link, `area`, `button`, `input` other than hidden, `select`,
+  `textarea`, `summary` and an element with `contenteditable` qualify strongly, a `label`
+  and an element that qualifies only by `onclick`, `tabindex` or `role` weakly. It is listed
+  when it is not disabled, it and its ancestors have no `opacity: 0`, the bounding box of
+  its client rectangles (those of its children for `display: contents`) is at least 3×3
+  CSS pixels, and one of up to 34 points of one of its client rectangles (the middle, the
+  corners and the middles of the edges 2 px inside, then a 5×5 grid), inside the visible
+  part of the local root and of every same-process frame on the way, is hit by the hit test
+  a mouse event would get from the local root (`node_hit_from_local_root`) on the element or
+  something in it. A `label` whose control is listed is dropped, and so is a weak candidate
+  around another listed one. A process answers per document with the items (unique node
+  id, kind, text, URL, bounding box in the device pixels of the local root), the local root
+  and the document's navigable, whether it left candidates out (past 4004 found, or 1001
+  listed), and for every frame another process hosts whether the hit test at the centre of
+  its visible part lands on its container (and the container is not transparent).
+- **Listing.** `merge_hint_answers` checks each answer against the frame tree the UI
+  process knows: a process speaks only for documents it hosts, under a local root it hosts
+  that holds them, and only the process hosting a frame's parent says whether it shows the
+  frame; a frame another process hosts adds items only if that is said of it and of every
+  such frame it is in. Documents are ordered by the tree order of their navigables. Boxes
+  are cut to the visible part of their local root, moved into the top-level viewport with
+  `CanonicalTraversable::local_root_offset`, cut to it (an item with nothing left is
+  dropped), and the first 1000 are listed. Each process is then sent the labels of its items.
+- **Labels.** A process puts one host element `ladybirdhints` (not a valid custom element
+  name) at the end of each document's root element, with inline `!important` styles
+  (`all: initial`, absolute at 0,0, size 0, z-index 2147483647, `pointer-events: none`) and
+  a closed user-agent shadow root, as form controls have, which holds one box per label:
+  bold 11 px monospace, dark text on `#fff3a3`, a 1 px border. A box sits 6 CSS px up and to
+  the left of the top-left corner of the first client rectangle of its element that shows,
+  so that it straddles the corner, moved into what shows of the element's document, and
+  scrolls with the document. Drawing and narrowing put the host's style back. Narrowing
+  (`prefix` checked against the alphabet and the label length) hides the boxes that do not
+  start with the prefix and draws the typed part in `#d04000`; one that arrives before the
+  labels exist is sent after them. `hints_clear` removes the hosts.
+- **Activation.** `hints_end` with an index sends `hints_activate` to the process hosting
+  that element, then `hints_clear` to every process. The process checks that the element's
+  label is intact: its host attached to the document's root element with the style it was
+  given and where it was, and the label's box where it was put. If not, the client gets an
+  `error` with the session's `id` that says the labels were tampered with. It then finds a
+  point of the element where it is now (an element that moved since the list is clicked
+  where it moved to) that is hit as above; with none, the client gets an `error`. A text
+  field (a `textarea`, a text-like `input`, an element with `contenteditable`) gets the
+  focus and a caret at its end. For anything else the process answers with the point. The
+  UI accepts that answer only from the process it asked, once, for a local root that
+  process hosts. It guards the click in every process the events pass through: the
+  process hosting the element must hit the element, each process hosting a document around
+  it must hit the container of the frame the events go on to (`hints_guard_click`, keyed by
+  the ids the view gives the move, press and release). It then sends those three events into
+  the view at the point in the top-level viewport, past the compositor so that they follow
+  the guards, as a click of the user's mouse travels: the page displaying the tab hit-tests
+  it and hands it on to the process of the frame. In `EventLoop::process_input_events`, in
+  the task that dispatches each event, a guarded event goes through only while its hit test
+  finds its target. Once one does not, the rest of the click is dropped, a press that went
+  through is cancelled (`Page::handle_mousecancel`), the other processes are told to do the
+  same, and the client gets an `error`. So a parent document that covers a frame's element
+  with something of its own gets nothing, nor does the element. A link opens, a
+  `target=_blank` link reports `popup_blocked` (also inside a frame of another site), a
+  `select` opens the `select` request.
+- **Session end.** Another active document, a WebContent crash and the page closing its view
+  send `hints_cancelled` (before `view_closed`); the processes are sent `hints_clear`. A
+  disconnecting or replaced client ends the session silently and the labels are removed.
+  `close_view` destroys the view with `view_closed` alone. Errors that answer `hints`,
+  `hints_narrow` or `hints_end`, also for an unknown view, carry the `id` of the message.
+  A process forgets the hint state of a page that goes away.
+- **What a page can still do.** It sees the host element and can remove, restyle or cover
+  it (not the closed user-agent shadow root); an activation is then refused. It cannot change
+  the list, which is read from layout and hit testing, nor the element a click goes to; it
+  can move or cover the element, or what is around a frame, while the click is on its way,
+  which then activates nothing. Whether a parent document covers part of a frame of another
+  site is noticed only at the centre of the frame's visible part when listing, and for the
+  element itself when clicking.
+- **Check:** `tools/checks/hints.sh` (run.sh name `hints`) with the scripts `hints.txt`,
+  `hints-hidden.txt`, `hints-hostile.txt`, `hints-reviewed.txt`, and, served over HTTP from
+  127.0.0.1 with frames from localhost on one server whose processes are counted,
+  `hints-frames.txt`, `hints-jack.txt` and `hints-hung.txt` (`hints-frames.txt` also with
+  `--site-isolation=top-level`), the session scripts and the pages `hints*.html`.
 
 ## 3. Input mapping
 

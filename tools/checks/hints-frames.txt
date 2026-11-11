@@ -1,0 +1,71 @@
+# Hints in frames of other sites and of the same origin: run with --url http://127.0.0.1:PORT/hints-frames.html
+# --viewport 800x600@1, with the same port serving the pages on localhost.
+{"type":"set_focus","focused":true}
+settle 1.5
+frame-save before
+{"type":"hints","id":1,"alphabet":"asdf"}
+expect hints_list id=1 items#=9 truncated=false
+hints-valid asdf
+# The top-level document first, then the frames in tree order, in the top-level viewport.
+hint "top link" index=0 kind=link x=20 y=10
+hint "cross left" index=1 kind=button x=30 y=60 width=100
+hint "cross right" index=2 kind=button x=220 y=60
+hint "frame popup link" index=3 kind=link url=https://example.org/frame-popup x=30 y=170
+hint "nested left" index=4 kind=button x=40 y=110
+hint "nested right" index=5 kind=button x=230 y=110
+hint "same left" index=6 kind=button x=430 y=60
+hint "same right" index=7 kind=button x=620 y=60
+hint "partial left" index=8 kind=button x=660 y=260
+# Nothing outside the viewport, in a transparent frame, or in a frame the page covers.
+no-hint "partial right"
+no-hint "transparent left"
+no-hint "covered left"
+no-hint "covered right"
+settle 0.5
+frame-differs before
+hint-label-shown "cross left"
+hint-label-shown "nested right"
+hint-label-shown "same right"
+hint-label-shown "partial left"
+{"type":"hints_narrow","id":1,"prefix":"s"}
+settle 0.5
+hint-label-shown "nested right"
+hint-label-shown "same left"
+hint-label-hidden "cross left"
+hint-label-hidden "top link"
+{"type":"hints_end","id":1,"activate":null}
+settle 0.5
+frame-same before
+
+# Each gets a click of the user's, in the process that hosts it.
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2
+hint "cross right"
+{"type":"hints_end","id":2,"activate":"$hint.index"}
+expect state "title=cross right:true"
+{"type":"hints","id":3,"alphabet":"asdf"}
+expect hints_list id=3
+hint "nested left"
+{"type":"hints_end","id":3,"activate":"$hint.index"}
+expect state "title=nested left:true"
+{"type":"hints","id":4,"alphabet":"asdf"}
+expect hints_list id=4
+hint "same right"
+{"type":"hints_end","id":4,"activate":"$hint.index"}
+expect state "title=same right:true"
+{"type":"hints","id":5,"alphabet":"asdf"}
+expect hints_list id=5
+hint "partial left"
+{"type":"hints_end","id":5,"activate":"$hint.index"}
+expect state "title=partial left:true"
+# A link to a new window in a frame of another site goes where a middle click goes.
+{"type":"hints","id":7,"alphabet":"asdf"}
+expect hints_list id=7
+hint "frame popup link"
+{"type":"hints_end","id":7,"activate":"$hint.index"}
+expect popup_blocked url=https://example.org/frame-popup
+{"type":"hints","id":6,"alphabet":"asdf"}
+expect hints_list id=6
+hint "top link"
+{"type":"hints_end","id":6,"activate":"$hint.index"}
+expect state title=hash:#top

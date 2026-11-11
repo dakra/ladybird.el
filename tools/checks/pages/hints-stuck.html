@@ -1,0 +1,11 @@
+<!doctype html>
+<title>start</title>
+<style>body{margin:0;font:16px sans-serif} button{position:absolute;left:20px;top:20px;width:160px;height:30px} #b{top:200px}</style>
+<p style="position:absolute;top:300px;left:20px">Some selectable text here for selection drag test lorem ipsum</p>
+<button id=a onmousedown="this.style.left='500px'">mover</button>
+<button id=b>other</button>
+<script>
+let moves = 0;
+addEventListener("mousemove", e => { moves++; });
+setInterval(() => { document.title = "active=" + document.querySelectorAll(":active").length + " hover=" + document.querySelectorAll("#b:hover").length + " sel=" + JSON.stringify(String(getSelection())); }, 100);
+</script>

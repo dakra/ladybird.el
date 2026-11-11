@@ -1,0 +1,9 @@
+<!doctype html>
+<title>start</title>
+<style>body{margin:0} button{position:absolute;left:20px;width:160px;height:30px}</style>
+<button style="top:20px">one</button>
+<button style="top:300px">two</button>
+<script>
+new MutationObserver(records => { for (const r of records) for (const n of r.addedNodes) if (n.localName === "ladybirdhints") { n.setAttribute("style", "position:absolute;left:0;top:0;transform:translate(400px,200px)"); document.title = "moved " + document.documentElement.children.length + " " + document.documentElement.outerHTML.includes("ladybirdhints"); } })
+  .observe(document.documentElement, { childList: true });
+</script>

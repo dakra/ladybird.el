@@ -1,0 +1,33 @@
+<!doctype html>
+<title>frame</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  button { position: absolute; top: 10px; width: 100px; }
+</style>
+<button id=left style="left: 10px"></button>
+<button id=right style="left: 200px"></button>
+<script>
+  const parameters = new URLSearchParams(location.search);
+  const name = parameters.get("name");
+  left.textContent = name + " left";
+  right.textContent = name + " right";
+  for (const button of [left, right])
+    button.onclick = event => top.postMessage(button.textContent + ":" + event.isTrusted, "*");
+  // A frame that keeps its process busy for a while once it loaded.
+  if (parameters.get("busy")) {
+    const end = Date.now() + Number(parameters.get("busy"));
+    while (Date.now() < end);
+  }
+  if (parameters.get("nested")) {
+    const popup = document.createElement("a");
+    popup.href = "https://example.org/frame-popup";
+    popup.target = "_blank";
+    popup.textContent = "frame popup link";
+    popup.style = "position: absolute; left: 10px; top: 120px";
+    document.body.appendChild(popup);
+    const nested = document.createElement("iframe");
+    nested.style = "position: absolute; left: 10px; top: 50px; width: 300px; height: 60px; border: 0";
+    nested.src = "http://127.0.0.1:" + location.port + "/hints-frame.html?name=nested";
+    document.body.appendChild(nested);
+  }
+</script>

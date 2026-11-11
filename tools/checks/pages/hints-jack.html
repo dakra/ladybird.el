@@ -1,0 +1,10 @@
+<!doctype html>
+<title>start</title>
+<style>body{margin:0;font:16px sans-serif} iframe{position:absolute;left:20px;top:50px;width:320px;height:60px;border:0}
+#cover{position:absolute;left:20px;top:50px;width:130px;height:60px;background:#08f;color:white}</style>
+<iframe id=f></iframe>
+<div id=cover onclick="document.title='cover clicked'">Play video</div>
+<script>
+f.src = location.protocol + "//localhost:" + location.port + "/hints-frame.html?name=victim";
+addEventListener("message", e => document.title = e.data);
+</script>

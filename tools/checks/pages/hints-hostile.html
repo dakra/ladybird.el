@@ -1,0 +1,29 @@
+<!doctype html>
+<title>hostile</title>
+<style>
+  body { margin: 0; font: 16px sans-serif; }
+  button { position: absolute; left: 20px; width: 160px; height: 30px; }
+</style>
+<button id=safe style="top: 20px" onclick="document.title = 'safe:' + event.isTrusted">safe button</button>
+<button id=decoy style="top: 80px" onclick="document.title = 'decoy'">decoy button</button>
+<button id=victim style="top: 80px" onmousedown="this.style.left = '400px'" onclick="document.title = 'victim'">victim button</button>
+<button id=shy style="top: 140px" onfocus="this.style.top = '400px'" onclick="document.title = 'shy:' + event.isTrusted">shy button</button>
+<script>
+  // Everything a script in the page could use to look at or report elements says something else.
+  Element.prototype.getBoundingClientRect = () => ({ x: 0, y: 0, left: 0, top: 0, width: 1, height: 1, right: 1, bottom: 1 });
+  Element.prototype.getClientRects = () => [];
+  Document.prototype.elementFromPoint = () => decoy;
+  JSON.stringify = () => "{}";
+  Object.defineProperty(HTMLElement.prototype, "innerText", { get: () => "fake" });
+  // After a press of X, the labels are taken out of the page as soon as they arrive; after a press of T, they are moved.
+  let tamper = null;
+  addEventListener("keydown", event => tamper = event.key);
+  new MutationObserver(records => {
+    for (const record of records)
+      for (const node of record.addedNodes)
+        if (node.localName === "ladybirdhints" && tamper === "x")
+          node.remove();
+        else if (node.localName === "ladybirdhints" && tamper === "t")
+          node.setAttribute("style", "position: absolute; left: 0; top: 0; transform: translate(0, 60px)");
+  }).observe(document.documentElement, { childList: true });
+</script>

@@ -1,0 +1,16 @@
+# A process that does not answer leaves only its frames out: run with --url http://127.0.0.1:PORT/hints-hung.html
+# --viewport 800x600@1, with the same port serving the pages on localhost.
+{"type":"set_focus","focused":true}
+sleep 2
+{"type":"hints","id":1,"alphabet":"asdf"}
+expect hints_list id=1 items#=1 timeout=3
+hint "hung top link"
+no-hint "hung left"
+{"type":"hints_end","id":1,"activate":null}
+expect-no hints_cancelled 0.5
+# Once it is done, its frame is listed again.
+sleep 8
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2 items#=3
+hint "hung left" x=30 y=60
+{"type":"hints_end","id":2,"activate":null}

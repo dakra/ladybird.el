@@ -1,0 +1,51 @@
+# A page that redefines what scripts use, tampers with the labels and moves elements cannot change the list or steer the
+# click: run with --url hints-hostile.html --viewport 800x600@1.
+{"type":"set_focus","focused":true}
+settle 0.5
+{"type":"hints","id":1,"alphabet":"asdf"}
+expect hints_list id=1 items#=3
+hint "safe button" index=0 kind=button x=20 y=20 width=160 height=30
+hint "victim button" index=1 kind=button x=20 y=80 width=160 height=30
+hint "shy button" index=2 kind=button x=20 y=140 width=160 height=30
+no-hint "decoy button"
+no-hint "fake"
+
+# An element that moves away when pressed does not get the click, and nothing else under the pointer gets it either.
+{"type":"hints_end","id":1,"activate":1}
+expect error id=1 "message~=before the click"
+expect-no state 1
+# Neither does one that moves away when it gets the focus from the press.
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2
+hint "shy button"
+{"type":"hints_end","id":2,"activate":"$hint.index"}
+expect error id=2 "message~=before the click"
+expect-no state 1
+# What stays where it is gets a click of the user's.
+{"type":"hints","id":3,"alphabet":"asdf"}
+expect hints_list id=3
+hint "safe button"
+{"type":"hints_end","id":3,"activate":"$hint.index"}
+expect state title=safe:true
+
+# A page that takes the labels out, or moves them onto other elements, gets no activation at all. (The victim moved away,
+# which uncovered the decoy.)
+{"type":"key","kind":"down","key":"X","code_point":120,"modifiers":0}
+{"type":"key","kind":"up","key":"X","code_point":120,"modifiers":0}
+{"type":"hints","id":4,"alphabet":"asdf"}
+expect hints_list id=4 items#=4
+settle 0.5
+no-color-in 0 0 800 600 fff3a3 6
+hint "safe button"
+{"type":"hints_end","id":4,"activate":"$hint.index"}
+expect error id=4 "message~=tampered"
+expect-no state 1
+{"type":"key","kind":"down","key":"T","code_point":116,"modifiers":0}
+{"type":"key","kind":"up","key":"T","code_point":116,"modifiers":0}
+{"type":"hints","id":5,"alphabet":"asdf"}
+expect hints_list id=5 items#=4
+settle 0.5
+hint "safe button"
+{"type":"hints_end","id":5,"activate":"$hint.index"}
+expect error id=5 "message~=tampered"
+expect-no state 1

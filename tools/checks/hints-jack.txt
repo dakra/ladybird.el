@@ -1,0 +1,17 @@
+# A page that covers part of a frame of another site does not get a click of the user's for what is under the cover:
+# run with --url http://127.0.0.1:PORT/hints-jack.html --viewport 800x600@1, with the same port serving localhost.
+{"type":"set_focus","focused":true}
+sleep 1.5
+{"type":"hints","id":1,"alphabet":"asdf"}
+expect hints_list id=1
+hint "victim left" x=30 y=60
+{"type":"hints_end","id":1,"activate":"$hint.index"}
+expect error id=1 "message~=before the click"
+{"type":"ping","id":"after"}
+expect-no state 1
+# What is not covered is clicked.
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2
+hint "victim right"
+{"type":"hints_end","id":2,"activate":"$hint.index"}
+expect state "title=victim right:true"

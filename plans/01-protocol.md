@@ -340,19 +340,37 @@ label, and the server activates that element. A server that implements them list
 
 | Server → client | Fields | Meaning |
 | --- | --- | --- |
-| `hints_list` | `view`, `id`, `items`, `truncated` | `items` is an array of `{index, label, kind, text, url, x, y, width, height}` in document order. `kind` is `"link"`, `"button"`, `"input"` (what takes typed text: a `textarea`, an element with `contenteditable`, an `input` of a type with a text field) or `"other"`. `text` is the element's visible text or its accessible name, at most 200 characters. `url` is the absolute link target of a `"link"`, else null; it is also null for a target longer than 16 KiB. `x`, `y`, `width`, `height` are the element's rectangle relative to the viewport in CSS pixels, which the page's zoom and the device pixel ratio scale to canvas pixels. `truncated` is true when the page has more than 1000 such elements in the viewport; the rest have no label |
-| `hints_cancelled` | `view`, `id` | The hint session ended without `hints_end`: another document became active, WebContent crashed, the page closed its view (`hints_cancelled` comes before that `view_closed`), or the page did not answer in time or answered with something unusable. The labels are gone. It can arrive in place of `hints_list`. A `close_view` from the client ends the session with `view_closed` alone |
+| `hints_list` | `view`, `id`, `items`, `truncated` | `items` is an array of `{index, label, kind, text, url, x, y, width, height}` in document order. `kind` is `"link"`, `"button"`, `"input"` (what takes typed text: a `textarea`, an element with `contenteditable`, an `input` of a type with a text field) or `"other"`. `text` is the element's visible text or its accessible name, at most 200 characters. `url` is the absolute link target of a `"link"`, else null; it is also null for a target longer than 16 KiB. `x`, `y`, `width`, `height` are the element's rectangle relative to the viewport of the top-level document, also for an element in a frame, cut to what shows of it, in CSS pixels, which the page's zoom and the device pixel ratio scale to canvas pixels. `truncated` is true when elements were left out because there are more than 1000; they have no label |
+| `hints_cancelled` | `view`, `id` | The hint session ended without `hints_end`: another document became active, WebContent crashed, the page closed its view (`hints_cancelled` comes before that `view_closed`), or the process of the top-level document did not answer in time. The labels are gone. It can arrive in place of `hints_list`. A `close_view` from the client ends the session with `view_closed` alone |
 
 Rules:
 
-- An element is listed when it can be activated (`a[href]`, `area[href]`, `button`,
-  `input` other than `type=hidden`, `select`, `textarea`, `summary`, `label`, an
-  element with `contenteditable`, an `onclick` attribute, a `tabindex` of 0 or more, or
-  a `role` of `button`, `link`, `tab`, `menuitem`, `checkbox`, `radio`, `switch` or
-  `option`), is not disabled, has a rectangle of at least 1×1 CSS pixels that
-  intersects the viewport, and is not hidden by `visibility` or `display`. Only the
-  top-level document is labelled, with what is in its open shadow roots; frames and
-  closed shadow roots are not. An `area` is not listed (Ladybird gives it no box).
+- A candidate is an element that can be activated: `a[href]` (also an SVG `a` with
+  `xlink:href`), `button`, `input` other
+  than `type=hidden`, `select`, `textarea`, `summary`, `label`, an element with
+  `contenteditable`, an `onclick` attribute, a `tabindex` of 0 or more, or a `role` of
+  `button`, `link`, `tab`, `menuitem`, `checkbox`, `radio`, `switch` or `option`.
+  Candidates come from the top-level document, from the document of every frame,
+  whatever its origin, and from open and closed shadow roots. An `area` is not a
+  candidate (Ladybird gives it no box), and an SVG document gets no labels.
+- A candidate is listed when a click of the mouse could reach it: it is not disabled,
+  neither it nor an ancestor has an opacity of 0, its box is at least 3×3 CSS pixels,
+  and at one of up to 34 points sampled over it that lies in the viewport and in the
+  visible part of every frame around it, the page's hit test lands on it or on
+  something inside it. That leaves out what is clipped, covered, moved out of view or
+  made unhittable with `pointer-events`.
+- Of two listed candidates for one thing, one is dropped: a `label` whose control is
+  listed, and a candidate that is one only by `label`, `onclick`, `tabindex` or `role`
+  and contains another listed candidate.
+- A frame that another process hosts (a frame of another site) counts as visible when
+  the hit test of the document around it, at the centre of the frame's visible part,
+  lands on the frame. What covers only a part of such a frame is not noticed: an
+  element under it is listed, and its label is covered with it.
+- A label straddles the top left corner of the first piece of the element that shows,
+  a few pixels up and left of it, inside what shows of its document.
+- The documents of a page can live in several processes. Once the process of the
+  top-level document has answered, the others have half a second; the frames of a
+  process that takes longer are left out.
 - Labels all have the same length, the shortest that gives every item its own label, so
   no label is the prefix of another.
 - The labels are part of the page's frames: the client draws nothing. They stay where
@@ -368,23 +386,24 @@ Rules:
   removes the labels and activates nothing.
 - Before `hints_list` has been sent, a `hints_narrow` takes effect when the labels are
   drawn, and a `hints_end` ends the session and activates nothing.
-- Activation is a mouse click at a point of the element that the page's hit test gives
-  to it, so the page sees a click of the user. An element that is covered everywhere
-  gets a click made by script instead, which a page does not treat as the user's: a
-  popup or a chooser may not open from it.
+- Activation is a mouse click at a point of the element, sent the way a click of the
+  user is, so the page takes it for one. The press and the release are delivered only
+  if the hit test still lands on the element when each is dispatched, in every
+  document the click passes on its way into a frame. An element that moved is clicked
+  where it is. One that went away or got covered since `hints_list` is not activated,
+  and the server answers the `hints_end` with an `error` that carries its `id`.
 - A page with nothing to label gets `hints_list` with empty `items`; the hint session
   is over then and needs no `hints_end`.
 - A disconnecting or replaced client ends the hint session; a reconnecting client is
   not told about it.
-- The script that finds the elements and draws the labels runs in the page, and the
-  page can interfere with it: it can see the labels, falsify every field of an item,
-  and draw a label on another element than the one the item's `index` stands for. The
-  client treats the items like any other strings from a page and uses them for display
-  only, except that it may load a `url` the user chose, under the rules it has for a
-  link the user clicked. The page can also move the click of an activation to any
-  point of the view, a frame of another site included. A page can do the same to a
-  click of the mouse by putting what it wants clicked under the pointer, so an
-  activation gives it no more than a mouse click in the page does.
+- The server finds the elements, makes the list and delivers the click outside the
+  reach of the page's script, so a page cannot falsify the list or move the click to
+  another element. The labels are elements in the page, inside a shadow root its
+  script cannot open: a page can notice their host element and remove, hide or move
+  it. The server checks the chosen label at activation and activates nothing when it
+  is not where it was put (an `error` with the `id`). `text` and `url` are the
+  page's content; the client treats them like any other strings from a page, and
+  loads a `url` the user chose under the rules it has for a link the user clicked.
 
 ## 7. Dialogs and pickers
 

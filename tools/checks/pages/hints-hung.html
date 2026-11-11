@@ -1,0 +1,12 @@
+<!doctype html>
+<title>hung</title>
+<style>
+  body { margin: 0; font: 16px sans-serif; }
+  iframe { position: absolute; left: 20px; top: 50px; width: 320px; height: 60px; border: 0; }
+</style>
+<a href="#top" style="position: absolute; left: 20px; top: 10px">hung top link</a>
+<iframe id=frame></iframe>
+<script>
+  // The frame is of another site, whose process is busy for eight seconds after it loaded the frame.
+  frame.src = location.protocol + "//localhost:" + location.port + "/hints-frame.html?name=hung&busy=8000";
+</script>

@@ -1,14 +1,51 @@
 #!/bin/bash
-# Hints (protocol section 6.1): the hints.txt script on stdio, then what ends a session from outside.
+# Hints (protocol section 6.1): the scripts on stdio, frames of other sites over HTTP, then what ends a session from
+# outside.
 set -u
 . "$(dirname "$0")/common.sh"
 
 "${CLIENT[@]}" --server "$SERVER" --timeout 15 --url "$(page hints.html)" --script "$CHECKS_DIR/hints.txt" \
     || fail "hints script"
+"${CLIENT[@]}" --server "$SERVER" --timeout 15 --url "$(page hints-hidden.html)" --script "$CHECKS_DIR/hints-hidden.txt" \
+    || fail "hints-hidden script"
+"${CLIENT[@]}" --server "$SERVER" --timeout 15 --url "$(page hints-hostile.html)" --script "$CHECKS_DIR/hints-hostile.txt" \
+    || fail "hints-hostile script"
+
+# The pages are served on 127.0.0.1 and on localhost, which are different sites, so the frames of the other one are in
+# processes of their own unless site isolation is limited to top-level documents.
+PORT="$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+python3 -I -m http.server "$PORT" --bind 127.0.0.1 --directory "$CHECKS_DIR/pages" >"$WORK/http.log" 2>&1 &
+HTTP_PID=$!
+SERVER_PIDS+=("$HTTP_PID")
+for _ in $(seq 100); do
+    curl -s -o /dev/null "http://127.0.0.1:$PORT/hints-frames.html" && break
+    sleep 0.1
+done
+# With site isolation, the frames of the other site are in processes of their own: the frames check runs on a server
+# whose processes are then counted.
+FRAMES_SOCKET="$WORK/f.sock"
+start_socket_server "$FRAMES_SOCKET"
+FRAMES_SERVER_PID="${SERVER_PIDS[${#SERVER_PIDS[@]} - 1]}"
+for name in frames jack hung; do
+    "${CLIENT[@]}" --socket "$FRAMES_SOCKET" --timeout 15 --url "http://127.0.0.1:$PORT/hints-$name.html" \
+        --script "$CHECKS_DIR/hints-$name.txt" || fail "hints-$name script"
+    if [ "$name" = frames ]; then
+        [ "$(pgrep -P "$FRAMES_SERVER_PID" WebContent | wc -l)" -ge 2 ] || fail "the frames of another site share the page's process"
+    fi
+done
+kill -TERM "$FRAMES_SERVER_PID"
+wait "$FRAMES_SERVER_PID"
+SERVER_PIDS=("$HTTP_PID")
+
+# With site isolation limited to top-level documents, every frame is in the page's process.
+"${CLIENT[@]}" --server "$SERVER --site-isolation=top-level" --timeout 15 --url "http://127.0.0.1:$PORT/hints-frames.html" \
+    --script "$CHECKS_DIR/hints-frames.txt" || fail "hints-frames script with site isolation for top-level documents"
+"${CLIENT[@]}" --server "$SERVER" --timeout 15 --url "$(page hints-shift.html)" --script "$CHECKS_DIR/hints-reviewed.txt" \
+    || fail "hints-reviewed script"
 
 SOCKET="$WORK/h.sock"
 start_socket_server "$SOCKET"
-SERVER_PID="${SERVER_PIDS[0]}"
+SERVER_PID="${SERVER_PIDS[${#SERVER_PIDS[@]} - 1]}"
 
 # wait_for_line FILE TEXT: waits until a background client printed TEXT.
 wait_for_line() {
@@ -42,5 +79,5 @@ wait $CRASHING || { cat "$WORK/crash.out" >&2; fail "no hints_cancelled after th
 
 kill -TERM "$SERVER_PID"
 wait "$SERVER_PID"
-SERVER_PIDS=()
+SERVER_PIDS=("$HTTP_PID")
 echo "hints: ok"

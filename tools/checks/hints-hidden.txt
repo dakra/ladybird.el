@@ -1,0 +1,101 @@
+# Hints list only what a mouse click could reach: run with --url hints-hidden.html --viewport 800x600@1.
+{"type":"set_focus","focused":true}
+settle 0.5
+{"type":"hints","id":1,"alphabet":"asdf"}
+expect hints_list id=1 items#=13 truncated=false
+hints-valid asdf
+# Menus hidden by opacity, a collapsed box, a transform or pointer-events, and links under a modal, are left out.
+no-hint "opacity link"
+no-hint "collapsed link"
+no-hint "moved link"
+no-hint "no pointer link"
+no-hint "under modal link"
+hint "modal button" kind=button x=420 y=360
+# A visually hidden radio is left out, and its label stands in for it.
+hint "radio label" index=0 kind=other x=40 y=180
+# A label whose control is listed is left out.
+hint "wrapped check" index=1 kind=other x=24 y=223 width=13 height=13
+# A wrapper that is clickable only by onclick, tabindex or role is left out around a listed link, kept around nothing.
+hint "wrapped link" index=2 kind=link x=24 y=264
+hint "plain card" index=3 kind=button x=20 y=300
+# The label of a link that wraps sits at the start of its first line box, not at its bounding box.
+hint "a link that wraps" index=4 kind=link x=20 y=330
+settle 0.5
+color-in 120 328 30 14 fff3a3 6
+no-color-in 18 328 40 14 fff3a3 6
+# An SVG link, an element with display: contents (by the boxes of its children), and a button of which only a strip
+# below a fixed header shows.
+hint "svg link" kind=link url~=hints-hidden.html#svglink x=420
+hint "contents button" kind=button x=420 y=60
+hint "peeking button" kind=button x=610 y=118
+# A closed shadow root is labelled too.
+hint "closed shadow button" index=5 kind=button x=20 y=400
+
+# Activation of each.
+{"type":"hints_end","id":1,"activate":0}
+expect state title=radio:true
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2
+hint "closed shadow button"
+{"type":"hints_end","id":2,"activate":"$hint.index"}
+expect state title=closed:true
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2
+hint "modal button"
+{"type":"hints_end","id":2,"activate":"$hint.index"}
+expect state title=modal:true
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2
+hint "plain card"
+{"type":"hints_end","id":2,"activate":"$hint.index"}
+expect state title=card:true
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2
+hint "a link that wraps"
+{"type":"hints_end","id":2,"activate":"$hint.index"}
+expect state title=hash:#wrap
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2
+hint "svg link"
+{"type":"hints_end","id":2,"activate":"$hint.index"}
+expect state title=hash:#svglink
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2
+hint "contents button"
+{"type":"hints_end","id":2,"activate":"$hint.index"}
+expect state title=contents:true
+{"type":"hints","id":2,"alphabet":"asdf"}
+expect hints_list id=2
+hint "peeking button"
+{"type":"hints_end","id":2,"activate":"$hint.index"}
+expect state title=peeking:true
+
+# An element that moved since the list is clicked where it is now.
+{"type":"hints","id":5,"alphabet":"asdf"}
+expect hints_list id=5
+hint "movable button" y=180
+{"type":"key","kind":"down","key":"M","code_point":109,"modifiers":0}
+{"type":"key","kind":"up","key":"M","code_point":109,"modifiers":0}
+sleep 0.3
+{"type":"hints_end","id":5,"activate":"$hint.index"}
+expect state title=movable:true
+
+# An element removed, or covered, after the list is not activated, and the client is told.
+{"type":"hints","id":3,"alphabet":"asdf"}
+expect hints_list id=3
+hint "removable button"
+{"type":"key","kind":"down","key":"R","code_point":114,"modifiers":0}
+{"type":"key","kind":"up","key":"R","code_point":114,"modifiers":0}
+sleep 0.3
+{"type":"hints_end","id":3,"activate":"$hint.index"}
+expect error id=3 "message~=gone or covered"
+expect-no state 1
+{"type":"hints","id":4,"alphabet":"asdf"}
+expect hints_list id=4
+hint "coverable button"
+{"type":"key","kind":"down","key":"C","code_point":99,"modifiers":0}
+{"type":"key","kind":"up","key":"C","code_point":99,"modifiers":0}
+sleep 0.3
+{"type":"hints_end","id":4,"activate":"$hint.index"}
+expect error id=4 "message~=gone or covered"
+expect-no state 1

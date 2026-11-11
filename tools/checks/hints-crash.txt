@@ -1,7 +1,7 @@
 # A hint session ends with hints_cancelled when the page's process dies.
 settle 0.3
 {"type":"hints","id":21,"alphabet":"asdf"}
-expect hints_list id=21 items#=12
+expect hints_list id=21 items#=10
 echo labels are shown
 expect hints_cancelled id=21 timeout=20
 expect crashed
