@@ -40,8 +40,8 @@ SERVER_PIDS=("$HTTP_PID")
 # With site isolation limited to top-level documents, every frame is in the page's process.
 "${CLIENT[@]}" --server "$SERVER --site-isolation=top-level" --timeout 15 --url "http://127.0.0.1:$PORT/hints-frames.html" \
     --script "$CHECKS_DIR/hints-frames.txt" || fail "hints-frames script with site isolation for top-level documents"
-"${CLIENT[@]}" --server "$SERVER" --timeout 15 --url "$(page hints-shift.html)" --script "$CHECKS_DIR/hints-reviewed.txt" \
-    || fail "hints-reviewed script"
+"${CLIENT[@]}" --server "$SERVER" --timeout 15 --url "$(page hints-shift.html)" --script "$CHECKS_DIR/hints-refused.txt" \
+    || fail "hints-refused script"
 
 SOCKET="$WORK/h.sock"
 start_socket_server "$SOCKET"

@@ -1,0 +1,10 @@
+# A client that cannot map the segments gets the frames of every view on the stream: run with --shm --fail-shm
+# --url text.html --viewport 320x240@1.
+{"type":"create_view","width":200,"height":150,"dpr":1,"url":"$pages/animate.html","request":2}
+expect view_created view=2
+expect-frame view=2 full=true encoding=zstd width=200 height=150
+sleep 0.5
+frames 3 10000 view=2
+{"type":"load","view":1,"url":"$pages/animate.html"}
+expect state view=1 title=animate loading=false
+expect-frame view=1 encoding=zstd

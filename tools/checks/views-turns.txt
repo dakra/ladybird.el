@@ -1,0 +1,101 @@
+# The views' turns on the connection while one of them is held up: run with --url text.html --viewport 400x300@1 on a
+# server with --expose-internals-object.
+settle 0.5
+{"type":"create_view","width":200,"height":150,"dpr":1,"url":"$pages/animate.html","request":2}
+expect view_created view=2
+expect-frame view=2 full=true
+sleep 0.5
+
+# A page that sets a title of 1 MiB over and over while the client reads nothing neither costs the client its
+# connection nor keeps the other views' frames behind its titles.
+{"type":"load_html","view":1,"html":"<script>let i = 0; const big = 'x'.repeat(1 << 20); setInterval(() => { document.title = (i++) + big; if (i == 2000) document.title = 'done'; }, 0)</script>"}
+stall 6
+sleep 0.5
+frames 0 100000 view=2
+sleep 1
+frames 5 10000 view=2
+expect state view=1 title=done timeout=60
+{"type":"ping","id":"alive"}
+expect pong id=alive
+
+# A view whose frames the client does not acknowledge holds up no other view.
+ack off view=1
+{"type":"load","view":1,"url":"$pages/animate.html"}
+expect state view=1 title=animate loading=false
+sleep 0.5
+frames 0 10000 view=1
+frames 0 10000 view=2
+sleep 1
+frames 0 1 view=1
+frames 5 10000 view=2
+ack on view=1
+sleep 0.5
+frames 3 10000 view=1
+
+# While a band of one view's frame is not acknowledged, the other views wait for the rest of that frame. Hiding the
+# view ends its frame, and the others go on; shown again, it starts with a whole frame.
+{"type":"load","view":1,"url":"$pages/text.html"}
+expect state view=1 title=text loading=false
+sleep 1
+ack off view=1 bands
+{"type":"set_viewport","view":1,"width":4200,"height":4100,"dpr":1}
+expect-frame view=1 full=true more=true width=4200 height=4100
+frames 0 10000 view=2
+expect-no-frame 1 view=2
+{"type":"set_visibility","view":1,"visible":false}
+expect-frame view=2
+sleep 0.5
+frames 5 10000 view=2
+ack on view=1
+{"type":"set_visibility","view":1,"visible":true}
+expect-frame view=1 full=true more=true width=4200 height=4100
+expect-frame view=1 more=false width=4200 height=4100
+sleep 0.5
+
+# Closing the view does too.
+ack off view=1 bands
+{"type":"set_viewport","view":1,"width":4200,"height":4099,"dpr":1}
+expect-frame view=1 full=true more=true width=4200 height=4099
+frames 0 10000 view=2
+expect-no-frame 1 view=2
+{"type":"close_view","view":1}
+expect view_closed view=1 reason=client
+expect-frame view=2
+sleep 0.5
+frames 5 10000 view=2
+
+# So does a crash of the view's page, after which the view starts with a whole frame.
+{"type":"create_view","width":400,"height":300,"dpr":1,"request":3}
+expect view_created view=3
+{"type":"load_html","view":3,"html":"<title>crash</title><script>onkeydown = () => internals.panicRenderStateForTesting()</script>"}
+expect state view=3 title=crash loading=false
+sleep 1
+ack off view=3 bands
+{"type":"set_viewport","view":3,"width":4200,"height":4100,"dpr":1}
+expect-frame view=3 full=true more=true width=4200 height=4100
+frames 0 10000 view=2
+expect-no-frame 1 view=2
+{"type":"set_focus","view":3,"focused":true}
+{"type":"key","view":3,"kind":"down","key":"X","code_point":120,"modifiers":0}
+expect crashed view=3 timeout=20
+expect-frame view=2
+sleep 0.5
+frames 5 10000 view=2
+ack on view=3
+{"type":"set_viewport","view":3,"width":400,"height":300,"dpr":1}
+{"type":"load","view":3,"url":"$pages/text.html"}
+expect state view=3 title=text loading=false
+expect-frame view=3 full=true width=400 height=300
+
+# A view its page closed is closed once: a close_view for it gets no answer.
+{"type":"create_view","width":200,"height":150,"dpr":1,"url":"data:text/html,<title>closing</title><script>onkeydown=()=>window.close()</script>","request":4}
+expect view_created view=4
+expect state view=4 title=closing loading=false
+{"type":"set_focus","view":4,"focused":true}
+{"type":"key","view":4,"kind":"down","key":"X","code_point":120,"modifiers":0}
+expect view_closed view=4 reason=closed
+{"type":"close_view","view":4}
+expect-no view_closed 1
+expect-no error 0.5
+{"type":"close_view","view":99}
+expect error view=99 "message=unknown view"

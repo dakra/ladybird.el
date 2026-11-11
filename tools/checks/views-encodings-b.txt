@@ -1,0 +1,8 @@
+# The second client, which maps no segments and takes raw frames: run with --socket --no-view --encodings raw.
+welcome shm=false encoding=raw views#=2
+expect-frame view=1 full=true encoding=raw
+expect-frame view=2 full=true encoding=raw
+sleep 0.5
+frames 3 10000 view=2
+expect-frame view=2 encoding=raw
+expect-no shm 0.5

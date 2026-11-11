@@ -1,0 +1,6 @@
+# The first of three clients of one server: run with --socket --shm --url text.html. It leaves two views behind.
+expect-frame view=1 encoding=shm full=true
+{"type":"create_view","width":200,"height":150,"dpr":1,"url":"$pages/animate.html","request":2}
+expect view_created view=2
+expect-frame view=2 encoding=shm full=true
+echo views are left

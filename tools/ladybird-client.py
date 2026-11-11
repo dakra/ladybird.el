@@ -25,18 +25,27 @@ Script lines (--script FILE, one command per line, `#` starts a comment):
                             equal the JSON values V (K may be dotted;
                             K~=TEXT matches a substring, K#=N a string or
                             list of length N); timeout=N overrides the default
-  expect-frame [K=V ...]    wait for a frame; K is one of full, more, width,
-                            height, dpr, encoding (raw, zstd, shm)
-  expect-no-frame N         fail when a frame arrives within N seconds
+  expect-frame [K=V ...]    wait for a frame; K is one of view, full, more,
+                            width, height, dpr, encoding (raw, zstd, shm)
+  expect-no-frame N [view=V]
+                            fail when a frame (of view V) arrives within N
+                            seconds
+  welcome [K=V ...]         fail unless the welcome message has those fields
+  use VIEW                  make VIEW the view that messages without a "view"
+                            and the pixel, png and frame commands are about
   expect-eof [N]            wait for the server to close the stream
-  expect-no TYPE N          fail when a control message of TYPE arrives
-                            within N seconds
+  expect-no TYPE N [K=V ...]
+                            fail when a control message of TYPE (with those
+                            fields) arrives within N seconds
   expect-order TYPE...      wait for control messages of these types and
                             fail unless they arrived in this order
-  ack on|off                start or stop acknowledging frames; `on` also
-                            acknowledges what is outstanding
-  frames MIN [MAX]          fail unless MIN..MAX frames arrived since the last
-                            `frames` or `ack` command
+  ack on|off [view=V] [bands]
+                            start or stop acknowledging frames (of view V;
+                            with bands, only those with more bands to follow);
+                            `on` also acknowledges what is outstanding
+  frames MIN [MAX] [view=V] fail unless MIN..MAX frames (of view V) arrived
+                            since the last `frames` (of that view) or `ack`
+                            command
   pixel X Y RRGGBB [TOL]    fail unless the store's pixel has that colour
   png PATH                  write the frame store as a PNG
   png-size PATH W H         fail unless the PNG file has that size
@@ -44,6 +53,9 @@ Script lines (--script FILE, one command per line, `#` starts a comment):
   remove PATH               delete a file
   stall N                   neither read nor write for N seconds
   echo TEXT                 print TEXT to stderr
+  keep NAME                 remember the last matched message as NAME;
+                            "$kept.NAME.KEY" then stands for its fields
+  distinct WORD...          fail unless the words differ from each other
   frame-save NAME           remember the frame store as NAME
   frame-same NAME           fail unless the frame store equals NAME
   frame-differs NAME        fail if the frame store equals NAME
@@ -135,6 +147,10 @@ class View:
         self.segment = None
         self.next_seq = None
         self.state = {}
+        # Whether this client last asked for the view to be hidden.
+        self.hidden = False
+        # Whether the next frame must be a whole one, as the view's page crashed.
+        self.needs_full = False
 
 
 class Client:
@@ -151,11 +167,18 @@ class Client:
         self.view_id = None
         self.welcome = None
         self.acking = not args.no_ack
+        self.views_not_acked = set()
+        self.views_bands_not_acked = set()
         self.unacked = []
+        self.kept = {}
         self.last = {}
         self.last_frame_time = time.monotonic()
         self.frame_count = 0
         self.frame_mark = 0
+        self.frame_counts = {}
+        self.frame_marks = {}
+        # The view whose frame is under way in bands, which no other view's frame may come between.
+        self.banding_view = None
         self.wire_bytes = 0
         self.decoded_bytes = 0
         self.encoding_counts = {}
@@ -232,6 +255,12 @@ class Client:
         if self.args.dump:
             print("> " + json.dumps(message, ensure_ascii=False), file=sys.stderr)
         self.write(proto.encode_control(message))
+        if message.get("type") == "set_visibility" and isinstance(message.get("view"), int):
+            # Hiding a view ends a frame it was sending in bands; bands of it already on their way may still come.
+            view = self.view(message["view"])
+            view.hidden = message.get("visible") is False
+            if view.hidden and self.banding_view == view.id:
+                self.banding_view = None
 
     def pump(self, timeout):
         """Read what arrives within TIMEOUT seconds; return whether anything did."""
@@ -303,6 +332,12 @@ class Client:
                 print(f"cannot map {message['name']}: {error}", file=sys.stderr)
                 self.shm_failures += 1
                 self.send({"type": "shm_failed", "view": view.id})
+        elif kind in ("view_closed", "crashed"):
+            # Either ends a frame the view was sending in bands.
+            if self.banding_view == message.get("view"):
+                self.banding_view = None
+            if kind == "crashed":
+                self.view(message["view"]).needs_full = True
         elif kind == "error":
             self.errors.append(message)
         elif kind == "reject":
@@ -319,10 +354,18 @@ class Client:
         if header.reserved != 0:
             raise CheckFailed("frame header has a non-zero reserved field")
         view = self.view(header.view)
+        if self.banding_view is not None and header.view != self.banding_view:
+            raise CheckFailed(f"a frame of view {header.view} came between the bands of a frame of view {self.banding_view}")
+        if not view.hidden:
+            self.banding_view = header.view if header.more else None
+        if view.needs_full and not header.full:
+            raise CheckFailed(f"the first frame of view {header.view} after its page crashed is not whole")
+        view.needs_full = False
         if view.next_seq is not None and header.seq != view.next_seq:
             raise CheckFailed(f"frame seq {header.seq}, expected {view.next_seq}")
-        if view.next_seq is None and header.seq != 1 and not self.welcome.get("views"):
-            raise CheckFailed(f"first frame has seq {header.seq}")
+        welcomed = {description.get("view") for description in self.welcome.get("views", [])}
+        if view.next_seq is None and header.seq != 1 and header.view not in welcomed:
+            raise CheckFailed(f"first frame of view {header.view} has seq {header.seq}")
         view.next_seq = header.seq + 1
 
         fw, fh = header.frame_width, header.frame_height
@@ -359,6 +402,7 @@ class Client:
             proto.compose(view.store, fw, fh, header, pixels)
 
         self.frame_count += 1
+        self.frame_counts[header.view] = self.frame_counts.get(header.view, 0) + 1
         self.wire_bytes += len(payload) + proto.RECORD_HEADER.size
         self.decoded_bytes += header.raw_size
         name = ENCODING_NAMES[header.encoding]
@@ -371,7 +415,8 @@ class Client:
             print(f"< frame seq={header.seq} view={header.view} {fw}x{fh}@{header.dpr:g} "
                   f"damage={header.damage_x},{header.damage_y} {header.damage_width}x{header.damage_height} "
                   f"{name}{flags} bytes={len(body)}{'' if applied else ' (not applied)'}", file=sys.stderr)
-        if self.acking:
+        withheld = header.view in self.views_not_acked or (header.more and header.view in self.views_bands_not_acked)
+        if self.acking and not withheld:
             self.send_ack(header.view, header.seq)
         else:
             self.unacked.append((header.view, header.seq))
@@ -502,7 +547,7 @@ class Client:
         if self.view_id is not None:
             text = text.replace('"$view"', str(self.view_id))
         text = text.replace('"$id"', json.dumps(self.last.get("id")))
-        for prefix, source in (('"$last.', self.last), ('"$hint.', self.hint)):
+        for prefix, source in (('"$last.', self.last), ('"$hint.', self.hint), ('"$kept.', self.kept)):
             while prefix in text:
                 start = text.index(prefix)
                 end = text.index('"', start + 1)
@@ -543,19 +588,28 @@ class Client:
         elif command == "expect-frame":
             self.expect_frame([frame_condition(word) for word in words], timeout)
         elif command == "expect-no-frame":
-            count = self.frame_count
+            only = next((int(word[5:]) for word in words[1:] if word.startswith("view=")), None)
+            count = lambda: self.frame_count if only is None else self.frame_counts.get(only, 0)
+            before = count()
             self.pump_for(float(words[0]))
-            if self.frame_count != count:
-                raise CheckFailed(f"{self.frame_count - count} frame(s) arrived")
+            if count() != before:
+                raise CheckFailed(f"{count() - before} frame(s) arrived")
+        elif command == "welcome":
+            for condition, word in ((control_condition(word), word) for word in words):
+                if not condition(self.welcome):
+                    raise CheckFailed(f"welcome does not have {word}: {json.dumps(self.welcome)[:300]}")
+        elif command == "use":
+            self.view_id = int(words[0])
         elif command == "expect-no":
-            def arrived():
-                return any(message.get("type") == words[0] for message in self.inbox)
+            conditions = [control_condition(word) for word in words[2:]]
+            def matching():
+                return next((message for message in self.inbox if message.get("type") == words[0]
+                             and all(match(message) for match in conditions)), None)
             deadline = time.monotonic() + float(words[1])
-            while not arrived() and time.monotonic() < deadline:
+            while not matching() and time.monotonic() < deadline:
                 self.pump(min(0.1, max(0, deadline - time.monotonic())))
-            if arrived():
-                message = next(message for message in self.inbox if message.get("type") == words[0])
-                raise CheckFailed(f"unexpected {json.dumps(message)[:300]}")
+            if matching():
+                raise CheckFailed(f"unexpected {json.dumps(matching())[:300]}")
         elif command == "expect-order":
             def positions():
                 types = [message.get("type") for message in self.inbox]
@@ -570,17 +624,40 @@ class Client:
                     raise CheckFailed("the server kept the stream open")
                 self.pump(0.1)
         elif command == "ack":
-            self.acking = words[0] == "on"
-            self.frame_mark = self.frame_count
-            if self.acking:
-                for view_id, seq in self.unacked:
-                    self.send_ack(view_id, seq)
-                self.unacked.clear()
+            only = next((int(word[5:]) for word in words[1:] if word.startswith("view=")), None)
+            if only is None:
+                self.acking = words[0] == "on"
+                self.frame_mark = self.frame_count
+                self.views_not_acked.clear()
+                self.views_bands_not_acked.clear()
+            elif words[0] == "on":
+                self.views_not_acked.discard(only)
+                self.views_bands_not_acked.discard(only)
+            elif "bands" in words:
+                self.views_bands_not_acked.add(only)
+            else:
+                self.views_not_acked.add(only)
+            outstanding = [(view_id, seq) for view_id, seq in self.unacked
+                           if self.acking and view_id not in self.views_not_acked]
+            for view_id, seq in outstanding:
+                self.send_ack(view_id, seq)
+            self.unacked = [entry for entry in self.unacked if entry not in outstanding]
+        elif command == "keep":
+            self.kept[words[0]] = self.last
+        elif command == "distinct":
+            if len(set(words)) != len(words):
+                raise CheckFailed(f"the same value more than once in {words}")
         elif command == "frames":
+            only = next((int(word[5:]) for word in words if word.startswith("view=")), None)
+            words = [word for word in words if not word.startswith("view=")]
             low = int(words[0])
             high = int(words[1]) if len(words) > 1 else low
-            count = self.frame_count - self.frame_mark
-            self.frame_mark = self.frame_count
+            if only is None:
+                count = self.frame_count - self.frame_mark
+                self.frame_mark = self.frame_count
+            else:
+                count = self.frame_counts.get(only, 0) - self.frame_marks.get(only, 0)
+                self.frame_marks[only] = self.frame_counts.get(only, 0)
             if not low <= count <= high:
                 raise CheckFailed(f"{count} frame(s) arrived, expected {low}..{high}")
         elif command == "pixel":
@@ -802,7 +879,7 @@ def frame_condition(word):
     key, _, text = word.partition("=")
     value = parse_value(text) if text else True
     getters = {
-        "full": lambda h: h.full, "more": lambda h: h.more,
+        "view": lambda h: h.view, "full": lambda h: h.full, "more": lambda h: h.more,
         "width": lambda h: h.frame_width, "height": lambda h: h.frame_height,
         "dpr": lambda h: h.dpr, "encoding": lambda h: ENCODING_NAMES[h.encoding],
         "damage_width": lambda h: h.damage_width, "damage_height": lambda h: h.damage_height,

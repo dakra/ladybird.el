@@ -1,0 +1,9 @@
+# A client that leaves views behind: one with an alert open, one hidden. Run with --socket and --url text.html.
+settle 0.5
+{"type":"create_view","width":320,"height":240,"dpr":1,"url":"$pages/animate.html","request":2}
+expect view_created view=2
+expect-frame view=2 full=true
+{"type":"set_visibility","view":2,"visible":false}
+{"type":"load_html","view":1,"html":"<title>waiting</title><script>setTimeout(() => alert('still here'), 100)</script>"}
+expect dialog view=1 kind=alert
+echo views are left

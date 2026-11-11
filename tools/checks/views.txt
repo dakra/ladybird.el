@@ -1,0 +1,135 @@
+# Several views on one connection: run with --url text.html --viewport 400x300@1 on a server with
+# --emacs-max-views=3 --expose-internals-object.
+welcome max_views=3
+{"type":"set_focus","focused":true}
+settle 0.5
+
+# Each view has its own page, frames and acknowledgements; the client checks that the bands of a frame are not split.
+{"type":"create_view","width":320,"height":240,"dpr":1,"url":"$pages/animate.html","request":2}
+expect view_created view=2 request=2 width=320 height=240
+expect-frame view=2 full=true width=320 height=240
+{"type":"create_view","width":200,"height":150,"dpr":1,"url":"data:text/html,<body style=\"margin:0;background:%23ff0000\"><div id=b style=\"position:absolute;left:150px;width:10px;height:10px;background:%230000ff\"></div><script>let y=0;function s(){y=(y+1)%25140;b.style.top=y+\"px\";requestAnimationFrame(s)}requestAnimationFrame(s)</script>","request":3}
+expect view_created view=3 request=3 width=200 height=150
+expect-frame view=3 full=true width=200 height=150
+sleep 1
+use 3
+pixel 10 10 ff0000
+use 1
+pixel 390 290 ffffff
+frames 5 10000 view=2
+frames 5 10000 view=3
+
+# There are as many views as the server can have.
+{"type":"create_view","width":200,"height":150,"dpr":1,"request":4}
+expect error request=4 "message~=as many as it can have"
+
+# A hidden view sends no frames while another animates, and starts with a whole frame when shown again.
+{"type":"set_visibility","view":2,"visible":false}
+sleep 0.3
+frames 0 10000 view=2
+frames 0 10000 view=3
+expect-no-frame 1 view=2
+frames 5 10000 view=3
+{"type":"set_visibility","view":2,"visible":true}
+expect-frame view=2 full=true
+sleep 0.5
+frames 5 10000 view=2
+# So does a view whose page does not change.
+{"type":"set_visibility","view":1,"visible":false}
+{"type":"set_visibility","view":3,"visible":false}
+sleep 0.5
+{"type":"set_visibility","view":1,"visible":true}
+{"type":"set_visibility","view":3,"visible":true}
+expect-frame view=1 full=true
+expect-frame view=3 full=true
+# The page of a hidden view sees itself hidden.
+{"type":"load_html","view":1,"html":"<script>setInterval(() => document.title = 'vis=' + document.visibilityState, 50)</script>"}
+expect state view=1 title=vis=visible
+{"type":"set_visibility","view":1,"visible":false}
+expect state view=1 title=vis=hidden
+{"type":"set_visibility","view":1,"visible":true}
+expect state view=1 title=vis=visible
+
+# A large frame of one view goes in bands, which no other view's frame comes between, and the other views still get
+# their turns.
+{"type":"set_viewport","view":3,"width":4200,"height":4100,"dpr":1}
+expect-frame view=3 full=true more=true width=4200 height=4100
+expect-frame view=3 more=false width=4200 height=4100
+frames 0 10000 view=2
+sleep 1
+frames 5 10000 view=2
+{"type":"set_viewport","view":3,"width":200,"height":150,"dpr":1}
+expect-frame view=3 full=true width=200 height=150
+
+# A dialog of one view waits for its answer while the others go on.
+{"type":"load_html","view":1,"html":"<title>dialog</title><script>setTimeout(() => { alert('one'); document.title = 'closed'; }, 300)</script>"}
+{"type":"load","view":2,"url":"$pages/text.html"}
+expect state view=2 title=text loading=false
+sleep 0.5
+frames 3 10000 view=3
+expect dialog view=1 kind=alert message=one
+{"type":"dialog_closed","view":1,"id":"$id","accepted":true}
+expect state view=1 title=closed
+
+# Find and hints in two views at once.
+{"type":"load","view":1,"url":"$pages/text.html"}
+expect state view=1 title=text loading=false
+sleep 0.3
+{"type":"find","view":1,"query":"emacs","case_sensitive":false,"highlight_all":true}
+{"type":"find","view":2,"query":"canvas","case_sensitive":false,"highlight_all":true}
+expect find_result view=1 query=emacs index=1 total=1
+expect find_result view=2 query=canvas index=1 total=1
+{"type":"hints","view":1,"id":11,"alphabet":"ab"}
+{"type":"hints","view":2,"id":12,"alphabet":"ab"}
+expect hints_list view=1 id=11 items#=1 items.0.text=link
+expect hints_list view=2 id=12 items#=1 items.0.text=link
+{"type":"hints_end","view":2,"id":12,"activate":null}
+{"type":"hints_narrow","view":1,"id":11,"prefix":"a"}
+expect-no error 0.5
+{"type":"hints_end","view":1,"id":11,"activate":null}
+{"type":"hints_end","view":2,"id":12,"activate":null}
+expect error view=2 id=12 message~=hints_end
+
+# Screenshots of two views go to files of their own.
+{"type":"screenshot","view":1,"kind":"visible","request":"one"}
+expect screenshot_saved view=1 request=one
+keep one
+{"type":"screenshot","view":2,"kind":"visible","request":"two"}
+expect screenshot_saved view=2 request=two
+distinct "$kept.one.path" "$last.path"
+png-size "$kept.one.path" 400 300
+png-size "$last.path" 320 240
+remove "$kept.one.path"
+remove "$last.path"
+
+# A crash of one view's page leaves the others alone.
+{"type":"load_html","view":3,"html":"<title>crash</title><script>onkeydown = () => internals.panicRenderStateForTesting()</script>"}
+expect state view=3 title=crash loading=false
+{"type":"set_focus","view":3,"focused":true}
+{"type":"key","view":3,"kind":"down","key":"X","code_point":120,"modifiers":0}
+expect crashed view=3 timeout=20
+{"type":"load","view":2,"url":"$pages/animate.html"}
+expect state view=2 title=animate loading=false
+sleep 0.5
+frames 5 10000 view=2
+expect-no crashed 0.5 view=1
+expect-no crashed 0.5 view=2
+{"type":"load","view":3,"url":"$pages/text.html"}
+expect state view=3 title=text loading=false
+
+# Closing one view leaves the others; closing them all leaves a server that makes new ones, with new ids.
+{"type":"close_view","view":2}
+expect view_closed view=2 reason=client
+{"type":"load","view":3,"url":"$pages/animate.html"}
+expect state view=3 title=animate loading=false
+sleep 0.5
+frames 5 10000 view=3
+{"type":"close_view","view":1}
+expect view_closed view=1 reason=client
+{"type":"close_view","view":3}
+expect view_closed view=3 reason=client
+{"type":"ping","id":"empty"}
+expect pong id=empty
+{"type":"create_view","width":320,"height":240,"dpr":1,"url":"$pages/text.html","request":5}
+expect view_created view=4 request=5
+expect-frame view=4 full=true width=320 height=240

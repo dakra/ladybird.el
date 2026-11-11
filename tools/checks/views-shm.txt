@@ -1,0 +1,31 @@
+# Shared memory per view: run with --shm --url text.html --viewport 320x240@1.
+expect shm view=1
+keep one
+expect-frame view=1 encoding=shm full=true
+# A new view announces its segment after view_created, under a name of its own.
+{"type":"create_view","width":200,"height":150,"dpr":1,"url":"$pages/animate.html","request":2}
+expect-order view_created shm
+expect shm view=2 name~=/ladybird-
+keep two
+distinct "$kept.one.name" "$kept.two.name"
+expect-frame view=2 encoding=shm full=true width=200 height=150
+sleep 0.5
+frames 3 10000 view=2
+
+# A hidden view gives up its segment; shown again, it announces a new one.
+{"type":"set_visibility","view":2,"visible":false}
+sleep 0.5
+{"type":"set_visibility","view":2,"visible":true}
+expect shm view=2
+distinct "$kept.two.name" "$last.name"
+expect-frame view=2 encoding=shm full=true
+
+# A client that cannot map the segment of one view gets the next frame of every view whole on the stream.
+# NB: The views send in the order they were made.
+{"type":"shm_failed","view":2}
+expect-frame view=1 full=true encoding=zstd
+expect-frame view=2 full=true encoding=zstd
+sleep 0.5
+frames 3 10000 view=2
+expect-frame view=2 encoding=zstd
+expect-no shm 0.5

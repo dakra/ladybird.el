@@ -1,0 +1,9 @@
+<!doctype html>
+<title>set</title>
+<script>
+  // views-cookie-set.html?v=VALUE sets a cookie and a storage item to VALUE.
+  const value = new URLSearchParams(location.search).get("v");
+  document.cookie = "shared=" + value + "; path=/";
+  localStorage.setItem("shared", value);
+  document.title = "set";
+</script>

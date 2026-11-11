@@ -11,8 +11,9 @@ says so.
 
 v1 delivers `Ladybird --headless=emacs`:
 
-- one view (one `HeadlessWebView` subclass), id `1`; `create_view` when none exists,
-  `close_view` destroys it and the server keeps running with zero views
+- up to `--emacs-max-views` views (default 16), each an `EmacsWebView` with a WebContent
+  process of its own (§2.10); `close_view` destroys one, and the server keeps running with
+  zero views
 - transports: stdio (default) and `--emacs-socket=PATH` (Unix listener, 0600, unlinked on exit)
 - frame encodings raw (0), zstd (1), shm (2); one frame in flight, coalesced damage, `frame_ack`
 - full input: `mouse` (down/up/move/wheel/leave, click counts), `key`, `text`
@@ -55,7 +56,8 @@ nothing (8.4), and popups go to `HeadlessWebView::create_child` (8.9).
 | `Libraries/LibWebView/EmacsProtocol.h/.cpp` | Record framing (`u32 LE length, u8 kind, payload`), `FrameHeader` struct + serializer, `RecordReader` (incremental parser over a `ByteBuffer`), JSON helpers (`JsonObject` builders for `state`, `welcome`, …), key/modifier/button/cursor mapping tables. No I/O, unit-testable. |
 | `Libraries/LibWebView/EmacsTransport.h/.cpp` | `EmacsTransport` base (one connected client: non-blocking fd, read notifier, write queue with write notifier), `EmacsStdioTransport`, `EmacsSocketTransport` (`Core::LocalServer`), `take_over_stdio()` (stderr/stdout redirect). |
 | `Libraries/LibWebView/EmacsFrameEncoder.h/.cpp` | Pixel copy from `Gfx::Bitmap` (BGRA swizzle if needed), zstd compression (`ZSTD_CCtx` reuse, level 1), `EmacsSharedFrameBuffer` (POSIX shm object: create, grow-by-replace, unlink). |
-| `Libraries/LibWebView/EmacsWebView.h/.cpp` | `class EmacsWebView final : public HeadlessWebView`, plus `EmacsServer` (owns transport, the optional view, handshake state, dispatch of client messages). Keeping `EmacsServer` separate from the view lets the server run with zero views. |
+| `Libraries/LibWebView/EmacsWebView.h/.cpp` | `class EmacsWebView final : public HeadlessWebView`: one view, with everything that is per view (frames and their flow control, shared memory, state, input, requests, find, hints, screenshots, console). |
+| `Libraries/LibWebView/EmacsServer.h/.cpp` | `EmacsServer`: the transport, the handshake, the views and the dispatch of client messages to them, and the turns the views take on the connection (§2.10). |
 | `tools/ladybird-client.py` (in `/Users/daniel/src/dakra/ladybird/tools/`) | Python test client, section 5.9. |
 
 Changes to existing files:
@@ -175,7 +177,7 @@ flush_frame():
 handle frame_ack(seq): if seq == m_frame_seq: m_frame_in_flight = false; if (m_pending_damage) schedule_frame_flush()
 ```
 
-A hidden view (`set_visibility false`) stops presenting on its own (`update_compositor_context_visibility`), so no extra gating. On client disconnect: `m_frame_in_flight = false`, `m_frame_needs_full = true` so the next client gets a full frame. On viewport change: `m_frame_needs_full = true`.
+A hidden view (`set_visibility false`) stops presenting (`update_compositor_context_visibility`), and `flush_frame` also sends nothing for it, as frames presented before the hide can still arrive (§2.10). On client disconnect: `m_frame_in_flight = false`, `m_frame_needs_full = true` so the next client gets a full frame. On viewport change: `m_frame_needs_full = true`.
 
 Encoding choice per frame: shm if negotiated and the segment can hold the frame; else zstd if negotiated and `rect.w*rect.h*4 >= 16 KiB`; else raw. A raw payload above the 64 MiB record limit is split into horizontal bands (protocol §4.4): consecutive `seq`, flag `more` on all but the last, each band sent only after the previous one is acked.
 
@@ -323,10 +325,75 @@ click in `Libraries/LibWeb/Page/GuardedClick.cpp`). No script runs in the page.
   site is noticed only at the centre of the frame's visible part when listing, and for the
   element itself when clicking.
 - **Check:** `tools/checks/hints.sh` (run.sh name `hints`) with the scripts `hints.txt`,
-  `hints-hidden.txt`, `hints-hostile.txt`, `hints-reviewed.txt`, and, served over HTTP from
+  `hints-hidden.txt`, `hints-hostile.txt`, `hints-refused.txt`, and, served over HTTP from
   127.0.0.1 with frames from localhost on one server whose processes are counted,
   `hints-frames.txt`, `hints-jack.txt` and `hints-hung.txt` (`hints-frames.txt` also with
   `--site-isolation=top-level`), the session scripts and the pages `hints*.html`.
+
+### 2.10 Views
+
+`EmacsServer` holds up to `--emacs-max-views=N` views (1 to 64, default 16; another
+number stops the server from starting), announced as `welcome.max_views`. `create_view`
+beyond that is answered with `error` echoing `request`. View ids count up from 1 and are
+never reused. Each `EmacsWebView` is a `HeadlessWebView` of its own tab, so it has its own
+WebContent process (Ladybird also keeps one spare process around), and its own frame
+sequence, one frame in flight, shared memory segment, viewport, zoom, focus, state,
+requests, find, hint session, console and crash handling. Request ids and the names of
+screenshots saved without a `path` are counted by the server, so no two views have the
+same; segment names count up per process. All views share the UI process's cookie jar
+and storage. A `shm_failed` for any view makes every view send its next frame whole on
+the stream; a new view announces its segment after its `view_created`, and every view
+announces a new one to the next client.
+
+- **Viewports.** Each viewport is brought within 16000 pixels a side and 64 M pixels, and
+  all of them together within 256 M device pixels (`maximum_total_viewport_area`, about
+  3 GiB in the Compositor). A `create_view` or `set_viewport` asking for more gets the
+  size cut down; a `create_view` when the other views have all of the area is answered
+  with `error`.
+- **Visibility.** A view renders while a client knows it and has not hidden it with
+  `set_visibility`; a new view is visible. While no client is connected every view is
+  hidden, so a detached server renders nothing. The visibility the client last chose for a
+  view comes back when the next client's `hello` is done: after `welcome` every view sends
+  its `state` and its open requests, and the visible ones a whole frame. A view that becomes
+  visible sends a whole frame first; a hidden one sends no frames. Hiding a view ends a
+  frame it was sending in bands, and drops its segment and compression buffer once the
+  client has acknowledged the frame in flight.
+- **Turns on the connection** (`EmacsFrameTurns`, unit-tested in `TestEmacsProtocol`). A
+  view asks `EmacsServer::begin_frame_turn` before it sends a frame record and ends every
+  turn it was given with `end_frame_turn`, whether it sent a record or not. It does not
+  get a turn while another view is between the bands of a frame (so bands are
+  contiguous), while the transport holds 64 MiB or more that the client has yet to read
+  (also for the next band of a frame), or while a view that has waited longer still
+  waits. A view that does not get a turn is queued. The queued views are told to ask
+  again, in order, when a turn ends without bands to follow, when the transport writes
+  and holds less than 64 MiB afterwards, when a queued view at the head has nothing to
+  send any more, and when a view is hidden, closed or crashes (which also ends a frame it
+  was sending in bands). As each turn adds at most one frame record, frames take the
+  bytes waiting for the client at most one record (64 MiB) beyond the budget. Messages
+  that say only how something is now (`state`, `cursor`, `link_hover`, `tooltip`,
+  `favicon`, `background_color`, `ime`) go out in batches: a view sends its next batch
+  once the client has read the one before and the transport is below the budget, and
+  meanwhile keeps the latest message of each type. A page that sets a title of 1 MiB in
+  a loop thus has at most one on the connection. Other control messages are never held
+  back.
+- **Closing.** A view its page closes sends `view_closed` with `reason: "closed"` and
+  leaves the server's views at once; it is destroyed after the callback returns. A
+  `close_view` for a view that was closed already gets no answer; one for an id that was
+  never a view's gets `error`.
+- **Downloads.** A download blocked in a server with one view is reported with that view's
+  id; with several, the `error` has no `view`, as the download does not say which view it
+  is of.
+- **Check:** `tools/checks/views.sh` (run.sh name `views`) with `views.txt` (three views
+  with a limit of three: pages and pixels, the limit error, hiding and showing, bands of a
+  4200×4100 frame beside another animating view, a dialog in one view while others work,
+  find, hints and screenshots in two views, a crash of one view, closing and creating
+  again), `views-turns.txt` (frames of one view not acknowledged, and hiding, closing and
+  a crash in the middle of its bands, a view its page closes), `views-shm.txt` (names per
+  view, a hidden view's new segment, `shm_failed` for one view), `views-shm-failed.txt`,
+  `views-shared.txt` (cookies and storage over HTTP), bad `--emacs-max-views`, a flood of
+  `create_view` with the WebContent processes and segments left after closing,
+  `views-detach.txt` / `views-reattach.txt`, and `views-encodings-a.txt`, `-b.txt`, `-c.txt`
+  (clients with and without shared memory and zstd, one after another).
 
 ## 3. Input mapping
 

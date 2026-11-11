@@ -91,9 +91,9 @@ out. `max_views` is the number of views the server can have at a time (§3). `po
 `hello` says the client takes views that pages open (§3.1); it is false when left out. If `views` is empty the client sends `create_view`. On a protocol mismatch the server sends `{"type":"reject","reason":"…"}`
 and closes.
 
-After `welcome` the server sends, for every view, a `state` and, as soon as the
-Compositor has presented one, a full frame (flag `full`, §4), so a reconnecting client
-has something to show.
+After `welcome` the server sends, for every view, a `state` and, for every view that
+is visible (§3), as soon as the Compositor has presented one, a full frame (flag
+`full`, §4), so a reconnecting client has something to show.
 
 Keepalive: either side may send `{"type":"ping","id":n}`; the peer answers
 `{"type":"pong","id":n}`. The client treats a missing pong within 10 s as a dropped
@@ -110,7 +110,28 @@ Every view has its own frame sequence, flow control (§4.2) and shared memory se
 (§4.3). Frames of several views share the connection; the bands of one frame (§4.4)
 follow each other with no other view's frame between them. A view the client has hidden
 with `set_visibility` sends no frames; when it becomes visible again its next frame is
-a full one. A new view is visible.
+a full one. A new view is visible. While no client is connected no view renders; a
+view has the visibility its last client gave it when a client connects again, and
+`welcome` does not say which, so a client sends `set_visibility` for every view after
+`welcome`. `welcome.views` is in the order of the view ids.
+
+A view sends a frame when it is its turn: while one view's frame is in bands, or the
+server has 64 MiB or more that the client has not read from the connection, the others
+wait, the one that has waited longest going first. A client that stops acknowledging
+one view's bands so stalls the frames of all; one that stops acknowledging a frame
+that has no bands stalls that view alone. Hiding or closing a view, and a crash of its
+WebContent, end its frame early: the bands still to come are not sent, another view's
+frame can follow, and the view's next frame is a full one.
+
+When the connection is busy the server keeps only the latest `state`, `cursor`,
+`link_hover`, `tooltip`, `favicon`, `background_color` and `ime` of a view, so a page
+that changes them in a loop does not fill it.
+
+All viewports of a server together have at most 256 000 000 device pixels. A
+`set_viewport` or `create_view` that would exceed that gets a smaller size (the height
+is reduced, as for the limit of one view); a `create_view` when nothing is left is
+answered with `error`. `max_views` is at least 1. The ids the server puts on its
+requests (dialogs, pickers, permissions) are unique across its views.
 
 A server keeps running without views: on a socket until it is stopped, on standard
 input and output until the client disconnects.
@@ -118,7 +139,7 @@ input and output until the client disconnects.
 | Client → server | Fields | Effect |
 | --- | --- | --- |
 | `create_view` | `url` (optional), `width`, `height`, `dpr`, `request` (optional integer) | Server creates a view and answers with `view_created` followed by `state` and a frame, or with an `error` when it cannot (the server has `max_views` views already). Both answers echo `request` |
-| `close_view` | `view` | Closes it; server answers `view_closed` |
+| `close_view` | `view` | Closes it; server answers `view_closed`. A `close_view` for a view that is closed already gets no answer, one for an id that never existed an `error` |
 | `set_viewport` | `view`, `width`, `height`, `dpr` | Device pixels. Server resizes the view; the next frame has the new size and the `full` flag. The server clamps each dimension to 16000 and the area to 64 000 000 pixels (reducing the height); a `dpr` outside 0.25–8 is answered with `error` and changes nothing |
 | `set_visibility` | `view`, `visible` | Maps to `set_system_visibility_state`; a hidden view stops presenting frames |
 | `set_focus` | `view`, `focused` | Maps to `set_has_system_focus` |
@@ -217,9 +238,14 @@ a frame record and sending its ack. The client needs no reply to `shm`.
 A client that cannot use an announced segment (the name does not open, or the object is
 smaller than `size`; `fstat` reports a page-rounded size, so larger is normal: the socket was forwarded from another machine, or a sandbox
 hides the segment) sends `{"type":"shm_failed","view":v}`. The server then stops using
-shm for this connection, clears its one-in-flight state for that view (the client still
-acks any shm frame record it received, with status irrelevant to the server) and sends a
-`full` frame with a stream encoding.
+shm for this connection, for every view, clears its one-in-flight state for that view
+(the client still acks any shm frame record it received, with status irrelevant to the
+server) and every view sends its next frame as a `full` frame with a stream encoding.
+One `shm_failed` is enough for a connection.
+
+The `shm` of a new view comes after its `view_created`. A view that was hidden has no
+segment; it announces one before the frame it sends when it is shown. A reconnecting
+client gets every segment announced again.
 
 ### 4.4 Large frames
 
@@ -306,7 +332,7 @@ Commands are not ordered after input events still on their way to the page: a
 | `edit` | `view`, `op`: `"select_all"`, `"cut"`, `"undo"`, `"redo"` | `cut` makes the server send `clipboard` with the cut text |
 | `paste` | `view`, `text` | Paste `text` at the caret (Emacs owns the clipboard) |
 | `request_selection` | `view`, `request` | Server answers `selection` `{view, request, text}` |
-| `screenshot` | `view`, `request`, `kind`: `"visible"`, `"full"`, `path` (optional, server-side) | Server saves a PNG on its machine and answers `screenshot_saved` `{view, request, path}`; `path` in the answer is authoritative (without `path`: `/tmp/ladybird-emacs-<pid>-screenshot-<n>.png`, mode 0600) |
+| `screenshot` | `view`, `request`, `kind`: `"visible"`, `"full"`, `path` (optional, server-side) | Server saves a PNG on its machine and answers `screenshot_saved` `{view, request, path}`; `path` in the answer is authoritative (without `path`: `/tmp/ladybird-emacs-<pid>-screenshot-<n>.png`, mode 0600, `<n>` counting the screenshots of the server) |
 | `set_console` | `view`, `enabled` | Turns `console` messages on or off |
 
 | Server → client | Fields | Meaning |

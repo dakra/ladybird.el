@@ -1,0 +1,11 @@
+# A client that comes back to the views left by views-detach.txt: run with --socket and --no-view.
+welcome views#=2 views.0.view=1 views.1.view=2
+expect state view=1
+expect state view=2 title=animate
+expect-frame view=1 full=true
+expect dialog view=1 kind=alert "message=still here"
+# The hidden view stays hidden until the client shows it.
+expect-no-frame 1 view=2
+{"type":"set_visibility","view":2,"visible":true}
+expect-frame view=2 full=true
+{"type":"dialog_closed","view":1,"id":"$id","accepted":true}

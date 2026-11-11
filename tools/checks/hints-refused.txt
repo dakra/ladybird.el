@@ -1,4 +1,4 @@
-# Pages a review used to break hints, each loaded in turn: run with --url hints-shift.html --viewport 800x600@1.
+# Activations a page makes fail, which must end with nothing activated and nothing held: run with --url hints-shift.html
 
 # A page that moves the labels' host puts the labels on other elements, so nothing is activated.
 {"type":"set_focus","focused":true}

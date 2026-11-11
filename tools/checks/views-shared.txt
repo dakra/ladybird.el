@@ -1,0 +1,6 @@
+# The views of a server share cookies and storage: run with --url http://127.0.0.1:PORT/views-cookie-set.html?v=VALUE,
+# with $http and $value replaced.
+expect-no error 0.5
+{"type":"create_view","width":320,"height":240,"dpr":1,"url":"$http/views-cookie-get.html","request":2}
+expect view_created view=2 request=2
+expect state view=2 "title~=shared=$value" "title~=storage:$value" loading=false
