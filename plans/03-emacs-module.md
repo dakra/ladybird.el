@@ -622,8 +622,9 @@ session, screenshots analysed per device pixel)
 - No Lisp workaround on a canvas helps (fresh spec per refresh, `image-flush`,
   `clear-image-cache`, `:width`/`:height` instead of `:scale`).
 - `plans/emacs-canvas-ns-transform.patch` makes `ns_image_reset` (`src/nsimage.m`) carry
-  `transform` and `smoothing` over to the new image. It applies to Emacs `0f76a435a2`; it
-  is neither compiled nor tested.
+  `transform` and `smoothing` over to the new image. It applies to Emacs `0f76a435a2`.
+  An emacs-plus@32 built with it shows a canvas rendered at dpr 2 at its full size, one
+  canvas pixel per device pixel on a Retina display, and mouse positions map to the page.
 - The NS transform path itself is exact: a `pbm` image of the same pattern at `:scale 0.5`
   draws 1 image pixel per device pixel. `:transform-smoothing nil` means "unspecified" in
   `image_set_transform`, not `NSImageInterpolationNone`; a 2:1 downscale is exact anyway.

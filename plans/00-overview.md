@@ -175,7 +175,7 @@ then does I3–I5 with all three components, or the owner does.
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| NS ignores `:scale` on a canvas (confirmed, 03 §7 T0 result) | blurry Retina rendering until Emacs is patched | `plans/emacs-canvas-ns-transform.patch` (`nsimage.m`, untested); until then dpr 1 |
+| NS ignores `:scale` on a canvas (confirmed, 03 §7 T0 result) | blurry Retina rendering until Emacs is patched | `plans/emacs-canvas-ns-transform.patch` (`nsimage.m`; works in emacs-plus@32, 03 §7); an unpatched Emacs gets dpr 1 |
 | NS canvas refresh costs 34 ms at 1600×1000 and 84 ms at 3200×2000 (03 §7) | 12 fps at Retina size even with the patch | throttle refreshes from Lisp; an Emacs patch that writes the NS bitmap planes directly |
 | Ladybird internals move weekly (`TerminalWebView` is one day old) | rebases of the `emacs-headless` branch | keep `Emacs*` files self-contained, touch `Application.cpp` minimally; consider upstreaming the mode |
 | Bandwidth on remote links while scrolling | a few fps over WAN | damage rects + zstd + one-in-flight already in v1; video codec is v2 |
