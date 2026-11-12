@@ -4,11 +4,13 @@
 html, body { margin: 0; }
 #i { position: absolute; left: 10px; top: 10px; width: 400px; height: 30px; }
 #t { position: absolute; left: 10px; top: 60px; width: 400px; height: 120px; }
+#b { position: absolute; left: 10px; top: 200px; width: 100px; height: 30px; }
 </style>
 <script src="/live.js"></script></head>
 <body>
 <input id="i" autofocus>
 <textarea id="t"></textarea>
+<button id="b" onclick="setTimeout(function () { document.getElementById('i').focus(); }, 200)">search</button>
 <script>
 live.page = 'form';
 live.keys = 0; live.key = ''; live.mods = 0;

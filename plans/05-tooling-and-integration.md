@@ -107,7 +107,7 @@ M-x ladybird-browse-url RET https://ladybird.dev RET
 
 Pass: page renders; `welcome.shm true` and `ladybird-module-stats` shows `:shm-size` > 0;
 clicking a link navigates; wheel scrolls; `i` then typing into a form field inserts text;
-`C-y` pastes; `M-w` after a drag selection yields the text; `l` loads another URL; `b`/`f`
+`C-y` pastes; `M-w` after a drag selection yields the text; `g` loads another URL; `b`/`f`
 work; resizing works. Measure with `benchmark-run` around `feed` (03 §6): a full frame
 should cost under 5 ms in the module.
 

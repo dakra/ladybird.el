@@ -169,6 +169,11 @@
       }
     },
     {
+      "wait": "until",
+      "pred": "(ladybird-live-in-page (eq ladybird--field-focused 'user))",
+      "comment": "the server reports the field focused with user activation, as after a click"
+    },
+    {
       "type": "hi"
     },
     {
@@ -185,7 +190,7 @@
     },
     {
       "group": "checkbox",
-      "comment": "a checkbox is toggled"
+      "comment": "a checkbox is toggled; the text field the hint left command mode for loses the focus"
     },
     {
       "keys": "f"
@@ -199,6 +204,11 @@
         "eval": "(equal (ladybird-live-field \"value\") \"hi\")"
       },
       "comment": "the label was not typed into the field"
+    },
+    {
+      "wait": "until",
+      "pred": "(ladybird-live-in-page ladybird-command-mode)",
+      "comment": "the field lost the focus to the checkbox, so command mode is back"
     },
     {
       "group": "link",

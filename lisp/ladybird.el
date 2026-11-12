@@ -20,14 +20,16 @@
 ;; the page and sends the changed pixels, and the native module
 ;; `ladybird-module' paints them into the buffer's canvas.
 ;;
-;; In a page buffer the keys go to the page, the Emacs editing and
-;; motion keys translated to what does the same in a browser, while
-;; C-x, C-h, M-x and the like keep their Emacs meaning.  The package's
-;; commands are under C-c: C-c C-l opens a URL, C-c C-o activates a
-;; link, button or field by the label the page puts on it, C-c C-b and
-;; C-c C-f go back and forward.  `ladybird-command-mode' (C-c C-e) makes
-;; single keys commands, as in eww; i goes back.  The mouse and the
-;; wheel always go to the page.
+;; A page buffer starts in `ladybird-command-mode', where single keys
+;; are commands: n and p scroll, g opens a URL, b and f go back and
+;; forward, o activates a link, button or field by the label the page
+;; puts on it.  i, or a text field of the page getting the focus, sends
+;; the keys to the page, the Emacs editing and motion keys translated
+;; to what does the same in a browser, while C-x, C-h, M-x and the like
+;; keep their Emacs meaning; C-c C-e returns to command mode.  The
+;; package's commands are also under C-c: C-c C-l opens a URL, C-c C-o
+;; follows a label, C-c C-b and C-c C-f go back and forward.  The mouse
+;; and the wheel always go to the page.
 
 ;;; Code:
 
@@ -190,6 +192,17 @@ a to z or a digit."
 (defvar-local ladybird--focused 'unknown
   "Focus last sent to the server, or `unknown'.")
 (defvar-local ladybird--state nil "The view's last `state' message.")
+(defvar-local ladybird--field-focused nil
+  "Whether a text field of the page has the focus, as `ime' last said.
+nil when none has it, `user' when the page had user activation when
+the field got the focus or since, `page' when not.")
+(defvar-local ladybird--command-mode-was nil
+  "The value `ladybird-command-mode' had before it was last called.")
+(defvar-local ladybird--field-page-mode nil
+  "How `ladybird-command-mode' relates to the focused text field.
+t while the mode is off for the focused field, by the field or by hand;
+`hand' when it was switched on by hand while a field had the focus; nil
+otherwise.")
 (defvar-local ladybird--favicon nil "The page's icon as an image, or nil.")
 (defvar-local ladybird--cursor 'arrow "Pointer shape over the canvas.")
 (defvar-local ladybird--hover-url nil
@@ -721,10 +734,11 @@ has it, the URL is loaded in that page, shown where BUFFER was."
       (message "ladybird: %s opened no page: %s" (ladybird--conn-name conn)
                (or reason "no reason given")))))
 
-(defun ladybird--forget-view ()
+(defun ladybird--forget-view (&optional killing)
   "Detach the current buffer from its view without closing the view.
 The module drops the view's frame, canvas and shared memory.  A hint
-session of the buffer ends."
+session of the buffer ends.  Unless KILLING, a focused text field of the
+view is reported gone to `ladybird-field-focus-functions'."
   (when (and ladybird--hint (eq (ladybird--hint-buffer ladybird--hint)
                                 (current-buffer)))
     (ladybird--hint-stop))
@@ -737,17 +751,21 @@ session of the buffer ends."
         ladybird--creating nil
         ladybird--requested-size nil
         ladybird--visible 'unknown
-        ladybird--focused 'unknown))
+        ladybird--focused 'unknown)
+  (if killing
+      (setq ladybird--field-focused nil)
+    (ladybird--set-field-focus nil nil)))
 
 (defun ladybird--adopt (buffer conn)
   "Make BUFFER a page buffer of the ready CONN and give it a view."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (unless (eq ladybird--conn conn)
-        (ladybird--forget-view)
-        (setq ladybird--conn conn))
-      (ladybird--create-view)
-      (force-mode-line-update))))
+        (ladybird--forget-view))
+      (when (buffer-live-p buffer)
+        (setq ladybird--conn conn)
+        (ladybird--create-view)
+        (force-mode-line-update)))))
 
 (defun ladybird--apply-state (state)
   "Take the alist STATE as the state of the current buffer's page."
@@ -777,17 +795,20 @@ closed."
     (setf (ladybird--conn-creating conn) nil
           (ladybird--conn-closing conn) nil
           (ladybird--conn-kept conn) nil)
+    ;; A function of `ladybird-field-focus-functions' may kill buffers.
     (dolist (buffer (ladybird--buffers conn))
-      (with-current-buffer buffer
-        (setq ladybird--creating nil
-              ladybird--requested-size nil
-              ladybird--visible 'unknown
-              ladybird--focused 'unknown
-              ladybird--buttons nil
-              ladybird--inside nil)
-        (unless (and ladybird--view (not changed) (memq ladybird--view listed))
-          (ladybird--forget-view)
-          (ladybird--create-view))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (setq ladybird--creating nil
+                ladybird--requested-size nil
+                ladybird--visible 'unknown
+                ladybird--focused 'unknown
+                ladybird--buttons nil
+                ladybird--inside nil)
+          (unless (and ladybird--view (not changed) (memq ladybird--view listed))
+            (ladybird--forget-view)
+            (when (buffer-live-p buffer)
+              (ladybird--create-view))))))
     (dolist (view views)
       (let ((id (alist-get 'view view)))
         (unless (buffer-live-p (gethash id (ladybird--conn-views conn)))
@@ -904,7 +925,7 @@ the server by a killed buffer is forgotten."
       ("closed" (unless (member (ladybird--url) '(nil "" "about:blank"))
                   (message "ladybird: %s was closed by its page" (buffer-name))))
       (reason (message "ladybird: %s closed (%s)" (buffer-name) reason)))
-    (ladybird--forget-view)
+    (ladybird--forget-view t)
     ;; The page closes when it likes: the selection stays where the user
     ;; has it, unless that window goes.
     (save-selected-window
@@ -962,7 +983,7 @@ connection is being dialled again is closed when it is back."
                                             (view . ,view)))))
        ((memq (ladybird--conn-state conn) '(redialing dialing hello))
         (cl-pushnew view (ladybird--conn-closing conn))))
-      (ladybird--forget-view))
+      (ladybird--forget-view t))
     (when (eq ladybird--last-buffer (current-buffer))
       (setq ladybird--last-buffer nil))
     (ladybird--schedule-update)
@@ -1646,11 +1667,11 @@ function keys with any modifiers and `ladybird-translated-keys', less
                        ("\M-<" . ladybird-scroll-top)
                        ("\M->" . ladybird-scroll-bottom)))
       (define-key map (car binding) (cdr binding)))
-    (define-key map "l" #'ladybird-goto-url)
     (define-key map "g" #'ladybird-goto-url)
     (define-key map "r" #'ladybird-reload)
     (define-key map "R" #'ladybird-reload-bypass-cache)
-    (define-key map "s" #'ladybird-stop)
+    (define-key map "k" #'ladybird-stop)
+    (define-key map "s" #'ladybird-switch-to-page)
     (define-key map "b" #'ladybird-back)
     (define-key map "f" #'ladybird-forward)
     (define-key map "+" #'ladybird-zoom-in)
@@ -1667,32 +1688,114 @@ function keys with any modifiers and `ladybird-translated-keys', less
   "Keymap of `ladybird-command-mode'.")
 
 (define-minor-mode ladybird-command-mode
-  "Make single keys commands in a page buffer, the way eww has them.
+  "Make single keys commands in a page buffer.
 Keys that insert themselves and the motion keys are commands instead
 of going to the page; other self-inserting keys say how to type into
 the page again.  The page buffer's \\`C-c' commands, the mouse and the
 wheel work as in page mode.
 
+A text field of the page that gets the focus turns the mode off, and
+it comes back when no field has the focus; see
+`ladybird-field-focus-functions'.  The mode switched on by hand while a
+field has the focus stays; page mode switched on by hand there also
+ends when no field has the focus.
+
 \\{ladybird-command-mode-map}"
   :lighter nil
   :keymap ladybird-command-mode-map
   :interactive (ladybird-mode)
+  (unless (eq ladybird-command-mode ladybird--command-mode-was)
+    (setq ladybird--command-mode-was ladybird-command-mode
+          ladybird--field-page-mode
+          (and ladybird--field-focused (if ladybird-command-mode 'hand t))))
   (force-mode-line-update))
+
+(defcustom ladybird-field-focus-functions (list #'ladybird-follow-field-focus)
+  "Functions called as the focus moves into or out of the page's text fields.
+Each is called in the page buffer with two arguments: FOCUSED is
+non-nil when a field got the focus and nil when no field has it any
+more, and ACTIVATION is non-nil when the user pressed a key or a
+mouse button in the page in the last few seconds, unlike a focus that
+autofocus or a script moves on its own.  ACTIVATION is nil also for a
+key that moves the focus into a frame of another site.  A field that
+got the focus without user input calls them again with ACTIVATION
+when the user first presses a key or button while a field has the
+focus; otherwise a focus moving from one field to another calls
+nothing.  A text field is an editable input or textarea, or an
+element or document that is editable.  An error a function signals is
+reported and the others still run; once one kills the buffer, the
+rest are not called.
+
+The default, `ladybird-follow-field-focus', turns `ladybird-command-mode'
+off while a field has the focus."
+  :type 'hook
+  :options (list #'ladybird-follow-field-focus)
+  :group 'ladybird)
+
+(defun ladybird--enter-field (&optional force)
+  "Turn `ladybird-command-mode' off for a text field that got the focus.
+Unless FORCE, command mode switched on by hand while a field has the
+focus stays."
+  (when (and ladybird-command-mode
+             (or force (not (eq ladybird--field-page-mode 'hand))))
+    (ladybird-command-mode -1)
+    (setq ladybird--field-page-mode t)))
+
+(defun ladybird-follow-field-focus (focused &optional _activation)
+  "Leave `ladybird-command-mode' while a text field of the page has the focus.
+FOCUSED non-nil turns the mode off for the field that got the focus;
+nil turns it on again if it was turned off while a field had the focus,
+by the field or by hand.  Command mode switched on by hand while a
+field has the focus stays.  For `ladybird-field-focus-functions'."
+  (cond (focused (ladybird--enter-field))
+        ((eq ladybird--field-page-mode t) (ladybird-command-mode 1))))
+
+(defun ladybird--run-field-focus-function (function buffer &rest args)
+  "Call FUNCTION with ARGS in BUFFER and report an error it signals.
+Return non-nil once BUFFER is dead, which ends `run-hook-wrapped'."
+  (if (not (buffer-live-p buffer))
+      t
+    (with-current-buffer buffer
+      (with-demoted-errors "ladybird-field-focus-functions: %S"
+        (apply function args)))
+    nil))
+
+(defun ladybird--set-field-focus (enabled activation)
+  "Take ENABLED and ACTIVATION of `ime' as the state of the page's fields.
+Run `ladybird-field-focus-functions' when that changes."
+  (let ((focus (cond ((not enabled) nil)
+                     ((or activation (eq ladybird--field-focused 'user)) 'user)
+                     (t 'page))))
+    (unless (eq focus ladybird--field-focused)
+      (setq ladybird--field-focused focus)
+      (when (and (not focus) (eq ladybird--field-page-mode 'hand))
+        (setq ladybird--field-page-mode nil))
+      (run-hook-wrapped 'ladybird-field-focus-functions
+                        #'ladybird--run-field-focus-function
+                        (current-buffer) (and focus t) activation))))
+
+(ladybird--defhandler "ime" (conn msg)
+  "Follow the focus into and out of the text fields of a page on CONN.
+See `ladybird-field-focus-functions'."
+  (ladybird--with-view conn msg
+    (ladybird--set-field-focus (alist-get 'enabled msg)
+                               (and (alist-get 'activation msg) t))))
 
 (defun ladybird-page-mode ()
   "Send keys to the page again: turn `ladybird-command-mode' off."
   (interactive nil ladybird-mode)
-  (ladybird-command-mode -1))
+  (when ladybird-command-mode
+    (ladybird-command-mode -1)))
 
 
 ;;; Major mode
 
-(defcustom ladybird-initial-mode 'page
+(defcustom ladybird-initial-mode 'command
   "Where the keys of a new page buffer go.
-`page' sends them to the page; `command' starts the buffer in
-`ladybird-command-mode', where single keys are commands."
-  :type '(choice (const :tag "To the page" page)
-                 (const :tag "Command mode" command))
+`command' starts the buffer in `ladybird-command-mode', where single
+keys are commands; `page' sends them to the page."
+  :type '(choice (const :tag "Command mode" command)
+                 (const :tag "To the page" page))
   :group 'ladybird)
 
 (defvar ladybird-mode-map
@@ -1728,11 +1831,13 @@ Its parent `ladybird--page-map' sends keys and mouse events to the page.")
 
 (define-derived-mode ladybird-mode nil "Ladybird"
   "Major mode of buffers that show a page rendered by a Ladybird server.
-Keys go to the page: those that insert themselves, \\`RET', \\`TAB',
-\\`DEL', the cursor and function keys, and the Emacs editing and motion
-keys of `ladybird-translated-keys', translated for the server's
-platform.  The mouse and the wheel act on the page.  Other keys, such
-as \\`C-x', \\`C-h', \\`M-x', \\`C-u' and \\`C-g', keep their Emacs meaning.
+A new buffer starts in `ladybird-command-mode' unless
+`ladybird-initial-mode' says otherwise.  Outside it keys go to the
+page: those that insert themselves, \\`RET', \\`TAB', \\`DEL', the cursor
+and function keys, and the Emacs editing and motion keys of
+`ladybird-translated-keys', translated for the server's platform.  The
+mouse and the wheel act on the page.  Other keys, such as \\`C-x',
+\\`C-h', \\`M-x', \\`C-u' and \\`C-g', keep their Emacs meaning.
 \\<ladybird-mode-map>
   \\[ladybird-goto-url]  open a URL; with a prefix argument in a new buffer
   \\[ladybird-follow-hint]  activate a link, button or field by its label
@@ -2528,7 +2633,8 @@ With NEW-BUFFER it opens in a new page buffer.  A URL that
   "End the session HINT by activating ITEM.
 With HINT's prefix argument a link opens in a new buffer instead, as
 `ladybird--follow-link' allows; a text field gets the focus and
-`ladybird-command-mode' is turned off."
+`ladybird-command-mode' is turned off until `ladybird-follow-field-focus'
+turns it on again."
   (let* ((url (alist-get 'url item))
          (kind (alist-get 'kind item))
          (open (and (ladybird--hint-new-buffer hint) (equal kind "link")
@@ -2540,7 +2646,7 @@ With HINT's prefix argument a link opens in a new buffer instead, as
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (cond (open (ladybird--follow-link url t))
-              ((equal kind "input") (ladybird-command-mode -1)))))))
+              ((equal kind "input") (ladybird--enter-field t)))))))
 
 (defun ladybird--hint-add (char)
   "Add CHAR to the label typed in the hint session in progress.
@@ -2584,8 +2690,9 @@ The page labels what can be activated in its window with strings of
 the characters of `ladybird-hint-alphabet'.  Each character typed
 narrows the labels shown, and completing a label activates its
 element: a link or button is clicked, a text field gets the focus and
-`ladybird-command-mode' turns off.  \\<ladybird-hint-map>\
-\\[ladybird-hint-delete-char] deletes the last character
+`ladybird-command-mode' turns off until `ladybird-follow-field-focus'
+turns it on again.
+\\<ladybird-hint-map>\\[ladybird-hint-delete-char] deletes the last character
 and \\[ladybird-hint-quit] ends the hints; a key that is not a character ends them
 and does what it does otherwise.
 

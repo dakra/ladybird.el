@@ -258,11 +258,34 @@ their category that comes first keeps them in the background:
 
 * Keys
 
-Keys go to the page, as in a terminal emulator: what inserts itself, =RET=, =TAB=, =DEL=,
-=S-SPC=, the cursor and function keys with any modifiers, and =<escape>= in a graphical
-frame.  The Emacs editing and motion keys of =ladybird-translated-keys= are translated to
-what does the same in a browser on the server's platform (table below).  The mouse and the
-wheel always act on the page.  Everything else keeps its Emacs meaning, in particular
+A new page buffer starts in =ladybird-command-mode=, where single keys are commands
+(below): =n= and =p= scroll, =g= opens a URL, =o= follows a link.  =i= switches to page
+mode, and so does a text field of the page that gets the focus, whether by a click, =TAB=,
+=o=, a script or autofocus; command mode comes back when no field has the focus.
+Command mode switched on by hand while a field has the focus stays; page mode switched on
+there also ends when no field has the focus.  =ladybird-initial-mode= set to =page=
+starts buffers in page mode instead.
+
+The switching is done by =ladybird-follow-field-focus=, the default of the hook
+=ladybird-field-focus-functions=.  Each function in it is called with FOCUSED and
+ACTIVATION when the focus moves into or out of the page's text fields.  ACTIVATION is nil
+for a focus the page moved without user input, such as autofocus, and also when a key
+moves the focus into a frame of another site; such a field calls the functions again with
+ACTIVATION when the user first clicks or types in the page.  To stay in command mode until
+a click in the field or =i=:
+
+#+begin_src emacs-lisp
+(defun my-ladybird-field-focus (focused activation)
+  (when (or activation (not focused))
+    (ladybird-follow-field-focus focused)))
+(setopt ladybird-field-focus-functions '(my-ladybird-field-focus))
+#+end_src
+
+In page mode keys go to the page, as in a terminal emulator: what inserts itself, =RET=,
+=TAB=, =DEL=, =S-SPC=, the cursor and function keys with any modifiers, and =<escape>= in a
+graphical frame.  The Emacs editing and motion keys of =ladybird-translated-keys= are
+translated to what does the same in a browser on the server's platform (table below).  The
+mouse and the wheel always act on the page.  Everything else keeps its Emacs meaning, in particular
 =C-x=, =C-c=, =C-h=, =M-x=, =M-:=, =C-u= and =C-g=, and the keys of =ladybird-emacs-keys=:
 =<f1>= (help), =<f3>= and =<f4>= (keyboard macros), =<f10>= (the menu bar) and =<f11>=
 (full screen).  A key in that option stays with Emacs also when it is in
@@ -302,16 +325,16 @@ untranslated, so that =C-x=, =C-c=, =C-g= or =C-s= reach the page; in a terminal
 with a key right behind it is that key with Meta.  A mouse or wheel event after =C-c C-q=
 is handled as usual.
 
-=ladybird-command-mode= (=C-c C-e=) makes single keys commands, as in eww; the =C-c=
-commands, the mouse and the wheel work as in page mode, and =i=, =RET= or =C-c C-j= send
-keys to the page again.  The mode line shows =:Page= or =:Command=; a click on it
-switches.  =ladybird-initial-mode= says which mode a new buffer starts in.
+In =ladybird-command-mode= (=C-c C-e=) the =C-c= commands, the mouse and the wheel work as
+in page mode, and =i=, =RET= or =C-c C-j= send keys to the page again.  The mode line
+shows =:Page= or =:Command=; a click on it switches.
 
 | Key in command mode            | Command                                         |
 |--------------------------------+-------------------------------------------------|
-| =l=, =g=                       | =ladybird-goto-url=                               |
+| =g=                            | =ladybird-goto-url=                               |
 | =r=, =R=                       | reload, reload without the cache                |
-| =s=                            | stop loading                                    |
+| =k=                            | stop loading                                    |
+| =s=                            | switch to another page by its title or URL      |
 | =b=, =f=                       | back, forward                                   |
 | =n=, =p=, =<down>=, =<up>=, =C-n=, =C-p= | scroll by =ladybird-scroll-step=        |
 | =<left>=, =<right>=, =C-b=, =C-f= | scroll sideways                              |
@@ -435,7 +458,8 @@ Elsewhere the default is nil.
 | =ladybird-scroll-step=              | nil                | pixels per line scroll; nil is three text lines   |
 | =ladybird-translated-keys=          | see above          | Emacs editing and motion keys done in the page    |
 | =ladybird-emacs-keys=               | =<f1>= =<f3>= =<f4>= =<f10>= =<f11>= | keys that keep their Emacs meaning |
-| =ladybird-initial-mode=             | =page=             | =page= or =command=: where a new buffer's keys go |
+| =ladybird-initial-mode=             | =command=          | =command= or =page=: where a new buffer's keys go |
+| =ladybird-field-focus-functions=    | see above          | called when a text field gets or loses the focus  |
 | =ladybird-keep-view-on-kill=        | nil                | leave the page open when its buffer is killed     |
 | =ladybird-new-page-display=         | =selected-window=  | where a page a command opens appears: =selected-window=, =other-window=, =background= |
 | =ladybird-hint-alphabet=            | ="asdfghjkl"=      | characters of the labels of =C-c C-o=; 2 to 36 of a-z and 0-9 |

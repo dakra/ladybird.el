@@ -102,13 +102,13 @@ places, and `ladybird-live-color` reads a pixel through the module's test access
 | `live-connect` | first frame's pixels, sizes, buffer name, header line, icon, shared memory or not |
 | `live-navigation` | link click, `C-c C-l`, back and forward, reload with and without the cache, zoom with `C-x C-+` and its repeat keys, stop |
 | `live-scroll` | the page's own scrolling on the cursor keys, `SPC`, the page keys and the Emacs motion keys; the scroll commands of command mode; wheel; position and pixels |
-| `live-keyboard` | page mode: letters, shift, text without a key, function keys, the Emacs editing keys, paste, the motion keys in a textarea, `C-c C-q`; command mode round trip |
+| `live-keyboard` | page mode: letters, shift, text without a key, function keys, the Emacs editing keys, paste, the motion keys in a textarea, `C-c C-q`; command mode round trip; a field focused by a click, `TAB`, a script after a click and autofocus leaves command mode, with `activation` as expected |
 | `live-mouse` | click, double click, drag selection and `M-w`, hover, context menu |
 | `live-dialogs` | alert, confirm, prompt, beforeunload, select, file, colour, date, a granted permission |
 | `live-permission` | a stray key, dismissal and refusal of a permission; geolocation |
 | `live-crash` | a prompt withdrawn by a crash, the crash message, the page coming back |
 | `live-find` | counting, stepping, case, the selection left by `C-g` |
-| `live-hints` | the list and its labels in the frames, cancelling, a button, a text field from command mode, a checkbox, a link |
+| `live-hints` | the list and its labels in the frames, cancelling, a button, a text field from command mode with user activation, a checkbox that takes the focus from it and brings command mode back, a link |
 | `live-viewport` | split, frame resize, a growing minibuffer, visibility, focus |
 | `live-pages` | two pages on one server painting their own canvases, a cookie set in one and read in the other, `C-c C-s`, a hidden animated page sending no frames and a full frame when shown again, `ladybird-new-page-display` (`selected-window`, `other-window`, `background`), killing a page while it animates, the limit (the server started with `--emacs-max-views=3`), and the pages coming back with `ladybird-connect` (`socket`, `forward`) |
 | `live-popups` | pages that pages open (the server started with `--emacs-max-views=3`): a link with `target=_blank` opening a page in the background that sees itself hidden, `C-c C-s`, the page closing its window, `window.open` with `window.opener` reaching the opener, a page closing itself at once, the limit giving `popup_blocked`, a hinted click opening a page |

@@ -29,9 +29,10 @@ hint "safe button"
 expect state title=safe:true
 
 # A page that takes the labels out, or moves them onto other elements, gets no activation at all. (The victim moved away,
-# which uncovered the decoy.)
+# which uncovered the decoy.) A hints request can overtake a key, so the page's title is awaited.
 {"type":"key","kind":"down","key":"X","code_point":120,"modifiers":0}
 {"type":"key","kind":"up","key":"X","code_point":120,"modifiers":0}
+expect state title=tamper:x
 {"type":"hints","id":4,"alphabet":"asdf"}
 expect hints_list id=4 items#=4
 settle 0.5
@@ -42,6 +43,7 @@ expect error id=4 "message~=tampered"
 expect-no state 1
 {"type":"key","kind":"down","key":"T","code_point":116,"modifiers":0}
 {"type":"key","kind":"up","key":"T","code_point":116,"modifiers":0}
+expect state title=tamper:t
 {"type":"hints","id":5,"alphabet":"asdf"}
 expect hints_list id=5 items#=4
 settle 0.5

@@ -97,7 +97,7 @@ All callbacks are members of `WebView::ViewImplementation` (`Libraries/LibWebVie
 | `on_favicon_change(Optional<Gfx::Bitmap const&>)` | `favicon` with `encode_base64(TRY(Gfx::PNGWriter::encode(bitmap)))` (`Libraries/LibGfx/ImageFormats/PNGWriter.h:37`, `AK/Base64.h:60`); absent bitmap → `png: null` |
 | `on_page_background_color_change(Gfx::Color)` | `background_color` `#rrggbb` |
 | `on_find_in_page(size_t current_match_index, Optional<size_t> const& total)` | `find_result` (`total` null when unknown) |
-| `on_input_method_state_change()` → `input_method_state()` (`is_enabled`, `caret_rect: Optional<Web::DevicePixelRect>`) | `ime` |
+| `on_input_method_state_change()` → `input_method_state()` (`is_enabled`, `has_transient_activation`, `caret_rect: Optional<Web::DevicePixelRect>`) | `ime` (`enabled`, `activation`, `caret`) |
 | `on_console_message(ConsoleOutput)` (`Libraries/LibWebCommon/WebView/ConsoleOutput.h:58`: `Variant<ConsoleLog, ConsoleError, ConsoleTrace, ConsoleGroupEnd>`); enabled with `start_sending_console_output(bool messages, bool errors)` | `console` — level from `ConsoleLog::level` (`JS::ConsoleLogLevel`), text = arguments joined by space (`JsonValue::serialized()` for non-strings); `ConsoleError` → level `"error"`, text `name: message` |
 | `on_web_content_crashed(WebContentCrashReason)` (`ProcessCrash`, `RejectedIPC`) | `crashed` with reason string |
 | `on_close()` | `view_closed {reason:"closed"}`, then destroy the view |

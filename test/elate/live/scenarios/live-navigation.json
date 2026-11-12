@@ -1,6 +1,6 @@
 {
   "name": "live-navigation",
-  "comment": "Moving between pages: a clicked link, l with a URL, back and forward with their limits, reload with and without the cache, zoom, and stopping a page that is slow to arrive.",
+  "comment": "Moving between pages: a clicked link, C-c C-l with a URL, back and forward with their limits, reload with and without the cache, zoom, and stopping a page that is slow to arrive.",
   "params": {"server": "stdio"},
   "variants": {"stdio": {"server": "stdio"}, "socket": {"server": "socket"}, "ssh": {"server": "ssh"}, "forward": {"server": "forward"}},
   "defaults": {"timeout": 20},

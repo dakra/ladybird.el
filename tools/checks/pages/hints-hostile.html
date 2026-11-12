@@ -16,8 +16,9 @@
   JSON.stringify = () => "{}";
   Object.defineProperty(HTMLElement.prototype, "innerText", { get: () => "fake" });
   // After a press of X, the labels are taken out of the page as soon as they arrive; after a press of T, they are moved.
+  // The title says which key the page has seen.
   let tamper = null;
-  addEventListener("keydown", event => tamper = event.key);
+  addEventListener("keydown", event => document.title = "tamper:" + (tamper = event.key));
   new MutationObserver(records => {
     for (const record of records)
       for (const node of record.addedNodes)

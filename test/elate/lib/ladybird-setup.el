@@ -40,6 +40,9 @@
 
 (require 'ladybird)
 
+;; The scenarios type into the page unless they turn command mode on.
+(setq ladybird-initial-mode 'page)
+
 (defconst ladybird-elate-native
   (and (fboundp 'ladybird-load-module)
        (let ((warning-minimum-log-level :emergency))

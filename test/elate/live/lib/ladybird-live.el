@@ -69,6 +69,9 @@
 
 (require 'ladybird)
 
+;; The scenarios type into the page unless they turn command mode on.
+(setq ladybird-initial-mode 'page)
+
 (unless (ladybird-load-module)
   (error "The native module does not load; run `make build'"))
 

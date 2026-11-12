@@ -30,6 +30,7 @@
             (ladybird--change-function #'ladybird--on-conn-change)
             (ladybird--viewport-function #'ladybird--hello-viewport)
             (ladybird-device-pixel-ratio 1.0)
+            (ladybird-initial-mode 'page)
             (ladybird--update-timer nil)
             (ladybird--saved-tracking nil)
             (ladybird--dragging nil)
@@ -925,7 +926,189 @@ the canvas."
       (with-current-buffer (ladybird--make-view-buffer conn 2 "mock://2")
         (should ladybird-command-mode)))
     (with-current-buffer (ladybird--make-view-buffer conn 3 "mock://3")
-      (should-not ladybird-command-mode))))
+      (should-not ladybird-command-mode))
+    (should (eq (eval (car (get 'ladybird-initial-mode 'standard-value)) t)
+                'command))))
+
+(ert-deftest ladybird-render-test-field-focus ()
+  ;; A text field that gets the focus turns command mode off until it
+  ;; loses the focus; a switch by hand in between stays.
+  (ladybird-render-test-with-view
+    (let* ((calls nil)
+           (ladybird-field-focus-functions
+            (list #'ladybird-follow-field-focus
+                  (lambda (&rest args) (push args calls))))
+           (ime (lambda (enabled &optional activation)
+                  ;; Another buffer is current while a message arrives.
+                  (with-temp-buffer
+                    (ladybird-test-receive
+                     conn `((type . "ime") (view . 1) (enabled . ,enabled)
+                            (activation . ,(if activation t :false))
+                            (caret . :null)))))))
+      (ladybird-command-mode 1)
+      (funcall ime t)
+      (should-not ladybird-command-mode)
+      (should (equal calls '((t nil))))
+      (funcall ime t)
+      (should (equal calls '((t nil))))
+      ;; A field focused without user input is reported again when the
+      ;; user first clicks or types, and not when the activation ends.
+      (funcall ime t t)
+      (should (equal calls '((t t) (t nil))))
+      (funcall ime t)
+      (should (= (length calls) 2))
+      (funcall ime :false)
+      (should ladybird-command-mode)
+      (should (equal (car calls) '(nil nil)))
+      (funcall ime :false)
+      (should (= (length calls) 3))
+      ;; Command mode switched on in a field stays while a field has the
+      ;; focus, also through the first click in an autofocused one; page
+      ;; mode switched on after it ends as the field's would.
+      (funcall ime t)
+      (should-not ladybird-command-mode)
+      (ladybird-command-mode 1)
+      (funcall ime t t)
+      (should (equal (car calls) '(t t)))
+      (should ladybird-command-mode)
+      (ladybird-page-mode)
+      (funcall ime :false)
+      (should ladybird-command-mode)
+      ;; With no field focused the switch by hand is done with.
+      (funcall ime t)
+      (ladybird-command-mode 1)
+      (funcall ime :false)
+      (should ladybird-command-mode)
+      (funcall ime t t)
+      (should-not ladybird-command-mode)
+      (funcall ime :false)
+      (should ladybird-command-mode)
+      ;; C-c C-j or C-u - C-c C-e in page mode changes nothing.
+      (ladybird-page-mode)
+      (funcall ime t)
+      (ladybird-page-mode)
+      (ladybird-command-mode -1)
+      (funcall ime :false)
+      (should-not ladybird-command-mode)
+      (ladybird-command-mode 1)
+      ;; A hint chooses the field over command mode switched on by hand.
+      (funcall ime t t)
+      (ladybird-command-mode 1)
+      (ladybird--enter-field t)
+      (should-not ladybird-command-mode)
+      (funcall ime :false)
+      (should ladybird-command-mode)
+      (ladybird-page-mode)
+      ;; Page mode switched on by hand stays when a field loses the focus.
+      (funcall ime t)
+      (funcall ime :false)
+      (should-not ladybird-command-mode)
+      ;; Without `ladybird-follow-field-focus' the mode stays.
+      (ladybird-command-mode 1)
+      (let ((ladybird-field-focus-functions nil))
+        (funcall ime t)
+        (funcall ime :false))
+      (should ladybird-command-mode)
+      ;; The README's function that waits for the user.
+      (let ((ladybird-field-focus-functions
+             (list (lambda (focused activation)
+                     (when (or activation (not focused))
+                       (ladybird-follow-field-focus focused))))))
+        (funcall ime t)
+        (should ladybird-command-mode)
+        (funcall ime t t)
+        (should-not ladybird-command-mode)
+        (funcall ime :false)
+        (should ladybird-command-mode))
+      ;; A function that signals is reported and the others still run.
+      (let ((ladybird-field-focus-functions
+             (list (lambda (&rest _) (error "Boom"))
+                   #'ladybird-follow-field-focus)))
+        (should (equal (ladybird-render-test-messages (funcall ime t))
+                       '("ladybird-field-focus-functions: (error \"Boom\")")))
+        (should-not ladybird-command-mode))
+      ;; A forgotten view takes its field with it.
+      (setq calls nil)
+      (ladybird--forget-view)
+      (should (equal calls '((nil nil))))
+      (should ladybird-command-mode)
+      (should-not ladybird--field-focused))))
+
+(ert-deftest ladybird-render-test-field-focus-kill ()
+  ;; Killing a buffer whose field has the focus calls no hook.
+  (ladybird-render-test-with-view
+    (let* ((calls nil)
+           (ladybird-field-focus-functions
+            (list #'ladybird-follow-field-focus
+                  (lambda (&rest args) (push args calls)))))
+      ;; Nor does a view the server closes.
+      (let ((other (ladybird--make-view-buffer conn 2 "mock://2")))
+        (ladybird-test-receive conn '((type . "ime") (view . 2) (enabled . t)
+                                      (activation . t) (caret . :null)))
+        (should (equal calls '((t t))))
+        (ladybird-test-receive conn '((type . "view_closed") (view . 2)
+                                      (reason . "client")))
+        (should-not (buffer-live-p other))
+        (should (equal calls '((t t)))))
+      (ladybird-test-receive conn '((type . "ime") (view . 1) (enabled . t)
+                                    (activation . t) (caret . :null)))
+      (should (equal calls '((t t) (t t))))
+      (kill-buffer buffer)
+      (should (= (length calls) 2)))))
+
+(ert-deftest ladybird-render-test-field-focus-welcome ()
+  ;; A view the server keeps keeps its field; one of a new server
+  ;; process reports its fields gone.
+  (ladybird-render-test-with-view
+    (let* ((calls nil)
+           (ladybird-field-focus-functions
+            (list #'ladybird-follow-field-focus
+                  (lambda (&rest args) (push args calls)))))
+      (ladybird-command-mode 1)
+      (ladybird-test-receive conn '((type . "ime") (view . 1) (enabled . t)
+                                    (activation . t) (caret . :null)))
+      (should-not ladybird-command-mode)
+      (ladybird--on-welcome conn '((views . (((view . 1) (url . "mock://one"))))))
+      (should (eq ladybird--field-focused 'user))
+      (should (equal calls '((t t))))
+      ;; A function may kill another page buffer, which then stays out.
+      (let ((other (ladybird--make-view-buffer conn 2 "mock://2"))
+            (ladybird-field-focus-functions
+             (cons (lambda (focused _)
+                     (unless focused
+                       (kill-buffer (get-buffer "*ladybird: mock://2*"))))
+                   ladybird-field-focus-functions)))
+        (ladybird-test-receive conn '((type . "ime") (view . 2) (enabled . t)
+                                      (activation . t) (caret . :null)))
+        (setq calls nil)
+        (setf (ladybird--conn-server-changed conn) t)
+        (ladybird--on-welcome conn '((views . nil)))
+        (should-not (buffer-live-p other))
+        (should (equal calls '((nil nil))))
+        (should ladybird-command-mode)))))
+
+(ert-deftest ladybird-render-test-field-focus-buffers ()
+  ;; Each function runs in the page buffer, and none after one that
+  ;; kills it.
+  (ladybird-render-test-with-view
+    (let* ((other (ladybird--make-view-buffer conn 2 "mock://2"))
+           (where nil)
+           (ladybird-field-focus-functions
+            (list (lambda (&rest _) (set-buffer other))
+                  (lambda (&rest _) (push (current-buffer) where))
+                  (lambda (focused _) (unless focused (kill-buffer)))
+                  (lambda (&rest _) (push (current-buffer) where)))))
+      (ladybird-test-receive conn '((type . "ime") (view . 1) (enabled . t)
+                                    (activation . t) (caret . :null)))
+      (should (equal where (list buffer buffer)))
+      (setq where nil)
+      (with-current-buffer other
+        (ladybird-test-receive conn '((type . "ime") (view . 1)
+                                      (enabled . :false) (activation . :false)
+                                      (caret . :null)))
+        (should (eq (current-buffer) other)))
+      (should-not (buffer-live-p buffer))
+      (should (equal where (list buffer))))))
 
 (defun ladybird-render-test-keys-in-page (keys)
   "Type KEYS, a string for `kbd', in the page buffer shown in the window."
@@ -1801,9 +1984,10 @@ https://example.org? (allow once, allow always, deny) "))
                            (if command-mode "command" "page")))
           (should (eq (key-binding (kbd (car binding))) (cdr binding))))))
     ;; The single keys of command mode.
-    (dolist (binding '(("l" . ladybird-goto-url) ("g" . ladybird-goto-url)
+    (dolist (binding '(("g" . ladybird-goto-url)
                        ("r" . ladybird-reload) ("R" . ladybird-reload-bypass-cache)
-                       ("s" . ladybird-stop) ("b" . ladybird-back)
+                       ("k" . ladybird-stop) ("s" . ladybird-switch-to-page)
+                       ("b" . ladybird-back)
                        ("f" . ladybird-forward) ("+" . ladybird-zoom-in)
                        ("=" . ladybird-zoom-in) ("-" . ladybird-zoom-out)
                        ("0" . ladybird-zoom-reset) ("w" . ladybird-copy-url)
@@ -2231,7 +2415,14 @@ ID defaults to the last one sent, ITEMS to the test items."
       (should (equal (ladybird-test-sent)
                      `(((type . "hints_narrow") (view . 1) (id . ,id) (prefix . "s"))
                        ((type . "hints_end") (view . 1) (id . ,id) (activate . 3)))))
-      (should-not ladybird-command-mode))))
+      (should-not ladybird-command-mode))
+    ;; Command mode comes back when the field loses the focus.
+    (ladybird-test-receive conn '((type . "ime") (view . 1) (enabled . t)
+                                  (activation . :false) (caret . :null)))
+    (should-not ladybird-command-mode)
+    (ladybird-test-receive conn '((type . "ime") (view . 1) (enabled . :false)
+                                  (activation . :false) (caret . :null)))
+    (should ladybird-command-mode)))
 
 (ert-deftest ladybird-render-test-hint-new-buffer ()
   (ladybird-render-test-with-hints

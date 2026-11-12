@@ -80,7 +80,8 @@ of a canvas, and tests substitute the fake module.
 | `ladybird-translated-keys` | see 5.3 | Emacs editing and motion keys translated for the server's platform and sent to the page. |
 | `ladybird-emacs-keys` | `<f1> <f3> <f4> <f10> <f11>` | Keys the page map leaves to Emacs (help, keyboard macros, menu bar, full screen); they win over `ladybird-translated-keys`. Rebuilds the page map like it. |
 | `ladybird-new-page-display` | `selected-window` | Where a page a command opens in a new buffer appears: `selected-window`, `other-window` or `background`; through `display-buffer` (4.6). |
-| `ladybird-initial-mode` | `page` | `page`: a new buffer sends its keys to the page; `command`: it starts in `ladybird-command-mode`. |
+| `ladybird-initial-mode` | `command` | `command`: a new buffer starts in `ladybird-command-mode`; `page`: it sends its keys to the page. |
+| `ladybird-field-focus-functions` | `(ladybird-follow-field-focus)` | Hook run with FOCUSED and ACTIVATION when `ladybird--field-focused` changes; the default leaves command mode while a field has the focus. |
 | `ladybird-scroll-step` | `nil` | Pixels for `n`/`p`; `nil` = `(frame-char-height)` × 3. |
 | `ladybird-console-buffer` | `"*ladybird-console*"` | |
 | `ladybird-hint-alphabet` | `"asdfghjkl"` | Characters the server makes hint labels of (protocol §6.1): 2 to 36 different characters of `a`–`z`, `0`–`9`; `ladybird-follow-hint` refuses another value with a `user-error`. |
@@ -93,13 +94,13 @@ of a canvas, and tests substitute the fake module.
 | `ladybird-browse-url` (autoload) | `(url &optional new-session)`; `browse-url` handler (section 6.9). Reuses the most recently used ladybird buffer unless NEW-SESSION. |
 | `ladybird-connect` | Dial a host without opening a view (shows existing views as buffers). |
 | `ladybird-reconnect` | Redial this buffer's connection now (also after `replaced`). |
-| `ladybird-goto-url` (`C-c C-l`; `l`, `g` in command mode) | `read-string` with current URL as default → `load`; with a prefix argument the URL opens in a new buffer on the same host. |
-| `ladybird-reload` (`C-c C-r`; `r`), `ladybird-reload-bypass-cache` (`R`), `ladybird-stop` (`C-c C-k`; `s`) | `ladybird-reload` bypasses the cache with a prefix argument. |
+| `ladybird-goto-url` (`C-c C-l`; `g` in command mode) | `read-string` with current URL as default → `load`; with a prefix argument the URL opens in a new buffer on the same host. |
+| `ladybird-reload` (`C-c C-r`; `r`), `ladybird-reload-bypass-cache` (`R`), `ladybird-stop` (`C-c C-k`; `k`) | `ladybird-reload` bypasses the cache with a prefix argument. |
 | `ladybird-back` (`C-c C-b`; `b`), `ladybird-forward` (`C-c C-f`; `f`) | `history` −1/+1; disabled when `can_go_back`/`can_go_forward` is false (`user-error`). |
 | `ladybird-scroll-down-line`, `-up-line`, `-down-page`, `-up-page`, `-left`, `-right`, `-top`, `-bottom` (command mode: `n`/`p`, `C-n`/`C-p`, `<down>`/`<up>`, `SPC`/`DEL`/`S-SPC`, `C-v`/`M-v`, `<next>`/`<prior>`, `<left>`/`<right>`, `C-b`/`C-f`, `<`/`>`, `M-<`/`M->`) | Send `mouse wheel` at the canvas center with `dy`/`dx` in device pixels; a page is `(window-body-height win t)` − one line; top/bottom send ±10⁶. Command mode also remaps `scroll-up-command` and the like to them. |
 | `ladybird-zoom-adjust` (`[remap text-scale-adjust]`: `C-x C-+`, `C-x C-=`, `C-x C--`, `C-x C-0`) | `zoom` in, out or reset by the last key's base character; a transient map lets `+ = - 0` repeat, as `text-scale-adjust` does. `ladybird-zoom-in` (`+`, `=`), `-out` (`-`), `-reset` (`0`) in command mode. |
 | `ladybird-find` (`C-s`), `ladybird-find-backward` (`C-r`) | Section 6.6. |
-| `ladybird-switch-to-page` (`C-c C-s`) | `completing-read` over every page buffer by title and URL, the buffer used last first and the current one last; with several connections an annotation names the host (4.6). |
+| `ladybird-switch-to-page` (`C-c C-s`; `s`) | `completing-read` over every page buffer by title and URL, the buffer used last first and the current one last; with several connections an annotation names the host (4.6). |
 | `ladybird-follow-hint` (`C-c C-o`; `o` in command mode) | Section 6, item 13. With a prefix argument a chosen link opens in a new buffer. |
 | `ladybird-command-mode` (`C-c C-e`, the mode-line tag), `ladybird-page-mode` (`C-c C-j`; `i`, `RET` in command mode) | Single keys are commands, or keys go to the page. |
 | `ladybird-send-next-key` (`C-c C-q`, `[remap quoted-insert]`) | Reads one key and sends it untranslated (`read-event` in a graphical frame, `read-key` in a terminal, where an `ESC` read with a key is that key with Meta); a mouse event is put back on `unread-command-events`. |
@@ -432,6 +433,23 @@ Header line (`ladybird-header-line`): `(:eval (ladybird--header-line))` → favi
 any, `(create-image (base64-decode-string png) 'png t :height (frame-char-height)
 :ascent 'center)`), title, `" — "`, URL, `[loading]`, `[detached]`/`[reconnecting in Ns]`.
 `mode-line-process` carries the `:Page`/`:Command` tag and `:Loading` as `ghostel--mode-line-refresh`.
+
+`ime` handler: `ladybird--field-focused` is nil without a focused field, `user` once
+`activation` was true while the field had the focus, `page` before. When it changes, each
+function of `ladybird-field-focus-functions` gets FOCUSED and `activation` through
+`run-hook-wrapped`, which reports a function's error and goes on. `ladybird-follow-field-focus`
+turns command mode off for a field (`ladybird--enter-field`, which sets
+`ladybird--field-page-mode` to t) and on again when no field has the focus. While a field
+has the focus, the body of `ladybird-command-mode` sets the flag to `hand` when it turns the
+mode on and to t when it turns it off; with no field focused it sets nil.
+`ladybird--enter-field` leaves a `hand` mode alone except for a hint, the flag `hand` is
+cleared when no field has the focus, and `ladybird-page-mode` acts only in command mode.
+The body records a choice only when the mode changes (`ladybird--command-mode-was`). Each
+hook function runs in the page buffer, and none after one that kills it; the welcome and
+adopt paths go on only with live buffers. `ladybird--forget-view` reports the fields gone to
+the hook, except while the buffer is killed. The server sends the current `ime` to a new
+client and on `set_focus` true, so a buffer made again for a view learns it.
+
 `favicon` arrives as base64 PNG; decode once per message.
 
 ### 4.6 Several pages
@@ -775,7 +793,8 @@ All handlers below run via `ladybird--later` with an `on-quit` that cancels (3.8
       whose own URL is a file URL, in a new buffer on the buffer's host, and refuses
       others with "ladybird: not opening URL". The context menu's "Open Link" and "Open
       Link in New Buffer" go through it too. A chosen `"input"` turns
-      `ladybird-command-mode` off after `hints_end`.
+      `ladybird-command-mode` off after `hints_end`, also when it was switched on by hand
+      in a field.
     - The session ends, sending nothing: on `hints_cancelled` naming its view and id,
       also while it waits for the labels ("The page ended the hint session"; dialog
       prompts are not touched, and `request_cancelled` does not end a session); on an
@@ -915,7 +934,7 @@ M ≈ 300, L ≈ 600 of code plus tests.
 - **D1 Navigation commands** (S): `ladybird-goto-url`, `ladybird-reload`, `ladybird-back`,
   `ladybird-forward`, `ladybird-stop`, zoom, `ladybird-copy-url`, `ladybird-new-buffer`,
   `ladybird-screenshot`, `ladybird-toggle-console`, `ladybird-browse-url`.
-  elate: `l`, type URL, RET → `load` in the log and the header line shows `Mock: URL`;
+  elate: `g`, type URL, RET → `load` in the log and the header line shows `Mock: URL`;
   `b` with `can_go_back` false → `user-error`.
 - **D2 Find** (S): `ladybird-find`, `ladybird-find-backward`, `ladybird--find-minibuffer-map`,
   `ladybird--find-update`, `find_result` handler. elate: `C-s`, type `oc` → log shows `find`
