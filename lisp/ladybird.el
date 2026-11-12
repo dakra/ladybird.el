@@ -509,7 +509,8 @@ neither holds any more.
 A command or a recursive edit can have the variable bound: its value is
 neither saved nor put back inside a recursive edit or, unless
 AFTER-COMMAND is non-nil, while a command runs.  `post-command-hook'
-calls this with AFTER-COMMAND and so catches up."
+calls this with AFTER-COMMAND and so catches up.  While a drag in
+another window has set the variable, nothing is put back either."
   (let* ((top (and (= (recursion-depth) 0)
                    (or after-command (null this-command))))
          (hover (and ladybird-track-hover
@@ -527,7 +528,10 @@ calls this with AFTER-COMMAND and so catches up."
           (setq track-mouse wanted)))
       (when hover
         (setq mouse-fine-grained-tracking t)))
-     ((and (not active) top ladybird--saved-tracking)
+     ((and (not active) top ladybird--saved-tracking
+           ;; Any other value is that of a drag elsewhere, which puts
+           ;; back what it found when it ends.
+           (memq track-mouse '(nil t dragging)))
       (setq track-mouse (nth 0 ladybird--saved-tracking)
             mouse-fine-grained-tracking (nth 1 ladybird--saved-tracking)
             ladybird--saved-tracking nil)))

@@ -3818,6 +3818,21 @@ running until it is stopped where it runs"))))))
           (should (eq track-mouse t))
           (ladybird--after-command))
         (should-not track-mouse)
+        (should-not ladybird--saved-tracking)
+        ;; A drag in another window sets the variable and puts back what
+        ;; it found when it ends; the saved value waits for that.
+        (set-window-buffer (selected-window) buffer)
+        (ladybird--after-command)
+        (should (eq track-mouse t))
+        (with-temp-buffer
+          (set-window-buffer (selected-window) (current-buffer))
+          (setq track-mouse 'drag-tracking)
+          (ladybird--after-command)
+          (should (eq track-mouse 'drag-tracking))
+          (should ladybird--saved-tracking)
+          (setq track-mouse t)
+          (ladybird--after-command))
+        (should-not track-mouse)
         (should-not ladybird--saved-tracking)))))
 
 (ert-deftest ladybird-render-test-local-server ()
