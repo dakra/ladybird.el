@@ -370,7 +370,7 @@ Commands are not ordered after input events still on their way to the page: a
 | `edit` | `view`, `op`: `"select_all"`, `"cut"`, `"undo"`, `"redo"` | `cut` makes the server send `clipboard` with the cut text |
 | `paste` | `view`, `text` | Paste `text` at the caret (Emacs owns the clipboard) |
 | `request_selection` | `view`, `request` | Server answers `selection` `{view, request, text}` |
-| `screenshot` | `view`, `request`, `kind`: `"visible"`, `"full"`, `path` (optional, server-side) | Server saves a PNG on its machine and answers `screenshot_saved` `{view, request, path}`; `path` in the answer is authoritative (without `path`: `/tmp/ladybird-emacs-<pid>-screenshot-<n>.png`, mode 0600, `<n>` counting the screenshots of the server) |
+| `screenshot` | `view`, `request`, `kind`: `"visible"`, `"full"`, `path` (optional, server-side) | Server saves a PNG on its machine and answers `screenshot_saved` `{view, request, path}`; `path` in the answer is authoritative (without `path`: `ladybird-emacs-<pid>-screenshot-<n>.png` in the directory of the default socket when the server listens there, else in `$XDG_RUNTIME_DIR`, and where there is neither or the file cannot be made there, `/tmp/ladybird-emacs-<pid>-screenshot-<n>-XXXXXX.png` with `XXXXXX` chosen at random; mode 0600, `<n>` counting the screenshots of the server) |
 | `set_console` | `view`, `enabled` | Turns `console` messages on or off |
 
 | Server → client | Fields | Meaning |

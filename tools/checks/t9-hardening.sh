@@ -9,6 +9,25 @@ XDG_DOWNLOAD_DIR="$WORK/downloads" "${CLIENT[@]}" --server "$SERVER" --timeout 1
     --script "$CHECKS_DIR/t9-hardening.txt" || fail "hardening script"
 [ -z "$(ls -A "$WORK/downloads")" ] || fail "a page saved a file: $(ls "$WORK/downloads")"
 
+# A screenshot without a path goes to XDG_RUNTIME_DIR, and without that to a file in /tmp with a name nobody can tell
+# beforehand.
+mkdir -m 700 "$WORK/run"
+screenshot_script() {
+    cat >"$WORK/screenshot.txt" <<SCRIPT
+settle 0.3
+{"type":"screenshot","kind":"visible","request":1}
+expect screenshot_saved request=1 $*
+file-mode "\$last.path" 600
+remove "\$last.path"
+SCRIPT
+}
+screenshot_script "path~=$WORK/run/ladybird-emacs-" "path~=-screenshot-1.png"
+XDG_RUNTIME_DIR="$WORK/run" "${CLIENT[@]}" --server "$SERVER" --timeout 15 --url "$(page dialogs.html)" \
+    --script "$WORK/screenshot.txt" || fail "screenshot in XDG_RUNTIME_DIR"
+screenshot_script "path~=/tmp/ladybird-emacs-" "path~=-screenshot-1-"
+XDG_RUNTIME_DIR= "${CLIENT[@]}" --server "$SERVER" --timeout 15 --url "$(page dialogs.html)" \
+    --script "$WORK/screenshot.txt" || fail "screenshot in /tmp"
+
 SOCKET="$WORK/l.sock"
 start_socket_server "$SOCKET"
 SERVER_PID="${SERVER_PIDS[0]}"

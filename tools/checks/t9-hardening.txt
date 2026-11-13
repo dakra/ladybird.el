@@ -55,7 +55,7 @@ expect screenshot_saved request=1
 png-size "$last.path" 400 300
 file-mode "$last.path" 600
 {"type":"screenshot","kind":"visible","request":2}
-expect screenshot_saved request=2 path~=/tmp/ladybird-emacs-
+expect screenshot_saved request=2 path~=ladybird-emacs-
 png-size "$last.path" 400 300
 file-mode "$last.path" 600
 remove "$last.path"
