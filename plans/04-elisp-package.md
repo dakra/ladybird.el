@@ -364,8 +364,9 @@ an error or any other exit. `ladybird--answer` notes the answer and sends it. An
 shown in the echo area is answered at once without a prompt.
 
 `request_cancelled` and `permission_cancelled` (`ladybird--cancel-prompt-later`), and a
-connection that closes for good or is taken over (`ladybird--cancel-conn-prompts`), drop
-the prompts of their keys (`ladybird--drop-prompts`): queued ones are forgotten, open ones
+connection that closes for good, is taken over or gets a `welcome` again after a redial
+(`ladybird--cancel-conn-prompts`; the server sends its open requests again), drop the
+prompts of their keys (`ladybird--drop-prompts`): queued ones are forgotten, open ones
 send neither their answer nor their decline. The innermost dropped prompt closes from a
 timer by throwing to its own entry, the catch tag; one with another prompt inside closes
 when that one ends. A prompt has one such timer, and it waits while a minibuffer deeper

@@ -353,11 +353,13 @@ has page buffers (=ladybird-reconnect=); the header line says so.  The buffers k
 last frame and re-attach to their pages; a page the server no longer has is opened again
 with its URL, and so is every page when another server process answers.  A page that had
 no buffer stays without one, hidden; a page the server opened meanwhile gets one.  A page
-whose buffer was killed meanwhile is closed once the connection is back.  The delays
-start at one second again after a connection has lasted ten seconds.  A local or ssh
-server that exited by itself is reported with its exit status and started again only
-with =ladybird-reconnect= set to =always=.  When another client takes the server over the
-buffers show =[taken over]=, and =M-x ladybird-reconnect= takes it back.
+whose buffer was killed meanwhile is closed once the connection is back.  A question of a
+page that is open when the connection is lost stays open until it is back, then closes
+and is asked again if the page still waits for it; an answer given meanwhile is lost.
+The delays start at one second again after a connection has lasted ten seconds.  A
+local or ssh server that exited by itself is reported with its exit status and started
+again only with =ladybird-reconnect= set to =always=.  When another client takes the
+server over the buffers show =[taken over]=, and =M-x ladybird-reconnect= takes it back.
 
 A server is pinged after =ladybird-keepalive-interval= seconds of silence and its
 connection dropped when no answer comes within =ladybird-ping-timeout=.

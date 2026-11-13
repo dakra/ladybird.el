@@ -1024,6 +1024,44 @@ Return the other messages BODY showed, oldest first."
       (should-not declined)
       (should-not (ladybird-test-sent)))))
 
+;; A redial ends the prompts of the earlier session; the server sends
+;; again what is still open.
+(ert-deftest ladybird-render-test-redial-ends-prompts ()
+  (ladybird-render-test-with-view
+    (ladybird-test-receive conn '((type . "dialog") (view . 1) (id . 7)
+                                  (kind . "confirm") (message . "hi")))
+    (ladybird--drop conn)
+    (should (eq (ladybird--conn-state conn) 'redialing))
+    (should (= (length ladybird--queued-prompts) 1))
+    (ladybird-test-run-timer (ladybird--conn-timer conn))
+    (ladybird-test-receive
+     conn (ladybird-test-welcome '(((view . 1) (url . "mock://one")))))
+    (should-not ladybird--queued-prompts)
+    (ladybird-test-receive conn '((type . "dialog") (view . 1) (id . 7)
+                                  (kind . "confirm") (message . "hi")))
+    (should (= (length ladybird--queued-prompts) 1))
+    (dolist (timer timer-list)
+      (when (eq (timer--function timer) #'ladybird--run-prompt)
+        (cancel-timer timer))))
+  (ladybird-render-test-with-view
+    (let ((declined nil)
+          (continued nil))
+      (ladybird-render-test-prompts
+        (ladybird--call-prompt
+         (lambda ()
+           (ladybird--drop conn)
+           (ladybird-test-run-timer (ladybird--conn-timer conn))
+           (ladybird-test-receive
+            conn (ladybird-test-welcome '(((view . 1) (url . "mock://one")))))
+           (setq ladybird-test-sent nil)
+           (ladybird-test-run-timer (ladybird-render-test-close-timer))
+           (setq continued t))
+         (lambda () (setq declined t))
+         (list conn 1 7)))
+      (should-not continued)
+      (should-not declined)
+      (should-not (ladybird-test-sent "dialog_closed")))))
+
 (ert-deftest ladybird-render-test-detach-one ()
   ;; With a prefix argument only the current buffer goes: its page is
   ;; hidden on the server and kept, the connection stays.

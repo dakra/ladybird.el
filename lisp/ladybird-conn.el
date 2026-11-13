@@ -947,7 +947,9 @@ The name of its log file has its process id."
     (setf (ladybird--conn-delay conn) nil)))
 
 (ladybird--defhandler "welcome" (conn msg)
-  "Make CONN ready and call what waits for it."
+  "Make CONN ready and call what waits for it.
+The prompts for requests of an earlier session of CONN end without an
+answer: the server sends again those still open."
   (when (eq (ladybird--conn-state conn) 'hello)
     (if (not (eql (alist-get 'protocol msg) ladybird--protocol))
         (progn
@@ -977,6 +979,8 @@ The name of its log file has its process id."
                            (ladybird--conn-process conn))))
       (ladybird--set-state conn 'ready)
       (ladybird--keepalive)
+      ;; The server asks again what is still open of an earlier session.
+      (ladybird--cancel-conn-prompts conn)
       (funcall ladybird--welcome-function conn msg)
       (let ((callbacks (nreverse (ladybird--conn-on-ready conn))))
         (setf (ladybird--conn-on-ready conn) nil)
@@ -1118,7 +1122,8 @@ quit, an error or any other exit from the prompt.  The page that asked
 waits for the answer.  KEY names the prompt for
 `ladybird--cancel-prompt-later', which ends it without an answer; a KEY
 that is a list starting with a connection ends so when that connection
-closes for good or is taken over, see `ladybird--cancel-conn-prompts'.
+closes for good, is taken over or is welcomed again after a redial, see
+`ladybird--cancel-conn-prompts'.
 FUNCTION waits for input in a minibuffer of its own, unless it says
 otherwise with `ladybird--prompt-reads-keys'; it runs with
 `use-dialog-box' nil."
