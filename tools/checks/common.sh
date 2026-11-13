@@ -39,3 +39,18 @@ start_socket_server() {
     done
     fail "the server did not create $path"
 }
+
+# server_pid PATH: connects to the socket at once, without waiting for it, and prints the pid of the process that
+# listens there.
+server_pid() {
+    python3 -I - "$1" <<'PY'
+import socket, struct, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+if sys.platform == "darwin":
+    pid = struct.unpack("i", s.getsockopt(0, 2, 4))[0]  # SOL_LOCAL, LOCAL_PEERPID
+else:
+    pid = struct.unpack("3i", s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0]
+print(pid)
+PY
+}

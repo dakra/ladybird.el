@@ -87,7 +87,7 @@
     {"eval": "(setq ladybird-keep-view-on-kill t)"},
     {"eval": "(mapc #'kill-buffer (ladybird--buffers))"},
     {"assert": {"eval": "(null ladybird--conns)"}},
-    {"assert": {"eval": "(ladybird-elate-messages-p \"ladybird: no page is open here on mock; its server keeps running with 2 pages, which .ladybird-connect. shows again\")"}},
+    {"assert": {"eval": "(ladybird-elate-messages-p \"ladybird: no page is open here on mock; its server keeps running with 2 pages, which .ladybird-attach. or .ladybird-connect. shows again\")"}},
     {"eval": "(setq ladybird-keep-view-on-kill nil)"},
     {"eval": "(ladybird-connect \"mock\")"},
     {"wait": "until", "pred": "(= 2 (length (ladybird--buffers)))"},

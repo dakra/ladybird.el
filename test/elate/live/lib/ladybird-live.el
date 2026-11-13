@@ -18,6 +18,12 @@
 ;;   "forward"  a server on another machine listening on a Unix socket
 ;;              that ssh forwards to this machine
 ;;
+;; A scenario of a server on the default socket starts with
+;; (ladybird-live-start-default VARIANT) instead, "socket" or "forward":
+;; the server runs in the background, with an XDG_RUNTIME_DIR of the
+;; scenario's own on its machine and a log there that its command line
+;; names, by which it is found and stopped.
+;;
 ;; The pages come from test/elate/live/serve.py, which runs on the
 ;; server's machine: here for the local variants, and for the remote
 ;; ones on the remote machine, where the pages are copied to a temporary
@@ -110,6 +116,21 @@
   (format "%s-%d" (or (getenv "LADYBIRD_LIVE_RUN") "manual") (emacs-pid))
   "A word that names this session's sockets and remote processes.")
 
+(defconst ladybird-live-runtime
+  (or (getenv "LADYBIRD_LIVE_XDG")
+      (format "/tmp/ladybird-live-%s-xdg" ladybird-live-id))
+  "XDG_RUNTIME_DIR of the session and of the servers it starts.
+The same directory on the remote machine is that of a server on the
+default socket there.  An Emacs this session starts uses the session's
+directory, which LADYBIRD_LIVE_XDG names.")
+
+;; From the start, so that no server on this machine's own default
+;; socket is found.
+(make-directory ladybird-live-runtime t)
+(set-file-modes ladybird-live-runtime #o700)
+(setenv "XDG_RUNTIME_DIR" ladybird-live-runtime)
+(setenv "LADYBIRD_LIVE_XDG" ladybird-live-runtime)
+
 (defconst ladybird-live-socket (format "/tmp/ladybird-live-%s.sock" ladybird-live-id)
   "The Unix socket the connection of a socket variant dials.")
 
@@ -135,6 +156,8 @@
 (defvar ladybird-live-server-arguments nil
   "Further arguments of the server a scenario starts, in every variant.")
 (defvar ladybird-live-saved nil "Another variable for the steps of a scenario.")
+(defvar ladybird-live-default nil
+  "Non-nil when the scenario's server is on the default socket.")
 
 (advice-add 'ladybird--send :before
             (lambda (_conn message)
@@ -242,8 +265,9 @@ It runs on a terminal of its ssh, so it ends with that ssh."
                                             ladybird-live-remote-socket)))
    60 "the remote server's socket"))
 
-(defun ladybird-live--forward ()
-  "Start the ssh that forwards `ladybird-live-socket' to the remote server."
+(defun ladybird-live--forward (&optional remote)
+  "Start the ssh that forwards `ladybird-live-socket' to the remote server.
+REMOTE is the server's socket there, by default `ladybird-live-remote-socket'."
   (when (process-live-p ladybird-live-tunnel)
     (delete-process ladybird-live-tunnel))
   (when (file-exists-p ladybird-live-socket)
@@ -255,7 +279,7 @@ It runs on a terminal of its ssh, so it ends with that ssh."
                         "-o" "ExitOnForwardFailure=yes"
                         "-o" "StreamLocalBindUnlink=yes"
                         "-L" (format "%s:%s" ladybird-live-socket
-                                     ladybird-live-remote-socket)
+                                     (or remote ladybird-live-remote-socket))
                         ladybird-live-ssh-host)))
   (ladybird-live--wait (lambda () (file-exists-p ladybird-live-socket)) 30
                        "the forwarded socket"))
@@ -289,8 +313,8 @@ Return the page buffer."
   (pcase variant
     ("stdio"
      (setq ladybird-program ladybird-live-program
-           ladybird-hosts nil
-           ladybird-default-host nil))
+           ladybird-hosts (list (cons "live" "local"))
+           ladybird-default-host "live"))
     ("socket"
      (ladybird-live--serve)
      (setq ladybird-hosts (list (cons "live" ladybird-live-socket))
@@ -317,16 +341,174 @@ Return the page buffer."
       (delete-process process)))
   (when ladybird-live-server
     (ladybird-live-kill-server))
+  (when ladybird-live-default
+    (ladybird-live-stop-default))
   (if (and ladybird-live-ssh-host (ladybird-live-remote-p))
       (ladybird-live--remote
        "sh" "-c" (shell-quote-argument
                   (format "rm -rf /tmp/ladybird-live-%s-*" ladybird-live-id)))
     (dolist (file (file-expand-wildcards
                    (format "/tmp/ladybird-live-%s-*" ladybird-live-id)))
-      (delete-file file)))
+      (if (file-directory-p file)
+          (delete-directory file t)
+        (delete-file file))))
   (when (file-exists-p ladybird-live-socket)
     (delete-file ladybird-live-socket))
   t)
+
+
+;;; A server on the default socket
+
+
+(defconst ladybird-live-default-log (concat ladybird-live-runtime "/server.log")
+  "Log of the server on the default socket, on the server's machine.
+Its --emacs-log names it, so its command line names this session.")
+
+(defun ladybird-live-start-default (variant)
+  "Prepare VARIANT's server on the default socket, and the page server.
+In the `socket' variant no host is configured, so the local server is
+the one on the default socket in `ladybird-live-runtime', which nothing
+listens on yet, and `ladybird-program' starts it.  In the `forward'
+variant a server is started in the background on the default socket of
+the remote machine, with the same XDG_RUNTIME_DIR there, and ssh
+forwards it to `ladybird-live-socket', the socket of the host \"live\".
+Either server logs to `ladybird-live-default-log'."
+  (setq ladybird-live-variant variant
+        ladybird-live-default t
+        ladybird-live-sent nil
+        ladybird-live-received nil
+        ladybird-live-statuses nil
+        ladybird-ssh-program ladybird-live-ssh
+        ladybird-program ladybird-live-program
+        ladybird-program-arguments (append ladybird-live-server-arguments
+                                           (list (concat "--emacs-log="
+                                                         ladybird-live-default-log)))
+        ladybird-autostart-server 'ask)
+  (ladybird-live--http)
+  (pcase variant
+    ("socket"
+     (setq ladybird-hosts nil
+           ladybird-default-host nil))
+    ("forward"
+     (unless ladybird-live-ssh-host
+       (error "LADYBIRD_LIVE_SSH_HOST is not set"))
+     (with-temp-buffer
+       (unless (eql 0 (call-process
+                       ladybird-live-ssh nil t nil ladybird-live-ssh-host
+                       (format "mkdir -m 700 -p %s && XDG_RUNTIME_DIR=%s exec %s"
+                               ladybird-live-runtime ladybird-live-runtime
+                               (mapconcat #'shell-quote-argument
+                                          (append (list ladybird-live-remote-program
+                                                        "--headless=emacs")
+                                                  ladybird-program-arguments
+                                                  (list "--emacs-default-socket"
+                                                        "--emacs-background"))
+                                          " "))))
+         (error "The remote server did not start: %s" (buffer-string))))
+     (ladybird-live--forward (concat ladybird-live-runtime "/ladybird-emacs.sock"))
+     (setq ladybird-hosts (list (cons "live" ladybird-live-socket))
+           ladybird-default-host "live"))
+    (_ (error "Variant %S has no server on the default socket" variant)))
+  t)
+
+(defun ladybird-live-default-pids ()
+  "Return the process ids of the servers on the default socket of this scenario.
+They are the processes on the server's machine whose command line has
+--headless=emacs and --emacs-log naming `ladybird-live-default-log'.
+The bracket keeps the shell that runs pgrep over ssh from matching."
+  (let ((pattern (format "[-]-headless=emacs .*--emacs-log=%s"
+                         ladybird-live-default-log)))
+    (with-temp-buffer
+      (if (ladybird-live-remote-p)
+          (call-process ladybird-live-ssh nil t nil ladybird-live-ssh-host
+                        (format "pgrep -f %s" (shell-quote-argument pattern)))
+        (call-process "pgrep" nil t nil "-f" pattern))
+      (mapcar #'string-to-number (split-string (buffer-string))))))
+
+(defun ladybird-live-default-server-p ()
+  "Return non-nil if the scenario's server on the default socket runs.
+Here it has to accept connections on the default socket."
+  (if (ladybird-live-remote-p)
+      (and (ladybird-live-default-pids) t)
+    (ladybird--socket-live-p (ladybird-default-socket))))
+
+(defun ladybird-live-default-server-pid ()
+  "Return the process id of the one server on the default socket."
+  (let ((pids (ladybird-live-default-pids)))
+    (unless (= (length pids) 1)
+      (error "Servers on the default socket: %S" pids))
+    (car pids)))
+
+(defun ladybird-live-stop-default ()
+  "Stop the servers on the scenario's default socket and remove their directory."
+  (let ((pids (mapcar #'number-to-string (ladybird-live-default-pids))))
+    (if (ladybird-live-remote-p)
+        (ladybird-live--remote
+         "sh" "-c"
+         (shell-quote-argument
+          (format "for p in %s; do kill $p; done; for p in %s; do i=0; \
+while kill -0 $p 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; \
+done; rm -rf %s"
+                  (string-join pids " ") (string-join pids " ")
+                  ladybird-live-runtime)))
+      (dolist (pid pids)
+        (signal-process (string-to-number pid) 'term))
+      (ladybird-live--wait
+       (lambda () (not (seq-some (lambda (pid)
+                                   (process-attributes (string-to-number pid)))
+                                 pids)))
+       10 "the servers on the default socket to stop")
+      (when (file-directory-p ladybird-live-runtime)
+        (delete-directory ladybird-live-runtime t))))
+  t)
+
+(defun ladybird-live-first-emacs (pages)
+  "Open PAGES in another Emacs, which then quits, and return its exit status.
+The other Emacs runs in batch with this session's servers and
+environment: in the `socket' variant `ladybird-autostart-server' is t
+there, so the first page starts the server in the background.  PAGES
+is a list of lists of pages under pages/: each list opens a page with
+the first of them and loads the others into it in turn.  It quits with
+`kill-emacs' once each page has loaded its last, the first page shown
+in its window and the others in no window."
+  (let ((file (format "/tmp/ladybird-live-%s-first.el" ladybird-live-id))
+        (form
+         `(progn
+            (setq ladybird-program ,ladybird-program
+                  ladybird-program-arguments ',ladybird-program-arguments
+                  ladybird-ssh-program ,ladybird-ssh-program
+                  ladybird-hosts ',ladybird-hosts
+                  ladybird-default-host ,ladybird-default-host
+                  ladybird-autostart-server t)
+            (with-timeout (120 (message "first Emacs: timed out") (kill-emacs 2))
+              (let ((loaded (lambda (buffer page)
+                              (ladybird-live--wait
+                               (lambda ()
+                                 (and (equal (ladybird-live-field-in buffer "page") page)
+                                      (not (alist-get 'loading (buffer-local-value
+                                                                'ladybird--state buffer)))))
+                               60 page))))
+                (dolist (loads ',(mapcar (lambda (list)
+                                           (mapcar (lambda (page)
+                                                     (cons (ladybird-live-url page)
+                                                           (file-name-base page)))
+                                                   list))
+                                         pages))
+                  (let ((buffer (ladybird (caar loads))))
+                    (funcall loaded buffer (cdar loads))
+                    (dolist (load (cdr loads))
+                      (with-current-buffer buffer (ladybird-goto-url (car load)))
+                      (funcall loaded buffer (cdr load))))
+                  (setq ladybird-new-page-display 'background))))
+            (kill-emacs 0))))
+    (with-temp-file file
+      (prin1 form (current-buffer)))
+    (prog1 (call-process (expand-file-name invocation-name invocation-directory)
+                         nil (get-buffer-create "*ladybird-live-first*") nil
+                         "--batch" "-Q"
+                         "-l" (expand-file-name "lib/ladybird-live.el" ladybird-live-directory)
+                         "-l" file)
+      (delete-file file))))
 
 
 ;;; The page
@@ -596,9 +778,10 @@ With CONTENTS, a string, the file is written first."
 
 (defun ladybird-live-server-pid ()
   "Return the process id of the server, on its machine.
-The name of its log file has it."
+The name of its log file has it, as ladybird-emacs-PID.log or
+ladybird-emacs-PID-RANDOM.log."
   (let ((log (alist-get 'log (ladybird--conn-server-info (ladybird-live-conn)))))
-    (if (and log (string-match "\\([0-9]+\\)[^0-9/]*\\'" log))
+    (if (and log (string-match "/ladybird-emacs-\\([0-9]+\\)[^/]*\\'" log))
         (string-to-number (match-string 1 log))
       (error "No process id in the log name %S" log))))
 

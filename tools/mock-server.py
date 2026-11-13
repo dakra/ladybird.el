@@ -11,12 +11,23 @@ Usage: python3 -I tools/mock-server.py [OPTIONS]
 
   --stdio             serve stdin/stdout (default)
   --socket PATH       listen on a Unix socket
+  --emacs-default-socket
+                      listen on the default socket of plans/01-protocol.md
+                      section 1, making its directory outside
+                      XDG_RUNTIME_DIR with mode 0700 but checking nothing
+  --emacs-background  with a socket: run the server in a session of its own
+                      with its standard streams on /dev/null and exit once it
+                      listens, printing "Ladybird logs to FILE" with --log; or
+                      exit 1 with the reason on stderr, also when a server
+                      accepts connections on the socket already
+  --headless MODE     ignored, so that the mock takes Ladybird's command line
   --tcp HOST:PORT     listen on a TCP port
   --views N           views that exist before the first client (default 0)
   --fps F             animation ticks per second (default 10; 0 = none)
   --log FILE          JSON lines: every received control message, plus
-                      {"type":"_frame_sent",...}, {"type":"_connected"} and
-                      {"type":"_disconnected"}
+                      {"type":"_frame_sent",...}, {"type":"_connected"} when
+                      a connection becomes the client and
+                      {"type":"_disconnected"} when the client goes
   --no-pong           never answer a ping
   --exit-after S      exit after S seconds
   --exit-code N       exit status of --exit-after (default 0)
@@ -38,6 +49,17 @@ Usage: python3 -I tools/mock-server.py [OPTIONS]
   --no-hints          leave "hints" out of the welcome's features (there are
                       none then) and answer hints with an error
   --selftest          run an in-process client against the server
+
+A connection becomes the client with a valid hello (protocol section
+8).  A connection that closes before its hello leaves the client alone,
+as does one whose first message is no valid hello or whose framing is
+broken, which gets a reject.  A client that is replaced gets the rest
+of the record being written to it, "replaced" and the end of the
+stream; a client whose framing is broken gets the same with a reject.
+What such a connection still sends is dropped until it closes, for at
+most 3 seconds.
+At most 8 connections wait for their hello; a ninth closes the oldest.
+A second hello of the client is answered with an error.
 
 Loading a mock:// URL makes the server emit a request or event:
 mock://alert, confirm, prompt, beforeunload, select, file, files, color,
@@ -89,6 +111,7 @@ import os
 import selectors
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -102,6 +125,8 @@ TEXT_SCALE = 2
 TEXT_MARGIN = 8
 TEXT_HEIGHT = 2 * TEXT_MARGIN + 7 * TEXT_SCALE
 RAW_THRESHOLD = 16 * 1024
+MAX_PENDING = 8
+DRAIN_TIMEOUT = 3
 WHITE = b"\xff\xff\xff\xff"
 BLACK = b"\x00\x00\x00\xff"
 
@@ -328,6 +353,8 @@ class Client:
         self.sock = sock
         self.reader = lp.RecordReader()
         self.out = bytearray()
+        # Bytes of the record at the head of out that are still to be written.
+        self.record_left = 0
         self.ready = False
         self.encoding = "raw"
         self.shm = False
@@ -346,6 +373,8 @@ class Server:
         self.next_id = 1
         self.shm_generation = 0
         self.client = None
+        self.pending = []
+        self.retiring = []
         self.listener = None
         self.timers = []
         self.timer_serial = 0
@@ -371,28 +400,94 @@ class Server:
         sock.setblocking(False)
         self.selector.register(sock, selectors.EVENT_READ, "listener")
 
-    def attach(self, client):
-        if self.client:
-            self.send(self.client, {"type": "replaced"})
-            self.flush(self.client, blocking=True)
-            self.drop_client()
-        self.client = client
+    def connect(self, client):
+        """Take the connection CLIENT, which becomes the client with its hello."""
         os.set_blocking(client.read_fd, False)
         os.set_blocking(client.write_fd, False)
-        self.selector.register(client.read_fd, selectors.EVENT_READ, "client")
+        self.selector.register(client.read_fd, selectors.EVENT_READ, client)
+        if len(self.pending) >= MAX_PENDING:
+            self.close(self.pending.pop(0))
+        self.pending.append(client)
+
+    def attach(self, client):
+        """Make the pending connection CLIENT the client, replacing the one before."""
+        self.pending.remove(client)
+        self.drop_client({"type": "replaced"})
+        self.client = client
         self.log({"type": "_connected"})
 
-    def drop_client(self):
-        client, self.client = self.client, None
-        if not client:
+    def close(self, client):
+        self.unregister(client)
+        if client.sock:
+            client.sock.close()
+
+    def close_pending(self, client):
+        self.pending.remove(client)
+        self.close(client)
+        self.check_stop()
+
+    def reject(self, client, reason):
+        self.pending.remove(client)
+        self.retire(client, {"type": "reject", "reason": reason})
+
+    def retire(self, client, message):
+        """Send CLIENT the rest of the record being written and MESSAGE, then close.
+
+        What it sends meanwhile is dropped; it is closed when it closes
+        or after DRAIN_TIMEOUT seconds."""
+        del client.out[client.record_left:]
+        client.out += lp.encode_control(message)
+        self.retiring.append(client)
+        self.after(DRAIN_TIMEOUT, lambda: self.discard(client))
+        self.flush(client)
+
+    def discard(self, client):
+        if client in self.retiring:
+            self.retiring.remove(client)
+            self.close(client)
+            self.check_stop()
+
+    def finish_writing(self, client):
+        """End the stream of the retiring CLIENT, whose queue is written."""
+        if not client.sock:
+            self.discard(client)
             return
+        try:
+            client.sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            self.discard(client)
+
+    def check_stop(self):
+        """Without a listener the server ends with its last connection."""
+        if not (self.listener or self.client or self.pending or self.retiring):
+            self.running = False
+
+    def hello_refusal(self, m):
+        """Return why the first message M of a connection is refused, or None."""
+        if m.get("type") != "hello":
+            return "the first message must be hello"
+        if self.args.reject:
+            return "rejected by --reject"
+        if m.get("protocol") != lp.PROTOCOL_VERSION:
+            return "unsupported protocol version"
+        return None
+
+    def unregister(self, client):
         for fd in {client.read_fd, client.write_fd}:
             try:
                 self.selector.unregister(fd)
             except (KeyError, ValueError):
                 pass
-        if client.sock:
-            client.sock.close()
+
+    def drop_client(self, message=None):
+        """Drop the client; with MESSAGE, retire its connection with it."""
+        client, self.client = self.client, None
+        if not client:
+            return
+        if message:
+            self.retire(client, message)
+        else:
+            self.close(client)
         for view in self.views.values():
             view.in_flight = None
             view.shm_announced = False
@@ -403,11 +498,10 @@ class Server:
                 view.damage_all()
         self.log({"type": "_disconnected"})
 
-    def hang_up(self):
+    def hang_up(self, message=None):
         """Drop the client; without a listener that ends the server."""
-        self.drop_client()
-        if not self.listener:
-            self.running = False
+        self.drop_client(message)
+        self.check_stop()
 
     def run(self):
         if self.args.exit_after is not None:
@@ -420,12 +514,15 @@ class Server:
                 if self.timers:
                     timeout = max(0, self.timers[0][0] - time.monotonic())
                 for key, events in self.selector.select(timeout):
-                    if key.data == "listener":
+                    client = key.data
+                    if client == "listener":
                         self.accept()
-                    elif self.client and events & selectors.EVENT_WRITE:
-                        self.flush(self.client)
-                    elif self.client and events & selectors.EVENT_READ:
-                        self.read()
+                    elif not self.connected(client):
+                        continue
+                    elif events & selectors.EVENT_WRITE:
+                        self.flush(client)
+                    elif events & selectors.EVENT_READ:
+                        self.read(client)
                 while self.timers and self.timers[0][0] <= time.monotonic():
                     heapq.heappop(self.timers)[2]()
         finally:
@@ -452,68 +549,114 @@ class Server:
 
     def accept(self):
         sock, _ = self.listener.accept()
-        self.attach(Client(sock.fileno(), sock.fileno(), sock))
+        self.connect(Client(sock.fileno(), sock.fileno(), sock))
 
-    def read(self):
-        client = self.client
+    def connected(self, client):
+        return (client is self.client or client in self.pending
+                or client in self.retiring)
+
+    def framing_error(self, client):
+        if client in self.pending:
+            self.reject(client, "framing error")
+        else:
+            self.hang_up({"type": "reject", "reason": "framing error"})
+
+    def read(self, client):
+        """Read from CLIENT, the client or a connection that has not said hello."""
         try:
             data = os.read(client.read_fd, 1 << 16)
         except BlockingIOError:
             return
         except OSError:
             data = b""
+        if client in self.retiring:
+            if not data:
+                self.discard(client)
+            return
         if not data:
-            self.drop_client()
-            if not self.listener:
-                self.running = False
+            if client in self.pending:
+                self.close_pending(client)
+            else:
+                self.hang_up()
             return
         try:
             records = client.reader.feed(data)
         except lp.Desync:
-            self.drop_client()
-            if not self.listener:
-                self.running = False
+            self.framing_error(client)
             return
         for kind, payload in records:
-            if kind != lp.KIND_CONTROL or client is not self.client:
+            if kind != lp.KIND_CONTROL:
                 continue
             try:
                 message = json.loads(payload)
             except ValueError:
                 continue
+            if not isinstance(message, dict):
+                continue
+            if client in self.pending:
+                refusal = self.hello_refusal(message)
+                if refusal:
+                    self.log(message)
+                    self.reject(client, refusal)
+                    return
+                self.attach(client)
+            elif client is not self.client:
+                return
             self.log(message)
             handler = getattr(self, "on_" + str(message.get("type")), None)
             if handler:
                 handler(client, message)
+        # A framing error behind the records shows on the next feed.
+        if client is self.client or client in self.pending:
+            try:
+                client.reader.feed(b"")
+            except lp.Desync:
+                self.framing_error(client)
 
     def send(self, client, obj):
         client.out += lp.encode_control(obj)
         self.flush(client)
 
-    def flush(self, client, blocking=False):
-        if blocking:
-            os.set_blocking(client.write_fd, True)
+    def wrote(self, client, sent):
+        """Remove the SENT bytes written from CLIENT's queue."""
+        position, left = 0, client.record_left
+        while position < sent:
+            if not left:
+                left = 4 + struct.unpack_from("<I", client.out, position)[0]
+            step = min(left, sent - position)
+            position += step
+            left -= step
+        client.record_left = left
+        del client.out[:sent]
+
+    def flush(self, client):
         try:
             while client.out:
-                sent = os.write(client.write_fd, client.out[:1 << 18])
-                del client.out[:sent]
+                self.wrote(client, os.write(client.write_fd, client.out[:1 << 18]))
         except BlockingIOError:
             pass
         except OSError:
             del client.out[:]
-        want = bool(client.out)
-        if want == client.writing or client is not self.client:
+            client.record_left = 0
+            if client in self.retiring:
+                self.discard(client)
+                return
+        if not self.connected(client):
             return
-        client.writing = want
-        if client.read_fd == client.write_fd:
-            self.selector.modify(client.read_fd, selectors.EVENT_READ
-                                 | (selectors.EVENT_WRITE if want else 0),
-                                 "client")
-        elif want:
-            self.selector.register(client.write_fd, selectors.EVENT_WRITE,
-                                   "client")
-        else:
-            self.selector.unregister(client.write_fd)
+        want = bool(client.out)
+        if want != client.writing:
+            client.writing = want
+            if client.read_fd == client.write_fd:
+                self.selector.modify(client.read_fd, selectors.EVENT_READ
+                                     | (selectors.EVENT_WRITE if want else 0),
+                                     client)
+            elif want:
+                self.selector.register(client.write_fd, selectors.EVENT_WRITE,
+                                       client)
+            else:
+                self.selector.unregister(client.write_fd)
+        if not want and client in self.retiring:
+            self.finish_writing(client)
 
     def tell(self, obj):
         if self.client and self.client.ready:
@@ -824,14 +967,8 @@ class Server:
     # Messages
 
     def on_hello(self, client, m):
-        if self.args.reject or m.get("protocol") != lp.PROTOCOL_VERSION:
-            self.send(client, {"type": "reject",
-                               "reason": "rejected by --reject" if self.args.reject
-                               else "unsupported protocol"})
-            self.flush(client, blocking=True)
-            self.drop_client()
-            if not self.listener:
-                self.running = False
+        if client.ready:
+            self.send(client, {"type": "error", "message": "hello was already sent"})
             return
         viewport = m.get("viewport") or {}
         client.viewport = (viewport.get("width", 800), viewport.get("height", 600),
@@ -1245,6 +1382,14 @@ class SelftestClient:
             return
         raise AssertionError(f"unexpected record {record}")
 
+    def eof(self, timeout=2):
+        """Read until the end of the stream, which comes within TIMEOUT."""
+        try:
+            while True:
+                self.receive(timeout)
+        except EOFError:
+            pass
+
     def ack(self, header):
         self.send({"type": "frame_ack", "view": header.view, "seq": header.seq})
 
@@ -1282,7 +1427,7 @@ def selftest():
     def serve(*argv):
         ours, theirs = socket.socketpair()
         server = Server(parse_arguments(["--fps", "0", *argv]))
-        server.attach(Client(theirs.fileno(), theirs.fileno(), theirs))
+        server.connect(Client(theirs.fileno(), theirs.fileno(), theirs))
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
         return SelftestClient(ours), thread
@@ -1432,13 +1577,171 @@ def selftest():
 
     client, thread = serve("--reject")
     client.send(hello)
-    assert client.expect("reject")["reason"]
+    assert client.expect("reject")["reason"] == "rejected by --reject"
+    client.eof()
+    client.sock.close()
     thread.join(5)
+    assert not thread.is_alive()
+
+    # Without a listener the server ends once a client with a framing
+    # error has read what was queued for it and the reject.
+    client, thread = serve("--views", "1")
+    client.send(hello)
+    time.sleep(0.3)
+    client.sock.sendall(BAD_HEADER)
+    time.sleep(0.3)
+    assert [client.receive()["type"] for _ in range(2)] == ["welcome", "state"]
+    assert client.frame()[0].full
+    assert client.expect("reject")["reason"] == "framing error"
+    client.eof()
+    client.sock.close()
+    thread.join(5)
+    assert not thread.is_alive()
 
     selftest_hints(serve, hello)
     selftest_views(serve, hello)
     selftest_popups(serve, hello)
+    selftest_takeover(hello)
     print("ok" + "".join(f" ({note})" for note in notes))
+
+
+class Listening:
+    """A server on a Unix socket in a directory of its own, in a thread."""
+
+    def __init__(self, *argv):
+        self.directory = tempfile.mkdtemp()
+        self.path = os.path.join(self.directory, "mock.sock")
+        self.log = os.path.join(self.directory, "mock.log")
+        self.server = Server(parse_arguments(["--fps", "0", "--log", self.log,
+                                              *argv]))
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(self.path)
+        listener.listen(16)
+        self.server.listen(listener)
+        self.thread = threading.Thread(target=self.server.run, daemon=True)
+        self.thread.start()
+        self.clients = []
+
+    def connect(self):
+        sock = socket.socket(socket.AF_UNIX)
+        sock.connect(self.path)
+        client = SelftestClient(sock)
+        self.clients.append(client)
+        return client
+
+    def logged(self, message_type):
+        with open(self.log) as f:
+            return [m for m in map(json.loads, f) if m["type"] == message_type]
+
+    def stop(self):
+        # The end of a stream wakes the server up to stop.
+        self.server.running = False
+        for client in self.clients:
+            client.sock.close()
+        try:
+            self.connect().sock.close()
+        except OSError:
+            pass
+        self.thread.join(5)
+        assert not self.thread.is_alive()
+        for file in (self.path, self.log):
+            os.unlink(file)
+        os.rmdir(self.directory)
+
+
+BAD_HEADER = struct.pack("<IB", 0, 1)
+
+
+def selftest_takeover(hello):
+    """A connection takes over the client with its hello, and only then."""
+    mock = Listening()
+    first = mock.connect()
+    first.send(hello)
+    first.expect("welcome")
+    # A probe, a first message that is no hello, one of another protocol
+    # and a framing error, also behind a record, leave the client alone.
+    mock.connect().sock.close()
+    frame = lp.encode_record(lp.KIND_FRAME, b"xx")
+    for data, reason in ((lp.encode_control({"type": "ping", "id": 1}),
+                          "the first message must be hello"),
+                         (lp.encode_control({**hello, "protocol": 2}),
+                          "unsupported protocol version"),
+                         (BAD_HEADER, "framing error"),
+                         (frame + BAD_HEADER, "framing error")):
+        other = mock.connect()
+        other.sock.sendall(data)
+        assert other.expect("reject")["reason"] == reason, data
+        other.eof()
+    # The ninth connection waiting for its hello closes the first.
+    waiting = [mock.connect() for _ in range(MAX_PENDING + 1)]
+    waiting[0].eof()
+    waiting[1].send({"type": "ping", "id": 2})
+    assert waiting[1].expect("reject")["reason"] == "the first message must be hello"
+    # The client's second hello is refused.
+    first.send(hello)
+    assert first.expect("error")["message"] == "hello was already sent"
+    first.send({"type": "ping", "id": 3})
+    assert first.expect("pong")["id"] == 3
+    assert len(mock.logged("_connected")) == 1 and not mock.logged("_disconnected")
+    # A hello takes over.
+    second = mock.connect()
+    second.send(hello)
+    second.expect("welcome")
+    first.expect("replaced")
+    # What the replaced client still sends is not read.
+    first.sock.sendall(BAD_HEADER)
+    first.eof()
+    time.sleep(0.2)
+    second.send({"type": "ping", "id": 4})
+    assert second.expect("pong")["id"] == 4
+    # The client's framing error ends it with a reject.
+    second.sock.sendall(BAD_HEADER)
+    assert second.expect("reject")["reason"] == "framing error"
+    second.eof()
+    assert len(mock.logged("_connected")) == 2
+    assert len(mock.logged("_disconnected")) == 2
+    mock.stop()
+
+    # A client that does not read is replaced without the server waiting
+    # for it: it reads the record that was being written to it, replaced
+    # and the end of the stream, not the pong queued behind the record,
+    # while what it writes is dropped.
+    mock = Listening("--views", "1")
+    first = mock.connect()
+    first.send(hello)
+    first.send({"type": "ping", "id": 5})
+    time.sleep(0.3)
+    second = mock.connect()
+    started = time.monotonic()
+    second.send(hello)
+    second.expect("welcome")
+    assert time.monotonic() - started < 1
+    records = []
+    try:
+        while True:
+            record = first.receive(2)
+            if isinstance(record, tuple):
+                first.ack(record[0])
+            records.append(record if isinstance(record, tuple) else record["type"])
+    except EOFError:
+        pass
+    assert records[:2] == ["welcome", "state"] and records[-1] == "replaced", records
+    assert len(records) == 4 and records[2][0].full, records
+    # Hello and a framing error in one write: welcome, then a reject.
+    third = mock.connect()
+    third.sock.sendall(lp.encode_control(hello) + BAD_HEADER)
+    records = []
+    try:
+        while True:
+            record = third.receive(2)
+            records.append(record if isinstance(record, tuple) else record["type"])
+    except EOFError:
+        pass
+    assert records[0] == "welcome" and records[-1] == "reject", records
+    second.control("state")
+    second.control("replaced")
+    second.eof()
+    mock.stop()
 
 
 def selftest_views(serve, hello):
@@ -1852,7 +2155,78 @@ def parse_arguments(argv):
         "macos" if sys.platform == "darwin" else
         "linux" if sys.platform.startswith("linux") else "unknown"))
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--emacs-default-socket", action="store_true")
+    parser.add_argument("--emacs-background", action="store_true")
+    parser.add_argument("--headless", metavar="MODE")
     return parser.parse_args(argv)
+
+
+STARTER_FD = "LADYBIRD_MOCK_STARTER_FD"
+
+
+def default_socket():
+    """Return the default socket, making its directory outside XDG_RUNTIME_DIR."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if runtime.startswith("/"):
+        return runtime.rstrip("/") + "/ladybird-emacs.sock"
+    temporary = os.environ.get("TMPDIR", "")
+    temporary = temporary.rstrip("/") if temporary.startswith("/") else "/tmp"
+    directory = f"{temporary}/ladybird-emacs-{os.getuid()}"
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    return directory + "/ladybird-emacs.sock"
+
+
+def accepts(path):
+    """Return whether something accepts connections on the Unix socket PATH."""
+    probe = socket.socket(socket.AF_UNIX)
+    try:
+        probe.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def start_background(args):
+    """Start the server in a session of its own and return the exit status."""
+    if not args.socket:
+        print("--emacs-background needs a socket", file=sys.stderr)
+        return 1
+    if accepts(args.socket):
+        print("Unable to start the Emacs server: Another server already "
+              f"listens on {args.socket}", file=sys.stderr)
+        return 1
+    read_end, write_end = os.pipe()
+    subprocess.Popen(
+        [sys.executable, "-I", os.path.abspath(__file__), *sys.argv[1:]],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, start_new_session=True, pass_fds=(write_end,),
+        env={**os.environ, STARTER_FD: str(write_end)})
+    os.close(write_end)
+    said = b""
+    while chunk := os.read(read_end, 4096):
+        said += chunk
+    os.close(read_end)
+    if said == b"ready":
+        if args.log:
+            print(f"Ladybird logs to {args.log}", file=sys.stderr)
+        return 0
+    print(said.decode(errors="replace")
+          or "The Emacs server ended before it accepted connections",
+          file=sys.stderr)
+    return 1
+
+
+def tell_starter(starter, text):
+    """Write TEXT to the starter's pipe STARTER and close it.
+
+    A starter that is gone already is no reason to stop."""
+    try:
+        os.write(int(starter), text.encode())
+    except BrokenPipeError:
+        pass
+    os.close(int(starter))
 
 
 def main():
@@ -1860,6 +2234,11 @@ def main():
     if args.selftest:
         selftest()
         return 0
+    if args.emacs_default_socket:
+        args.socket = default_socket()
+    starter = os.environ.pop(STARTER_FD, None)
+    if args.emacs_background and starter is None:
+        return start_background(args)
     server = Server(args)
     if args.socket:
         try:
@@ -1870,10 +2249,16 @@ def main():
         old = os.umask(0o177)
         try:
             listener.bind(args.socket)
+        except OSError as error:
+            if starter is not None:
+                tell_starter(starter, f"Unable to start the Emacs server: {error}")
+            raise
         finally:
             os.umask(old)
         listener.listen(4)
         server.listen(listener)
+        if starter is not None:
+            tell_starter(starter, "ready")
     elif args.tcp:
         host, _, port = args.tcp.rpartition(":")
         host = host.strip("[]")
@@ -1883,7 +2268,7 @@ def main():
         listener.listen(4)
         server.listen(listener)
     else:
-        server.attach(Client(0, 1))
+        server.connect(Client(0, 1))
     try:
         return server.run()
     except KeyboardInterrupt:

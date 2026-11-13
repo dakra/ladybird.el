@@ -56,7 +56,12 @@ fi
 
 # The scenarios clean up after themselves; this catches what a run that
 # failed or was cut short left behind: elate sessions, servers, the ssh
-# processes and the sockets and files named after this run.
+# processes and the sockets and files named after this run.  A server
+# that a scenario started in the background on the default socket has
+# --emacs-log in a directory named after the run, so its command line
+# names the run too.  On the remote machine the brackets keep the run's
+# name out of the command line of the shell that runs pkill, so that
+# pkill does not end that shell.
 sweep() {
     $elate list 2>/dev/null | python3 -c '
 import json, sys
@@ -66,10 +71,10 @@ for session in json.load(sys.stdin).get("sessions", []):
         while read -r name; do $elate stop "$name" >/dev/null 2>&1; done
     $elate purge --glob 'run-live-*' >/dev/null 2>&1
     pkill -f "ladybird-live-$LADYBIRD_LIVE_RUN-" 2>/dev/null
-    rm -f /tmp/ladybird-live-"$LADYBIRD_LIVE_RUN"-*
+    rm -rf /tmp/ladybird-live-"$LADYBIRD_LIVE_RUN"-*
     if [ -n "$remote_ok" ]; then
         "$live/ssh" -o ConnectTimeout=10 "$LADYBIRD_LIVE_SSH_HOST" \
-            "pkill -f ladybird-live-$LADYBIRD_LIVE_RUN-; rm -rf /tmp/ladybird-live-$LADYBIRD_LIVE_RUN-*" \
+            "pkill -f '[l]adybird-live-$LADYBIRD_LIVE_RUN-'; rm -rf /tmp/[l]adybird-live-$LADYBIRD_LIVE_RUN-*" \
             >/dev/null 2>&1
     fi
 }

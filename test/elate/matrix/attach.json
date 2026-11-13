@@ -1,0 +1,67 @@
+{
+  "name": "attach",
+  "comment": "Attaching to the pages of a server on a socket: three pages, a detach that keeps them, M-x ladybird-attach connecting and giving only the page picked a buffer while the others are told they are hidden, C-c C-a with the entry for all of them, and nothing left to attach.",
+  "params": {"host": "unix"},
+  "variants": {
+    "unix": {"host": "unix"}
+  },
+  "defaults": {"timeout": 15},
+  "session": {"ui": "tty", "size": "120x36", "eval_file": ["../lib/ladybird-setup.el"]},
+  "steps": [
+    {"group": "setup"},
+    {"eval": "(ladybird-elate-start '{{host}})"},
+    {"wait": "until", "pred": "(ladybird-elate-ready-p)"},
+    {"eval": "(select-window (get-buffer-window (ladybird-elate-buffer)))"},
+    {"eval": "(defun ladybird-elate-page (view) (seq-find (lambda (b) (eql (buffer-local-value 'ladybird--view b) view)) (ladybird--buffers)))"},
+    {"eval": "(let ((ladybird-new-page-display 'background)) (ladybird \"mock://two\") (ladybird \"mock://three\"))"},
+    {"wait": "until", "pred": "(and (ladybird-elate-page 2) (ladybird-elate-page 3))"},
+
+    {"group": "detach", "comment": "C-c C-d asks, kills the three buffers and closes the connection; the server keeps the pages"},
+    {"keys": "C-c C-d", "delivery": "events"},
+    {"wait": "prompt"},
+    {"assert": {"state": {"minibuffer.prompt": "Detach 3 pages of mock? (y or n) "}}},
+    {"keys": "y", "delivery": "events"},
+    {"wait": "until", "pred": "(and (null (ladybird--buffers)) (null ladybird--conns))"},
+    {"wait": "until", "pred": "(ladybird-elate-log \"_disconnected\")"},
+    {"assert": {"eval": "(null (ladybird-elate-log \"close_view\"))"}},
+
+    {"group": "one", "comment": "M-x ladybird-attach connects, gives no page a buffer and offers the three; the one picked gets a buffer, the others are told they are hidden"},
+    {"keys": "M-x", "delivery": "events"},
+    {"wait": "prompt"},
+    {"type": "ladybird-attach"},
+    {"keys": "RET", "delivery": "events"},
+    {"wait": "until", "pred": "(equal (minibuffer-prompt) \"Attach page of mock: \")"},
+    {"assert": {"eval": "(null (ladybird--buffers))"}, "comment": "no page has a buffer while the picker is open"},
+    {"type": "mock://two"},
+    {"keys": "TAB RET", "delivery": "events"},
+    {"wait": "until", "pred": "(ladybird-elate-page 2)"},
+    {"assert": {"eval": "(= 1 (length (ladybird--buffers)))"}},
+    {"assert": {"eval": "(eq (window-buffer (selected-window)) (ladybird-elate-page 2))"}, "comment": "in the selected window"},
+    {"assert": {"eval": "(equal (sort (mapcar #'car (ladybird--conn-kept (car ladybird--conns))) #'<) '(1 3))"}},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"set_visibility\" 'view 1 'visible nil)", "comment": "the page that was shown before is hidden now"},
+    {"wait": "until", "pred": "(buffer-local-value 'ladybird--canvas (ladybird-elate-page 2))"},
+
+    {"group": "all", "comment": "C-c C-a offers the two others and an entry for all of them"},
+    {"keys": "C-c C-a", "delivery": "events"},
+    {"wait": "prompt"},
+    {"assert": {"state": {"minibuffer.prompt": "Attach page of mock: "}}},
+    {"type": "All"},
+    {"keys": "TAB RET", "delivery": "events"},
+    {"wait": "until", "pred": "(= 3 (length (ladybird--buffers)))"},
+    {"assert": {"eval": "(null (ladybird--conn-kept (car ladybird--conns)))"}},
+    {"assert": {"eval": "(eq (window-buffer (selected-window)) (ladybird-elate-page 1))"}, "comment": "the first of them is shown"},
+    {"wait": "until", "pred": "(ladybird-elate-messages-p \"ladybird: 2 pages of mock attached; C-c C-s switches\")"},
+    {"wait": "until", "pred": "(ladybird-elate-logged \"set_visibility\" 'view 1 'visible t)"},
+
+    {"group": "none", "comment": "with every page in a buffer there is nothing to attach"},
+    {"keys": "C-c C-a", "delivery": "events"},
+    {"wait": "until", "pred": "(ladybird-elate-messages-p \"Every page of mock has a buffer\")"},
+    {"assert": {"eval": "(= 0 (minibuffer-depth))"}},
+    {"assert": {"eval": "(= 3 (ladybird-elate-count \"create_view\"))"}, "comment": "no page was made again"},
+    {"assert": {"eval": "(= 2 (ladybird-elate-count \"hello\"))"}},
+    {"assert": {"eval": "(null (ladybird-elate-log \"close_view\"))"}},
+
+    {"group": "cleanup"},
+    {"eval": "(ladybird-elate-cleanup)"}
+  ]
+}

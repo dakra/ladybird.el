@@ -94,7 +94,7 @@
     {"wait": "until", "pred": "(ladybird-elate-logged \"mouse\" 'kind \"wheel\" 'dy (ladybird-elate-in-page (- (window-body-height (get-buffer-window) t) (frame-char-height))))"},
     {"keys": ">"},
     {"wait": "until", "pred": "(ladybird-elate-logged \"mouse\" 'kind \"wheel\" 'dy 1000000)"},
-    {"keys": "a", "delivery": "events"},
+    {"keys": "x", "delivery": "events"},
     {"wait": "until", "pred": "(ladybird-elate-messages-p \"Keys are commands here; i sends them to the page again\")"},
     {"assert": {"eval": "(= ladybird-elate-key-count (length (ladybird-elate-log \"key\")))"}, "comment": "no key reached the page"},
     {"keys": "i"},

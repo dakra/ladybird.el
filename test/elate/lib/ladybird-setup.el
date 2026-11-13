@@ -8,6 +8,10 @@
 ;; tools/mock-server.py as the server:
 ;;
 ;;   (ladybird-elate-start VARIANT ARG...)  start a mock server and open a page
+;;   (ladybird-elate-local ARG...)          make the mock the local server, with
+;;                                        a default socket of the session's own
+;;   (ladybird-elate-stop-background)       stop the mock servers it started
+;;                                        in the background
 ;;   (ladybird-elate-ready-p)               non-nil once the page has a frame
 ;;   (ladybird-elate-log TYPE)              messages the mock server logged
 ;;   (ladybird-elate-log-has TYPE PRED)     whether one of them satisfies PRED
@@ -139,6 +143,65 @@ options of the mock server.  Return the page buffer."
         ladybird-default-host "mock")
   (ladybird "mock://start"))
 
+(defvar ladybird-elate-runtime
+  (format "/tmp/ladybird-elate-%d-run" (emacs-pid))
+  "XDG_RUNTIME_DIR of the session and its servers.
+It has the default socket.  The session uses it from the start, so
+that no server on this machine's own default socket is found; nothing
+listens on it until a scenario starts a server there.")
+
+(make-directory ladybird-elate-runtime t)
+(set-file-modes ladybird-elate-runtime #o700)
+(setenv "XDG_RUNTIME_DIR" ladybird-elate-runtime)
+(add-hook 'kill-emacs-hook
+          (lambda () (ignore-errors (delete-directory ladybird-elate-runtime t))))
+
+(defvar ladybird-elate-program
+  (format "/tmp/ladybird-elate-%d-program" (emacs-pid))
+  "Script that `ladybird-elate-local' makes `ladybird-program'.")
+
+(defun ladybird-elate-local (&rest arguments)
+  "Make the mock server with ARGUMENTS this machine's local server.
+The default socket is in `ladybird-elate-runtime'; `ladybird-program'
+is a script that runs the mock server, so `ladybird-start-server'
+starts it in the background and the stdio fallback runs it over
+standard input and output; no host is configured.  A mock server ends
+after ten minutes."
+  (when (file-exists-p ladybird-elate-log)
+    (delete-file ladybird-elate-log))
+  (with-temp-file ladybird-elate-program
+    (insert "#!/bin/sh\nexec "
+            (mapconcat #'shell-quote-argument
+                       (apply #'ladybird-elate--command "--exit-after" "600"
+                              arguments)
+                       " ")
+            " \"$@\"\n"))
+  (set-file-modes ladybird-elate-program #o700)
+  (setq ladybird-program ladybird-elate-program
+        ladybird-program-arguments nil
+        ladybird-hosts nil
+        ladybird-default-host nil
+        ladybird-autostart-server 'ask)
+  (ladybird-default-socket))
+
+(defun ladybird-elate-background-pids ()
+  "Return the process ids of the mock servers started in the background."
+  (seq-filter (lambda (pid)
+                (let ((args (alist-get 'args (process-attributes pid))))
+                  (and args
+                       (string-search ladybird-elate-log args)
+                       (string-search "--emacs-background" args))))
+              (list-system-processes)))
+
+(defun ladybird-elate-stop-background ()
+  "Stop the mock servers started in the background and wait until they are gone."
+  (mapc (lambda (pid) (signal-process pid 'term))
+        (ladybird-elate-background-pids))
+  (with-timeout (5 (error "A mock server in the background does not stop"))
+    (while (ladybird-elate-background-pids)
+      (sleep-for 0.05)))
+  t)
+
 (defun ladybird-elate-buffer ()
   "Return the page buffer used last, or the first one."
   (or (and (buffer-live-p ladybird--last-buffer) ladybird--last-buffer)
@@ -259,9 +322,12 @@ FIELDS is a property list of field symbols and values."
   (when (process-live-p ladybird-elate-intruder)
     (delete-process ladybird-elate-intruder))
   (ladybird-elate-kill-server)
-  (dolist (file (list ladybird-elate-log ladybird-elate-socket))
+  (ladybird-elate-stop-background)
+  (dolist (file (list ladybird-elate-log ladybird-elate-socket ladybird-elate-program))
     (when (file-exists-p file)
       (delete-file file)))
+  (when (file-directory-p ladybird-elate-runtime)
+    (delete-directory ladybird-elate-runtime t))
   t)
 
 (provide 'ladybird-setup)

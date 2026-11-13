@@ -1,6 +1,6 @@
 {
   "name": "reconnect",
-  "comment": "A connection that is lost and a server that goes away and comes back: the buffer shows the redial, keeps its view when the server lived on, and gets a new view from another server process; a second client detaches the first, which takes the server back on request; a local server that exits is reported with its status.",
+  "comment": "A connection that is lost and a server that goes away and comes back: the buffer shows the redial, keeps its view when the server lived on, and gets a new view from another server process; a second client takes over from the first, which takes the server back on request; a local server that exits is reported with its status.",
   "params": {"host": "unix"},
   "variants": {
     "unix": {"host": "unix"},
@@ -46,10 +46,10 @@
     {"eval": "(progn (switch-to-buffer ladybird-elate-canvas) (setq ladybird--last-buffer ladybird-elate-canvas))"},
     {"assert": {"eval": "(= 1 (length (ladybird--buffers)))"}},
 
-    {"group": "replaced", "comment": "a second client detaches this one, which does not redial by itself"},
+    {"group": "replaced", "comment": "a second client takes over from this one, which does not redial by itself"},
     {"eval": "(ladybird-elate-intrude)"},
     {"wait": "until", "pred": "(ladybird-elate-in-page (eq (ladybird--conn-state ladybird--conn) 'replaced))"},
-    {"assert": {"eval": "(string-suffix-p \" [detached]\" (ladybird-elate-header))"}},
+    {"assert": {"eval": "(string-suffix-p \" [taken over]\" (ladybird-elate-header))"}},
     {"assert": {"eval": "(ladybird-elate-messages-p \"ladybird: another client took over mock\")"}},
     {"wait": "idle", "min_idle": 1.5},
     {"assert": {"eval": "(ladybird-elate-in-page (eq (ladybird--conn-state ladybird--conn) 'replaced))"}},

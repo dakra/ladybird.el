@@ -71,6 +71,22 @@ label of `ladybird-hosts'; `ask' prompts when there are several hosts."
                  (string :tag "Host label"))
   :group 'ladybird)
 
+(defcustom ladybird-autostart-server 'ask
+  "Whether to start a server on the default socket when none runs there.
+It applies when `ladybird', `ladybird-browse-url' or
+`ladybird-connect' picks the local server, nothing usable accepts
+connections on the default socket, see `ladybird-default-socket', no
+connection to the local server is open and `ladybird-program' is
+found.  t runs `ladybird-start-server', whose server outlives Emacs;
+`ask' asks first, and is nil in batch Emacs; nil, or the answer no,
+runs `ladybird-program' over its standard input and output instead,
+and its pages end with Emacs.  Without the native module nothing is
+asked or started.  Hosts of `ladybird-hosts' are used as they are."
+  :type '(choice (const :tag "Ask first" ask)
+                 (const :tag "Always" t)
+                 (const :tag "Never" nil))
+  :group 'ladybird)
+
 (defcustom ladybird-device-pixel-ratio (if (featurep 'ns) 1.0 nil)
   "Device pixels the server renders per Emacs pixel.
 With nil this is the frame's scale factor (`frame-scale-factor'): the
@@ -159,8 +175,10 @@ which the condition `(category . ladybird-popup)' matches."
 
 (defcustom ladybird-keep-view-on-kill nil
   "Whether killing a page buffer leaves its page open on the server.
-A page left open shows up again with the next connection to a server
-that outlives its clients."
+A page left open stays hidden without a buffer while the connection
+lasts, also when it is dialled again.  `ladybird-switch-to-page',
+`ladybird-attach' and `ladybird-connect' give it a buffer again, and so
+does the next new connection to a server that outlives its clients."
   :type 'boolean
   :group 'ladybird)
 
@@ -694,14 +712,17 @@ the server and those asked for and not yet made."
             (ladybird--conn-name conn) max (if (= max 1) "" "s")
             (if (> kept 0)
                 (substitute-command-keys
-                 (format ", %d of them left by killed buffers, which \\<ladybird-mode-map>\\[ladybird-switch-to-page] or M-x ladybird-connect shows again"
+                 (format ", %d of them without a buffer here, which \\<ladybird-mode-map>\\[ladybird-switch-to-page], \\[ladybird-attach] or M-x ladybird-connect shows again"
                          kept))
               ""))))
 
 (defun ladybird--restore-kept (conn &optional view)
-  "Give the views CONN's server keeps for killed buffers a buffer again.
-With VIEW only that view.  A buffer gets the view's last state; its
-frame comes when a window shows it.  Return the new buffers."
+  "Give the views of CONN's server without a buffer here a buffer.
+These are the views of CONN's `kept': those of buffers killed with
+`ladybird-keep-view-on-kill' or detached alone, and those
+`ladybird-attach' gave no buffer.  With VIEW only that view.  A buffer
+gets the view's last state; its frame comes when a window shows it.
+Return the new buffers."
   (let (buffers)
     (dolist (entry (reverse (ladybird--conn-kept conn)))
       (when (or (null view) (eql view (car entry)))
@@ -739,7 +760,7 @@ has it, the URL is loaded in that page, shown where BUFFER was."
                (or reason "no reason given")))))
 
 (defun ladybird--forget-view (&optional killing)
-  "Detach the current buffer from its view without closing the view.
+  "Take the current buffer off its view without closing the view.
 The module drops the view's frame, canvas and shared memory.  A hint
 session of the buffer ends.  Unless KILLING, a focused text field of the
 view is reported gone to `ladybird-field-focus-functions'."
@@ -779,11 +800,15 @@ view is reported gone to `ladybird-field-focus-functions'."
 
 (defun ladybird--on-welcome (conn msg)
   "Line the page buffers of CONN up with the views in the welcome MSG.
-A listed view keeps its buffer or gets a new one; a buffer whose view
-is gone asks for a new view with its URL.  The views of another server
-process than the one CONN had before are all new, whatever their ids.
-Views whose buffers were killed while the connection was down are
-closed."
+A listed view keeps its buffer, stays without one when it had none
+before, or gets a new one.  When every function waiting for CONN is
+`ladybird--attach-offer', a view new to CONN gets no buffer either.  A
+view without a buffer is hidden and loses the focus.  A buffer whose
+view is gone asks for a new view with its URL.  The views of another
+server process than the one CONN had before are all new, whatever
+their ids.  Views whose buffers were killed while the connection was
+down are closed, and a connection left without a page buffer by that
+lingers, see `ladybird--linger', unless `ladybird-attach' waits for it."
   (let* ((changed (ladybird--conn-server-changed conn))
          (closing (and (not changed) (ladybird--conn-closing conn)))
          (views (seq-remove
@@ -795,10 +820,17 @@ closed."
                        t)))
                  (alist-get 'views msg)))
          (listed (mapcar (lambda (view) (alist-get 'view view)) views))
+         (kept (and (not changed)
+                    (seq-filter (lambda (entry) (memq (car entry) listed))
+                                (ladybird--conn-kept conn))))
+         (hide (and (ladybird--conn-on-ready conn)
+                    (seq-every-p (lambda (function)
+                                   (eq function #'ladybird--attach-offer))
+                                 (ladybird--conn-on-ready conn))))
          (new 0))
     (setf (ladybird--conn-creating conn) nil
           (ladybird--conn-closing conn) nil
-          (ladybird--conn-kept conn) nil)
+          (ladybird--conn-kept conn) kept)
     ;; A function of `ladybird-field-focus-functions' may kill buffers.
     (dolist (buffer (ladybird--buffers conn))
       (when (buffer-live-p buffer)
@@ -814,20 +846,31 @@ closed."
             (when (buffer-live-p buffer)
               (ladybird--create-view))))))
     (dolist (view views)
-      (let ((id (alist-get 'view view)))
-        (unless (buffer-live-p (gethash id (ladybird--conn-views conn)))
+      (let* ((id (alist-get 'view view))
+             (entry (assq id (ladybird--conn-kept conn))))
+        (cond
+         ((buffer-live-p (gethash id (ladybird--conn-views conn))))
+         (entry (setcdr entry view))
+         (hide (push (cons id view) (ladybird--conn-kept conn)))
+         (t
           (cl-incf new)
           (with-current-buffer (ladybird--make-view-buffer
                                 conn id (alist-get 'url view))
-            (ladybird--apply-state view)))))
+            (ladybird--apply-state view))))))
+    (dolist (entry (ladybird--conn-kept conn))
+      (ladybird--send conn `((type . "set_visibility") (view . ,(car entry))
+                             (visible . :false)))
+      (ladybird--send conn `((type . "set_focus") (view . ,(car entry))
+                             (focused . :false))))
     (when (> new 0)
       (message "ladybird: %d page%s found on %s" new (if (= new 1) "" "s")
                (ladybird--conn-name conn)))
     ;; From a timer, so that what waits for the connection shows its
     ;; page first and every view is told its visibility once.
     (ladybird--schedule-update)
-    ;; A connection redialled only to close views has nothing left to do.
-    (when (and closing (null (ladybird--buffers conn)))
+    ;; A connection redialled only to close views has nothing left to do;
+    ;; one that `ladybird-attach' waits for ends when the attach does.
+    (when (and closing (not hide) (null (ladybird--buffers conn)))
       (ladybird--linger conn))))
 
 (defun ladybird--linger (conn)
@@ -905,8 +948,8 @@ switches to it"))))))
 
 (ladybird--defhandler "state" (conn msg)
   "Record the state of a view on CONN.
-For a view left on the server by a killed buffer it is kept for the
-buffer it gets again."
+For a view without a buffer here it is kept for the buffer it gets
+later."
   (if-let* ((kept (assq (alist-get 'view msg) (ladybird--conn-kept conn))))
       (setcdr kept msg)
     (ladybird--with-view conn msg
@@ -917,8 +960,8 @@ buffer it gets again."
 Each window that showed it is quit with `quit-restore-window': a window
 made for the page is deleted, any other shows the buffer it showed
 before.  The selected window stays selected if it is still live.  A
-page closed before it had a URL goes without a message.  A view left on
-the server by a killed buffer is forgotten."
+page closed before it had a URL goes without a message.  A view without
+a buffer here is forgotten."
   (setf (ladybird--conn-kept conn)
         (assq-delete-all (alist-get 'view msg) (ladybird--conn-kept conn)))
   (ladybird--with-view conn msg
@@ -1001,7 +1044,7 @@ connection is being dialled again is closed when it is back."
         (message "ladybird: no page is open here on %s; its server keeps running%s"
                  (ladybird--conn-name conn)
                  (if (ladybird--conn-kept conn)
-                     (format " with %d page%s, which `ladybird-connect' shows again"
+                     (format " with %d page%s, which `ladybird-attach' or `ladybird-connect' shows again"
                              (length (ladybird--conn-kept conn))
                              (if (cdr (ladybird--conn-kept conn)) "s" ""))
                    " until it is stopped where it runs")))
@@ -1017,7 +1060,7 @@ connection is being dialled again is closed when it is back."
   "Return a header line tag for the state of the buffer's connection."
   (pcase (and ladybird--conn (ladybird--conn-state ladybird--conn))
     ('ready (and (not ladybird--view) " [opening]"))
-    ('replaced " [detached]")
+    ('replaced " [taken over]")
     ('redialing
      (format " [reconnecting in %ds]"
              (max 0 (round (- (or (ladybird--conn-retry-at ladybird--conn)
@@ -1688,6 +1731,8 @@ function keys with any modifiers and `ladybird-translated-keys', less
     (define-key map "o" #'ladybird-follow-hint)
     (define-key map "q" #'ladybird-quit)
     (define-key map "Q" #'ladybird-close)
+    (define-key map "d" #'ladybird-detach)
+    (define-key map "a" #'ladybird-attach)
     map)
   "Keymap of `ladybird-command-mode'.")
 
@@ -1812,6 +1857,8 @@ keys are commands; `page' sends them to the page."
     (define-key map (kbd "C-c C-r") #'ladybird-reload)
     (define-key map (kbd "C-c C-k") #'ladybird-stop)
     (define-key map (kbd "C-c C-s") #'ladybird-switch-to-page)
+    (define-key map (kbd "C-c C-d") #'ladybird-detach)
+    (define-key map (kbd "C-c C-a") #'ladybird-attach)
     (define-key map (kbd "C-c C-w") #'ladybird-copy-url)
     (define-key map (kbd "C-c C-t") #'ladybird-toggle-console)
     (define-key map (kbd "C-c C-n") #'ladybird-focus-next)
@@ -1849,6 +1896,8 @@ mouse and the wheel act on the page.  Other keys, such as \\`C-x',
   \\[ladybird-reload]  reload; with a prefix argument bypass the cache
   \\[ladybird-stop]  stop loading
   \\[ladybird-switch-to-page]  switch to another page by its title or URL
+  \\[ladybird-detach]  detach from the server, which keeps the pages open
+  \\[ladybird-attach]  give a page of the server without a buffer one
   \\[ladybird-copy-url]  copy the page's URL
   \\[ladybird-toggle-console]  console output on or off
   \\[ladybird-focus-next], \\[ladybird-focus-previous]  focus the next, the previous link or field
@@ -1862,7 +1911,9 @@ mouse and the wheel act on the page.  Other keys, such as \\`C-x',
   \\[ladybird-command-mode]  `ladybird-command-mode': single keys are commands
   \\[ladybird-page-mode]  send keys to the page again
 
-Killing the buffer closes the page."
+Killing the buffer closes the page.  \\[ladybird-detach] kills the page buffers
+of a server on a socket and leaves their pages open there; with a
+prefix argument only this buffer."
   :interactive nil
   (setq buffer-read-only t)
   (setq-local cursor-type nil
@@ -1899,33 +1950,188 @@ Killing the buffer closes the page."
 
 ;;; Commands
 
-(defun ladybird--host (label)
-  "Return the host with LABEL, a (LABEL ENDPOINT...) list.
-A nil LABEL is the host `ladybird-default-host' says."
-  (let ((hosts (ladybird--hosts)))
-    (unless hosts
-      (user-error "No server: %s is not installed and `ladybird-hosts' is empty"
-                  ladybird-program))
-    (cond
-     ((stringp label)
-      (or (assoc label hosts) (user-error "No host %s in `ladybird-hosts'" label)))
-     ((stringp ladybird-default-host)
-      (or (assoc ladybird-default-host hosts)
-          (user-error "No host %s in `ladybird-hosts'" ladybird-default-host)))
-     ((and (eq ladybird-default-host 'ask) (cdr hosts))
-      (ladybird--read-host hosts))
-     (t (car hosts)))))
+;;;###autoload
+(defun ladybird-start-server ()
+  "Start this machine's server on the default socket, in the background.
+The server is `ladybird-program' with --emacs-default-socket and
+--emacs-background: it runs in a session of its own and keeps its
+pages when Emacs exits.  This waits until the socket accepts
+connections; \\[keyboard-quit] stops only the waiting, and the echo
+area tells how the start ended.  When the server cannot start, and
+none accepts connections on the socket afterwards, this signals an
+error with the last line the start wrote to its standard error.  A
+server that runs there already is left as it is.  The pages that
+`ladybird', `ladybird-browse-url' and `ladybird-connect' open next go to
+the server on the socket.  Pages open on a server over standard input
+and output stay there, and so do the pages opened from them, such as
+new buffers, links followed in a new buffer and windows they open.
+Return the socket, see `ladybird-default-socket'."
+  (interactive)
+  (let ((socket (ladybird-default-socket)))
+    (if (ladybird--socket-live-p socket)
+        (message "%s" (ladybird--started-message socket nil))
+      (let* ((command (append (ladybird--server-command '(:kind local))
+                              '("--emacs-default-socket" "--emacs-background")))
+             (read-process-output-max (* 1024 1024))
+             (stderr (ladybird--stderr-process))
+             (output "")
+             (waiting t)
+             (reported nil)
+             (process nil)
+             (finish (lambda ()
+                       ;; Read what the start said before the pipe goes away.
+                       (when (process-live-p stderr)
+                         (accept-process-output stderr 0 nil 1))
+                       (delete-process stderr)))
+             ;; A start left by \[keyboard-quit] says how it ended.
+             (report (lambda ()
+                       (unless reported
+                         (setq reported t)
+                         (funcall finish)
+                         (message "%s" (or (ladybird--started-message
+                                            socket (process-exit-status process)
+                                            output)
+                                           (format "ladybird: cannot start a \
+server on %s%s" socket (ladybird--stderr-note (ladybird--last-line output)))))))))
+        (set-process-filter stderr (lambda (pipe text)
+                                     (setq output (concat output text))
+                                     (internal-default-process-filter pipe text)))
+        (setq process
+              (condition-case err
+                  (make-process
+                   :name "ladybird start" :buffer nil :command command
+                   :connection-type 'pipe :noquery t :stderr stderr
+                   :sentinel
+                   (lambda (process _change)
+                     (unless (process-live-p process)
+                       (funcall finish)
+                       (unless waiting
+                         (funcall report)))))
+                (error (delete-process stderr)
+                       (signal (car err) (cdr err)))))
+        (message "ladybird: starting a server on %s..." socket)
+        (unwind-protect
+            (progn (while (process-live-p process)
+                     (accept-process-output process 0.1))
+                   ;; The end is reported below, also when the sentinel
+                   ;; has not run yet.
+                   (setq waiting nil
+                         reported t))
+          ;; Left waiting, the start reports when it ends, or now if
+          ;; it ended already.
+          (when waiting
+            (setq waiting nil)
+            (unless (process-live-p process)
+              (funcall report))))
+        (funcall finish)
+        ;; Ended, but Emacs may not have taken note of that yet.
+        (delete-process process)
+        (message "%s" (or (ladybird--started-message
+                           socket (process-exit-status process) output)
+                          (error "Cannot start a server on %s%s" socket
+                                 (ladybird--stderr-note
+                                  (ladybird--last-line output)))))))
+    socket))
 
-(defun ladybird--read-host (&optional hosts)
-  "Read one of HOSTS, by default all hosts, and return it."
+(defun ladybird--started-message (socket status &optional output)
+  "Return the message on the start of a server on SOCKET, or nil if it failed.
+STATUS is the exit status of the start and OUTPUT what it wrote to its
+standard error; a nil STATUS is no start.  A start that failed while a
+server accepts connections on SOCKET found one there already.  The
+message says where pages open on a server over standard input and
+output stay."
+  (let ((line (ladybird--last-line (or output "")))
+        (pages (apply #'+ (mapcar (lambda (conn)
+                                    (if (and (ladybird--stdio-conn-p conn)
+                                             (not (eq (ladybird--conn-state conn)
+                                                      'closed)))
+                                        (hash-table-count (ladybird--conn-views conn))
+                                      0))
+                                  ladybird--conns))))
+    (when (or (eql status 0) (ladybird--socket-live-p socket))
+      (concat
+       (if (eql status 0)
+           (format "ladybird: started a server on %s" socket)
+         (format "ladybird: a server runs on %s already" socket))
+       (if (and (eql status 0) line
+                (string-match "\\`Ladybird logs to \\(.+\\)" line))
+           (format ", logging to %s" (match-string 1 line))
+         "")
+       (pcase pages
+         (0 "")
+         (1 "; new pages open there, the page open over stdio stays until \
+it is closed")
+         (_ (format "; new pages open there, the %d pages open over stdio stay \
+until they are closed" pages)))))))
+
+(defun ladybird--new-stdio-host-p (host)
+  "Return non-nil if HOST is the local server over stdio and none is connected.
+HOST is a (LABEL ENDPOINT...) list; it is when its label is nil, its
+endpoint is `ladybird-program' over standard input and output, and
+neither a connection to the local server nor one with HOST's endpoints,
+such as a host of `ladybird-hosts' with the endpoint \"local\", is open."
+  (and (null (car host)) (equal (cdr host) '((:kind local)))
+       (not (ladybird--local-conn))
+       (let ((conn (ladybird--find-conn host)))
+         (or (null conn) (eq (ladybird--conn-state conn) 'closed)))))
+
+(defun ladybird--local-host (host &optional quiet)
+  "Return HOST, or the server on the default socket that replaces it.
+HOST is a (LABEL ENDPOINT...) list.  HOST of `ladybird--new-stdio-host-p'
+is replaced as `ladybird-autostart-server' says; when it is not, the
+echo area says that its pages end with Emacs, unless QUIET is non-nil.
+Signal an error, before asking or starting anything, when the native
+module is not loaded."
+  (cond
+   ((not (ladybird--new-stdio-host-p host)) host)
+   ((progn (ladybird--ensure-module)
+           (not (ladybird--module-available-p)))
+    (user-error "The ladybird-module is not loaded"))
+   ((and ladybird-autostart-server
+         (or (eq ladybird-autostart-server t)
+             ;; Batch Emacs has nobody to answer.
+             (and (not noninteractive)
+                  (y-or-n-p "No Ladybird server is running.  Start one? "))))
+    (list nil (list :kind 'unix :path (ladybird-start-server))))
+   (t (unless quiet
+        (message "ladybird: no server on %s; pages end with Emacs"
+                 (ladybird-default-socket)))
+      host)))
+
+(defun ladybird--no-server ()
+  "Signal that there is no server to open pages on."
+  (user-error "No server: none usable on %s, %s is not installed and \
+`ladybird-hosts' is empty"
+              (ladybird-default-socket) ladybird-program))
+
+(defun ladybird--host (label &optional quiet)
+  "Return the host with LABEL, a (LABEL ENDPOINT...) list.
+A nil LABEL is the host `ladybird-default-host' says.  The local server
+is passed through `ladybird--local-host', with QUIET."
+  (if-let* ((label (if (stringp label)
+                       label
+                     (and (stringp ladybird-default-host) ladybird-default-host))))
+      (or (assoc label (ladybird--hosts t))
+          (user-error "No host %s in `ladybird-hosts'" label))
+    (let ((hosts (ladybird--hosts)))
+      (cond
+       ((not hosts) (ladybird--no-server))
+       ((and (eq ladybird-default-host 'ask) (cdr hosts))
+        (ladybird--read-host hosts quiet))
+       (t (ladybird--local-host (car hosts) quiet))))))
+
+(defun ladybird--read-host (&optional hosts quiet)
+  "Read one of HOSTS, by default all hosts, and return it.
+The local server is passed through `ladybird--local-host', with QUIET."
   (let* ((hosts (or hosts (ladybird--hosts)))
          (names (mapcar (lambda (host) (cons (or (car host) "local") host))
                         hosts)))
     (unless hosts
-      (user-error "No server: %s is not installed and `ladybird-hosts' is empty"
-                  ladybird-program))
-    (cdr (assoc (completing-read "Host: " names nil t nil nil (caar names))
-                names))))
+      (ladybird--no-server))
+    (ladybird--local-host
+     (cdr (assoc (completing-read "Host: " names nil t nil nil (caar names))
+                 names))
+     quiet)))
 
 (defun ladybird--display-new-page (buffer)
   "Show BUFFER, a new page buffer, as `ladybird-new-page-display' says."
@@ -1992,36 +2198,46 @@ with a prefix argument it is read."
   "Connect to HOST without opening a page.
 Every page open on the server gets a buffer, also on a connection that
 is open already, where pages of buffers killed with
-`ladybird-keep-view-on-kill' get one again.  The page buffer used last
-is shown if it is one of them, else the one with the lowest view id.
+`ladybird-keep-view-on-kill' or detached alone with `ladybird-detach',
+and those `ladybird-attach' gave no buffer, get one again.  The page
+buffer used last is shown if it is one of them, else the one with the
+lowest view id.
 HOST is a label of `ladybird-hosts' or a (LABEL ENDPOINT...) list;
-interactively it is read."
-  (interactive (list (ladybird--read-host)))
+interactively it is read.  For a new connection to the local server
+over standard input and output the message says that its pages end
+with Emacs."
+  (interactive (list (ladybird--read-host nil t)))
   (ladybird--ensure-module)
-  (ladybird--connect
-   (if (consp host) host (ladybird--host host))
-   (lambda (conn)
-     (ladybird--restore-kept conn)
-     (let* ((buffers (sort (seq-filter (lambda (buffer)
-                                         (buffer-local-value 'ladybird--view buffer))
-                                       (ladybird--buffers conn))
-                           (lambda (a b)
-                             (< (buffer-local-value 'ladybird--view a)
-                                (buffer-local-value 'ladybird--view b)))))
-            (shown (if (memq ladybird--last-buffer buffers)
-                       ladybird--last-buffer
-                     (car buffers))))
-       (if (null buffers)
-           (message "ladybird: connected to %s, which has no page open"
-                    (ladybird--conn-name conn))
-         (setq ladybird--last-buffer shown)
-         (pop-to-buffer-same-window shown)
-         (message "ladybird: %d page%s on %s%s" (length buffers)
-                  (if (cdr buffers) "s" "") (ladybird--conn-name conn)
-                  (if (cdr buffers)
-                      (substitute-command-keys
-                       "; \\<ladybird-mode-map>\\[ladybird-switch-to-page] switches")
-                    "")))))))
+  (let* ((host (if (consp host) host (ladybird--host host t)))
+         (note (if (ladybird--new-stdio-host-p host)
+                   (format "; with no server on %s its pages end with Emacs"
+                           (ladybird-default-socket))
+                 "")))
+    (ladybird--connect
+     host
+     (lambda (conn)
+       (ladybird--restore-kept conn)
+       (let* ((buffers (sort (seq-filter (lambda (buffer)
+                                           (buffer-local-value 'ladybird--view buffer))
+                                         (ladybird--buffers conn))
+                             (lambda (a b)
+                               (< (buffer-local-value 'ladybird--view a)
+                                  (buffer-local-value 'ladybird--view b)))))
+              (shown (if (memq ladybird--last-buffer buffers)
+                         ladybird--last-buffer
+                       (car buffers))))
+         (if (null buffers)
+             (message "ladybird: connected to %s, which has no page open%s"
+                      (ladybird--conn-name conn) note)
+           (setq ladybird--last-buffer shown)
+           (pop-to-buffer-same-window shown)
+           (message "ladybird: %d page%s on %s%s%s" (length buffers)
+                    (if (cdr buffers) "s" "") (ladybird--conn-name conn)
+                    (if (cdr buffers)
+                        (substitute-command-keys
+                         "; \\<ladybird-mode-map>\\[ladybird-switch-to-page] switches")
+                      "")
+                    note)))))))
 
 (defun ladybird-reconnect ()
   "Dial the connection of the current page buffer again now."
@@ -2051,14 +2267,13 @@ The title is cut, the URL kept whole."
 
 (defun ladybird--page-candidates ()
   "Return an alist of completion strings and the pages they name.
-A page is a buffer, or (CONN . VIEW) for a view CONN's server keeps for
-a killed buffer.  A string has the page's title and URL; the buffer
+A page is a buffer, or (CONN . VIEW) for a view of CONN's server
+without a buffer here.  A string has the page's title and URL; the buffer
 used last comes first, the current one last."
   (let ((buffers (seq-filter (lambda (buffer)
                                (buffer-local-value 'ladybird--conn buffer))
                              (ladybird--buffers)))
-        (pages nil)
-        (candidates nil))
+        (pages nil))
     (setq buffers (append (remq (current-buffer) buffers)
                           (and (memq (current-buffer) buffers)
                                (list (current-buffer)))))
@@ -2071,11 +2286,19 @@ used last comes first, the current one last."
           (push (list (cons conn (car entry)) (alist-get 'title (cdr entry))
                       (alist-get 'url (cdr entry)))
                 pages))))
-    (dolist (page (nreverse pages))
+    (ladybird--name-pages (nreverse pages))))
+
+(defun ladybird--name-pages (pages &optional taken)
+  "Return an alist of completion strings and the PAGES they name.
+PAGES is a list of (PAGE TITLE URL).  A string has the title and URL;
+the second and later of those that look alike are numbered in the
+order of PAGES.  TAKEN is an alist of strings that are in use already."
+  (let ((candidates nil))
+    (dolist (page pages)
       (let* ((base (ladybird--page-candidate (nth 1 page) (or (nth 2 page) "")))
              (name base)
              (n 1))
-        (while (assoc name candidates)
+        (while (or (assoc name candidates) (assoc name taken))
           (setq name (format "%s <%d>" base (cl-incf n))))
         (push (cons name (car page)) candidates)))
     (nreverse candidates)))
@@ -2096,13 +2319,37 @@ PAGE is a value of `ladybird--page-candidates'."
         (ladybird--page-candidate (alist-get 'title state)
                                   (or (alist-get 'url state) ""))))))
 
+(defun ladybird--read-page (prompt candidates &optional annotate)
+  "Read one of CANDIDATES with PROMPT and return the page it names.
+CANDIDATES is an alist of completion strings and pages, offered in its
+order; the first is the default.  ANNOTATE, if non-nil, is the
+annotation function.  Any part of a string completes, in the completion
+category `ladybird-page'."
+  (let* ((completion-category-defaults
+          (cons '(ladybird-page (styles substring basic))
+                completion-category-defaults))
+         (choice (completing-read
+                  prompt
+                  (lambda (string predicate action)
+                    (if (eq action 'metadata)
+                        `(metadata (category . ladybird-page)
+                                   (display-sort-function . identity)
+                                   (cycle-sort-function . identity)
+                                   ,@(and annotate
+                                          `((annotation-function . ,annotate))))
+                      (complete-with-action action candidates string predicate)))
+                  nil t nil nil (caar candidates))))
+    (cdr (assoc choice candidates))))
+
 (defun ladybird-switch-to-page (buffer)
   "Show the page BUFFER, read with completion over titles and URLs.
-The pages of every server are offered, also those a connected server
-keeps for buffers killed with `ladybird-keep-view-on-kill', which get a
-buffer again.  A page that a page opened is annotated with its opener,
-and with several servers each page with its host.  Any part of a title
-or URL completes, in the completion category `ladybird-page'."
+The pages of every server are offered, also those of a connected server
+without a buffer here: of buffers killed with `ladybird-keep-view-on-kill'
+or detached alone with `ladybird-detach', and those `ladybird-attach'
+gave none.  Such a page gets a buffer.  A page that a
+page opened is annotated with its opener, and with several servers each
+page with its host.  Any part of a title or URL completes, in the
+completion category `ladybird-page'."
   (interactive
    (let* ((candidates (or (ladybird--page-candidates)
                           (user-error "No page is open")))
@@ -2119,23 +2366,8 @@ or URL completes, in the completion category `ladybird-page'."
                                  (format "  [%s]" (ladybird--conn-name
                                                    (ladybird--page-conn page))))
                             (and-let* ((opener (ladybird--opener-name page)))
-                              (format "  opened by %s" opener)))))))
-          ;; A part of the title or of the URL picks a page.
-          (completion-category-defaults
-           (cons '(ladybird-page (styles substring basic))
-                 completion-category-defaults))
-          (choice (completing-read
-                   "Page: "
-                   (lambda (string predicate action)
-                     (if (eq action 'metadata)
-                         `(metadata (category . ladybird-page)
-                                    (display-sort-function . identity)
-                                    (cycle-sort-function . identity)
-                                    ,@(and annotate
-                                           `((annotation-function . ,annotate))))
-                       (complete-with-action action candidates string predicate)))
-                   nil t nil nil (caar candidates))))
-     (list (cdr (assoc choice candidates)))))
+                              (format "  opened by %s" opener))))))))
+     (list (ladybird--read-page "Page: " candidates annotate))))
   (when (consp buffer)
     (setq buffer (car (ladybird--restore-kept (car buffer) (cdr buffer)))))
   (unless (buffer-live-p buffer)
@@ -2148,6 +2380,208 @@ or URL completes, in the completion category `ladybird-page'."
   (interactive nil ladybird-mode)
   (let ((ladybird-keep-view-on-kill nil))
     (kill-buffer (current-buffer))))
+
+(defun ladybird-detach (&optional only-this ask)
+  "Kill the page buffers of this buffer's server and leave their pages open.
+\\<ladybird-mode-map>The connection closes and is not dialled again.  The
+server keeps every page, and the next connection to it, such as one
+of `ladybird-connect', shows them again.  With ASK, as interactively,
+this asks first when more than one buffer would go.
+
+With ONLY-THIS, interactively the prefix argument, only the current
+buffer is killed: its page stays open on the server, hidden, also
+when the connection is dialled again, until \\[ladybird-switch-to-page],
+\\[ladybird-attach] or `ladybird-connect' gives it a buffer again.  The
+connection stays open, unless this was its last page buffer, which
+detaches the connection.
+
+A server over standard input and output, here or over ssh, ends its
+pages with the connection; detaching from it is a `user-error'.  So
+is detaching the connection while it is down and pages whose buffers
+were killed meanwhile wait to be closed."
+  (interactive (list current-prefix-arg t) ladybird-mode)
+  (unless (derived-mode-p 'ladybird-mode)
+    (user-error "Not a page buffer"))
+  (let ((conn ladybird--conn))
+    (unless conn
+      (user-error "This buffer has no connection"))
+    (unless (ladybird--conn-keeps-pages-p conn)
+      (user-error "The server on %s talks over standard input and output; its \
+pages end with the connection" (ladybird--conn-name conn)))
+    (if (and only-this (remq (current-buffer) (ladybird--buffers conn)))
+        (let ((name (buffer-name)))
+          (unless ladybird--view
+            (user-error "This page is not open yet"))
+          (when (let ((ladybird-keep-view-on-kill t))
+                  (kill-buffer (current-buffer)))
+            (message (substitute-command-keys
+                      "ladybird: %s detached; \
+\\<ladybird-mode-map>\\[ladybird-switch-to-page] shows its page again")
+                     name)))
+      (let ((buffers (ladybird--buffers conn))
+            (closing (length (ladybird--conn-closing conn))))
+        (when (> closing 0)
+          (user-error "Wait until %s is back to close the %d page%s killed \
+meanwhile" (ladybird--conn-name conn) closing (if (= closing 1) "" "s")))
+        (when (or (not ask) (null (cdr buffers))
+                  (y-or-n-p (format "Detach %d pages of %s? " (length buffers)
+                                    (ladybird--conn-name conn))))
+          ;; A closed connection sends nothing: the buffers go without a
+          ;; `close_view'.
+          (ladybird--disconnect conn)
+          (mapc #'kill-buffer buffers)
+          (message "ladybird: detached from %s, which keeps its pages; \
+`ladybird-attach' or `ladybird-connect' shows them again" (ladybird--conn-name conn)))))))
+
+(defun ladybird--attach-candidates (conn)
+  "Return an alist of completion strings and the pages `ladybird-attach' offers.
+These are the views of CONN's server without a buffer, in the order of
+their ids, and with more than one of them a last string for all of
+them, which names t."
+  (let* ((entries (sort (copy-sequence (ladybird--conn-kept conn))
+                        (lambda (a b) (< (car a) (car b)))))
+         (all (and (cdr entries)
+                   (list (cons (format "All %d pages" (length entries)) t)))))
+    (append (ladybird--name-pages
+             (mapcar (lambda (entry)
+                       (list (car entry) (alist-get 'title (cdr entry))
+                             (alist-get 'url (cdr entry))))
+                     entries)
+             all)
+            all)))
+
+(defun ladybird--attach-none (conn)
+  "Return the message that CONN's server has no page without a buffer."
+  (if (ladybird--buffers conn)
+      (format "Every page of %s has a buffer" (ladybird--conn-name conn))
+    (format "%s has no page open" (ladybird--conn-name conn))))
+
+(defun ladybird--attach-pick (conn)
+  "Read a page of CONN's server without a buffer, give it one and show it.
+The page read can be all of them.  A page that got a buffer meanwhile
+shows that buffer.  Return nil when there is none.  A connection that
+had no page buffer before this and has none after it, however this
+ends, closes as one does with its last page buffer."
+  (let ((had-buffers (ladybird--buffers conn)))
+    ;; Nothing closes the connection while the page is read.
+    (when (timerp (ladybird--conn-lingering conn))
+      (cancel-timer (ladybird--conn-lingering conn))
+      (setf (ladybird--conn-lingering conn) nil))
+    (unwind-protect
+        (when-let* (((or (ladybird--ready-p conn)
+                         (user-error "%s is not connected" (ladybird--conn-name conn))))
+                    (candidates (ladybird--attach-candidates conn)))
+          (let* ((name (ladybird--conn-name conn))
+                 (page (or (ladybird--read-page (format "Attach page of %s: " name)
+                                                candidates)
+                           (user-error "No such page")))
+                 (buffers (and (ladybird--ready-p conn)
+                               (ladybird--restore-kept conn (unless (eq page t) page)))))
+            (unless buffers
+              (cond
+               ((not (ladybird--ready-p conn))
+                (user-error "%s is not connected" name))
+               ((and (integerp page) (ladybird--view-buffer conn `((view . ,page))))
+                (setq buffers (list (ladybird--view-buffer conn `((view . ,page))))))
+               ((eq page t) (user-error "%s" (ladybird--attach-none conn)))
+               (t (user-error "That page is no longer open on %s" name))))
+            (ladybird--display-new-page (car buffers))
+            (when (cdr buffers)
+              (message (substitute-command-keys
+                        "ladybird: %d pages of %s attached; \
+\\<ladybird-mode-map>\\[ladybird-switch-to-page] switches")
+                       (length buffers) name))
+            buffers))
+      (unless had-buffers
+        (ladybird--attach-end conn)))))
+
+(defun ladybird--attach-end (conn)
+  "Close CONN if it has no page buffer and nothing waits for it.
+A connection over a socket lingers, so that what was written to it
+gets time to leave, see `ladybird--linger'."
+  (when (and (memq conn ladybird--conns)
+             (null (ladybird--buffers conn))
+             (null (ladybird--conn-on-ready conn)))
+    (if (and (ladybird--ready-p conn)
+             (eq (process-type (ladybird--conn-process conn)) 'network))
+        (ladybird--linger conn)
+      (ladybird--disconnect conn))))
+
+(defun ladybird--attach-offer (conn)
+  "Offer the pages of CONN's server without a buffer, from a timer.
+`ladybird-attach' waits with this for a connection; the welcome gives
+no page a buffer then, see `ladybird--on-welcome'.  The offer ends
+without a read when CONN closes for good or is taken over before it
+opens."
+  (ladybird--later
+   (lambda ()
+     (condition-case err
+         (unless (ladybird--attach-pick conn)
+           (message "ladybird: %s" (ladybird--attach-none conn)))
+       (user-error (message "ladybird: %s" (error-message-string err)))))
+   nil (list conn 'attach)))
+
+;;;###autoload
+(defun ladybird-attach (&optional host)
+  "Give pages of a server that have no buffer here one.
+The page is read with completion over the titles and URLs of the
+server's pages without a buffer in this Emacs, in the completion
+category `ladybird-page'; with more than one of them the last entry
+is all of them.  Its buffer is shown as `ladybird-new-page-display'
+says, and of several the first.  Pages not chosen stay open on the
+server, hidden and without a buffer, also when the connection is
+dialled again.
+
+The server is the one of the current page buffer, else the one
+`ladybird' opens on, without `ladybird-autostart-server'.  HOST is a
+label of `ladybird-hosts' or a (LABEL ENDPOINT...) list; interactively,
+with a prefix argument, it is read.  Without a connection to the
+server this dials the endpoints of HOST that keep their pages, on a
+socket, and starts no server; a host without such an endpoint, or one
+whose sockets cannot be opened, is a `user-error'.  An endpoint that
+opens and then does not answer is reported as unreachable.  Once
+connected, only the pages chosen get a buffer.  A connection left
+without a page buffer, after \\[keyboard-quit] or with nothing to
+attach, closes again unless it had page buffers before."
+  (interactive (list (and current-prefix-arg
+                          (let ((ladybird-autostart-server nil))
+                            (ladybird--read-host nil t)))))
+  (ladybird--ensure-module)
+  (unless (ladybird--module-available-p)
+    (user-error "The ladybird-module is not loaded"))
+  (let* ((host (cond ((consp host) host)
+                     (host (ladybird--host host t))
+                     ((and (derived-mode-p 'ladybird-mode) ladybird--host))
+                     (t (let ((ladybird-autostart-server nil))
+                          (ladybird--host nil t)))))
+         (conn (ladybird--find-conn host))
+         (name (or (car host)
+                   (if (equal (cdr host) '((:kind local)))
+                       (ladybird-default-socket)
+                     (ladybird--endpoint-name (cadr host))))))
+    (cond
+     ((ladybird--ready-p conn)
+      (unless (ladybird--attach-pick conn)
+        (user-error "%s" (ladybird--attach-none conn))))
+     ((and conn (memq #'ladybird--attach-offer (ladybird--conn-on-ready conn)))
+      (message "ladybird: connecting to %s; its pages are offered then"
+               (ladybird--conn-name conn))
+      nil)
+     ((and conn (process-live-p (ladybird--conn-process conn)))
+      (ladybird--connect host #'ladybird--attach-offer)
+      nil)
+     ((not (seq-some #'ladybird--endpoint-keeps-pages-p (cdr host)))
+      (user-error "No server on %s" name))
+     (t
+      (condition-case err
+          (ladybird--connect host #'ladybird--attach-offer
+                             #'ladybird--endpoint-keeps-pages-p)
+        ;; Such as (file-missing "make client process failed" "No such
+        ;; file or directory" :name ...).
+        (file-error
+         (user-error "No server on %s: %s" name
+                     (if (stringp (nth 2 err)) (nth 2 err) (error-message-string err)))))
+      nil))))
 
 
 ;;; Navigation
@@ -2943,12 +3377,13 @@ server that has all the pages it can hold."
   (list conn (alist-get 'view msg) (alist-get 'id msg)))
 
 (defun ladybird--answer (conn msg type &rest fields)
-  "Answer the request MSG on CONN with a message of TYPE and FIELDS."
-  (setq ladybird--prompt-answered t)
-  (ladybird--send conn `((type . ,type)
-                       (view . ,(alist-get 'view msg))
-                       (id . ,(alist-get 'id msg))
-                       ,@fields)))
+  "Answer the request MSG on CONN with a message of TYPE and FIELDS.
+Nothing is sent for a dropped prompt, see `ladybird--drop-prompts'."
+  (when (ladybird--note-answer (ladybird--prompt-key conn msg))
+    (ladybird--send conn `((type . ,type)
+                         (view . ,(alist-get 'view msg))
+                         (id . ,(alist-get 'id msg))
+                         ,@fields))))
 
 (defun ladybird--page-name (conn msg)
   "Return a name for the page of the request MSG on CONN."
@@ -2968,12 +3403,18 @@ server that has all the pages it can hold."
                          `(accepted . ,(ladybird--bool accepted))
                          (and input `((text . ,input)))))))
     (if (and (equal kind "alert") (eq ladybird-alert-style 'echo))
+        ;; Answered without a prompt: `ladybird--answer' would hold the
+        ;; answer back for a dropped prompt of the same request.
         (progn (message "%s: %s" page text)
-               (funcall close t))
+               (ladybird--send conn `((type . "dialog_closed")
+                                      (view . ,(alist-get 'view msg))
+                                      (id . ,(alist-get 'id msg))
+                                      (accepted . t))))
       (ladybird--later
        (lambda ()
          (pcase kind
            ("alert"
+            (ladybird--prompt-reads-keys)
             (read-key (format "%s: %s  (press a key) " page text))
             (message nil)
             (funcall close t))
@@ -3266,9 +3707,14 @@ The functions run in the page's buffer."
 (defun ladybird-unload-function ()
   "Undo what ladybird set up outside its buffers, for `unload-feature'.
 Pages are closed, connections and timers ended, and hooks, keymaps and
-mouse tracking put back."
+mouse tracking put back.  While a prompt of ladybird is being read this
+is a `user-error'."
+  (when ladybird--prompts
+    (user-error "Cannot unload ladybird while one of its prompts is open"))
   (mapc #'kill-buffer (ladybird--buffers))
   (mapc #'ladybird--disconnect ladybird--conns)
+  ;; Prompts not yet opened, such as context menus, are not opened.
+  (setq ladybird--queued-prompts nil)
   (ladybird--hint-stop)
   (dolist (entry '((post-command-hook . ladybird--after-command)
                    (window-buffer-change-functions . ladybird--window-buffer-changed)

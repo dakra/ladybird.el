@@ -17,10 +17,34 @@ One bidirectional byte stream per client. The server offers it as:
 | --- | --- | --- |
 | `--emacs-stdio` (default when no other is given) | stdin/stdout of the server process | local `make-process`, or `ssh host Ladybird --headless=emacs` |
 | `--emacs-socket=PATH` | Unix listener, mode 0600, unlinked on exit | detachable local session, `ssh -L` forwarding |
+| `--emacs-default-socket` | the same on the default socket (below); not with `--emacs-socket` | detachable local session that clients find without configuration |
+| `--emacs-socket-activation` | a listening Unix socket that systemd (`LISTEN_FDS`) or launchd made for the server; not with the other socket options | the same, with the server started on the first connection |
 | `--emacs-tcp=HOST:PORT` | TCP listener, no authentication | only for trusted networks such as a tailnet; v2 |
 
 A stdio server lives exactly as long as its client (or its ssh session). Detaching and
-reattaching needs `--emacs-socket` or `--emacs-tcp`.
+reattaching needs `--emacs-socket`, `--emacs-default-socket`, `--emacs-socket-activation` or
+`--emacs-tcp`.
+`--emacs-background`, with `--emacs-socket` or `--emacs-default-socket`, runs the server
+in a session of its own; the command returns once the socket accepts connections, and
+fails with the reason on stderr when the server cannot start.
+
+The **default socket** of a user's local server is `$XDG_RUNTIME_DIR/ladybird-emacs.sock`
+when `XDG_RUNTIME_DIR` is an absolute path, else
+`$TMPDIR/ladybird-emacs-UID/ladybird-emacs.sock` with UID the real user id in decimal and
+`/tmp` for a `TMPDIR` that is not an absolute path. An unset, empty or relative value
+counts as unset. Trailing slashes of `XDG_RUNTIME_DIR` and `TMPDIR` are dropped.
+
+Outside `XDG_RUNTIME_DIR` the directory `ladybird-emacs-UID` must be **private**: a
+directory, not a symbolic link, owned by the user and granting its group and others no
+permission, in a directory that is owned by root or the user and is either sticky or
+writable by its owner only. The server creates it with mode 0700 when it is missing, and
+refuses to start, naming the directory on stderr, when it or its parent fails. A client
+never creates it, and ignores a socket there unless the directory is private.
+
+A client asked for the local server connects to the default socket when a socket of its
+user accepts connections on it, and otherwise starts a server over stdio. It may find
+that out by connecting and closing again without a `hello`, which leaves the server's
+current client in place (§8).
 
 On macOS a Unix socket delivers at most 8 KiB per read to Emacs, while a pipe delivers
 64 KiB, so locally prefer stdio (or shm, §4) over a Unix socket.
@@ -75,7 +99,7 @@ Server answers:
 ```json
 {"type":"welcome","protocol":1,"server":"Ladybird 0.x (abcdef)",
  "encoding":"zstd","shm":true,
- "log":"/tmp/ladybird-emacs-12345.log",
+ "log":"/run/user/1000/ladybird-emacs-12345.log",
  "host":{"hostname":"devbox","platform":"linux"},
  "features":["hints"],"max_views":16,
  "views":[{"view":1,"url":"https://…","title":"…","loading":false,
@@ -542,3 +566,8 @@ written against the draft; read their bodies with these corrections.
 18. Several views per server (§3): `welcome.max_views`, one frame flow and shared
     memory segment per view, turns for frames, the limit on all viewports together.
     Views opened by pages (§3.1): `hello.popups` and `view_created.opener`.
+19. The default socket (§1): `--emacs-default-socket` listens on `ladybird-emacs.sock`
+    in an absolute `XDG_RUNTIME_DIR`, else in the private directory `ladybird-emacs-UID`
+    of an absolute `TMPDIR` or `/tmp`, which the server creates with mode 0700 and
+    refuses when it or its parent is not private; a client asked for the local server
+    tries it before stdio, outside `XDG_RUNTIME_DIR` only in a private directory.

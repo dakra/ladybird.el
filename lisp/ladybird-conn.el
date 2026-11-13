@@ -56,8 +56,12 @@
 
 (defcustom ladybird-program "Ladybird"
   "Program of the local Ladybird server.
-It runs as PROGRAM --headless=emacs and talks over its standard
-input and output."
+`ladybird-start-server' runs it with --emacs-default-socket and
+--emacs-background, as a server on the default socket that outlives
+Emacs, see `ladybird-default-socket'.  When nothing usable accepts
+connections there and `ladybird-autostart-server' leads to no such
+server, the local server is PROGRAM --headless=emacs, which talks
+over its standard input and output and ends with Emacs."
   :type 'string)
 
 (defcustom ladybird-program-arguments nil
@@ -123,7 +127,7 @@ server that exited is started again too."
   (views (make-hash-table))      ; view id -> buffer
   creating                       ; (BUFFER . REQUEST) awaiting a view, oldest first
   closing                        ; ids of views to close with the next welcome
-  kept                           ; (VIEW . STATE) of views left by killed buffers
+  kept                           ; (VIEW . STATE) of views without a buffer here
   lingering                      ; timer that closes the connection left unused
   (pending (make-hash-table :test #'equal)) ; request id -> callback
   (next-request 0)
@@ -247,13 +251,116 @@ ENDPOINT is a string or plist as in `ladybird-hosts'."
                         (list value)
                       value))))
 
-(defun ladybird--hosts ()
+(defun ladybird--absolute-directory (variable)
+  "Return the directory of environment VARIABLE without trailing slashes.
+It is nil when VARIABLE is unset, empty or not an absolute file name."
+  (let ((value (getenv variable)))
+    (and value (string-prefix-p "/" value)
+         (string-trim-right value "/+"))))
+
+(defun ladybird-default-socket ()
+  "Return the path of the default socket of a local server.
+It is ladybird-emacs.sock in the directory XDG_RUNTIME_DIR names
+when that is set to an absolute file name, else in the directory
+ladybird-emacs-UID of TMPDIR, or of /tmp when TMPDIR is not an
+absolute file name, UID being the real user id.  The server makes
+that directory with mode 0700."
+  (concat (or (ladybird--absolute-directory "XDG_RUNTIME_DIR")
+              (format "%s/ladybird-emacs-%d"
+                      (or (ladybird--absolute-directory "TMPDIR") "/tmp")
+                      (user-real-uid)))
+          "/ladybird-emacs.sock"))
+
+(defun ladybird--private-directory-p (directory)
+  "Return non-nil if DIRECTORY is a directory only this user can use.
+It must be owned by this user and grant its group and others no
+permission; a symbolic link does not count.  Its parent must be
+owned by root or this user, and writable only by its owner unless it
+is sticky."
+  (let ((attributes (file-attributes directory 'integer))
+        (parent (file-attributes (file-truename (file-name-directory directory))
+                                 'integer))
+        (case-fold-search nil))
+    (and (eql (file-attribute-user-id attributes) (user-real-uid))
+         ;; A directory, not a link, with no permission for group and
+         ;; others; S and T are the setgid and sticky bits without x.
+         (string-match-p "\\`d...--[-S]--[-T]\\'" (file-attribute-modes attributes))
+         (memql (file-attribute-user-id parent) (list 0 (user-real-uid)))
+         (let ((modes (file-attribute-modes parent)))
+           (or (string-match-p "\\`d....-..-.\\'" modes)
+               (string-match-p "[tT]\\'" modes))))))
+
+(defun ladybird--socket-live-p (path)
+  "Return non-nil if a server of this user listens on PATH.
+PATH is the default socket of `ladybird-default-socket'.  It does not
+count when another user owns it, nor outside XDG_RUNTIME_DIR when its
+directory fails `ladybird--private-directory-p'."
+  (and (or (ladybird--absolute-directory "XDG_RUNTIME_DIR")
+           (ladybird--private-directory-p
+            (directory-file-name (file-name-directory path))))
+       (eql (file-attribute-user-id (file-attributes path 'integer)) (user-real-uid))
+       (ignore-errors
+         (delete-process (make-network-process :name "ladybird probe"
+                                               :family 'local :service path
+                                               :noquery t))
+         t)))
+
+(defun ladybird--stdio-conn-p (conn)
+  "Return non-nil if CONN is to the local server over standard input and output."
+  (and (null (ladybird--conn-host conn))
+       (equal (ladybird--conn-endpoints conn) '((:kind local)))))
+
+(defun ladybird--endpoint-keeps-pages-p (endpoint)
+  "Return non-nil if the server at ENDPOINT keeps its pages without a client.
+A server on a socket does; one over standard input and output, here
+or over ssh, ends with its connection."
+  (memq (plist-get endpoint :kind) '(unix tcp tls)))
+
+(defun ladybird--conn-keeps-pages-p (conn)
+  "Return non-nil if CONN's server keeps its pages when CONN closes.
+See `ladybird--endpoint-keeps-pages-p'."
+  (ladybird--endpoint-keeps-pages-p (or (ladybird--conn-dialed conn)
+                                        (car (ladybird--conn-endpoints conn)))))
+
+(defun ladybird--local-conn ()
+  "Return the open connection to the local server, or nil.
+It is a connection that is not closed to the host labelled nil or one
+that dialled the default socket of `ladybird-default-socket'; one that
+is not `ladybird--stdio-conn-p' comes first."
+  (let* ((path (ladybird-default-socket))
+         (local (seq-filter
+                 (lambda (conn)
+                   (and (not (eq (ladybird--conn-state conn) 'closed))
+                        (or (null (ladybird--conn-host conn))
+                            (let ((dialed (ladybird--conn-dialed conn)))
+                              (and (eq (plist-get dialed :kind) 'unix)
+                                   (equal (plist-get dialed :path) path))))))
+                 ladybird--conns)))
+    (or (seq-find (lambda (conn) (not (ladybird--stdio-conn-p conn))) local)
+        (car local))))
+
+(defun ladybird--local-endpoints ()
+  "Return the endpoints of the local server, or nil if there is none.
+They are those of `ladybird--local-conn' when it is not over standard
+input and output, else the default socket when `ladybird--socket-live-p'
+finds a server there, else those of the connection over standard input
+and output, else `ladybird-program' when it is found."
+  (let ((path (ladybird-default-socket))
+        (conn (ladybird--local-conn)))
+    (cond ((and conn (not (ladybird--stdio-conn-p conn)))
+           (ladybird--conn-endpoints conn))
+          ((ladybird--socket-live-p path) (list (list :kind 'unix :path path)))
+          (conn (ladybird--conn-endpoints conn))
+          ((executable-find ladybird-program) (list (list :kind 'local))))))
+
+(defun ladybird--hosts (&optional no-local)
   "Return the hosts as a list of (LABEL ENDPOINT...).
-The local server has the label nil and comes first; it is left out
-when `ladybird-program' is not found.  Hosts without a valid endpoint are
-left out."
-  (append (and (executable-find ladybird-program)
-               (list (list nil (list :kind 'local))))
+The local server of `ladybird--local-endpoints' has the label nil and
+comes first; it is left out when there is none or NO-LOCAL is
+non-nil.  Hosts without a valid endpoint are left out."
+  (append (unless no-local
+            (when-let* ((local (ladybird--local-endpoints)))
+              (list (cons nil local))))
           (delq nil
                 (mapcar (lambda (host)
                           (when-let* ((endpoints
@@ -465,10 +572,13 @@ CALLBACK is called once with the message that answers it."
   (seq-find (lambda (conn) (equal (ladybird--conn-endpoints conn) (cdr host)))
             ladybird--conns))
 
-(defun ladybird--connect (host callback)
+(defun ladybird--connect (host callback &optional only)
   "Call CALLBACK with a ready connection to HOST, opening one if needed.
 HOST is a (LABEL ENDPOINT...) list as `ladybird--hosts' returns them.
-Return the connection."
+ONLY, if non-nil, is a predicate: a connection dialled now tries only
+the endpoints that satisfy it, and none satisfying it is an error.  A
+connection being dialled already goes on as it is.  Return the
+connection."
   (unless (ladybird--module-available-p)
     (user-error "The ladybird-module is not loaded"))
   (let ((conn (ladybird--find-conn host)))
@@ -484,7 +594,11 @@ Return the connection."
       (ladybird--cancel-redial conn)
       (setf (ladybird--conn-delay conn) nil)
       (condition-case err
-          (ladybird--dial conn)
+          (ladybird--dial
+           conn (and only
+                     (or (seq-filter only (ladybird--dial-order conn))
+                         (error "No endpoint of %s to dial"
+                                (ladybird--conn-name conn)))))
         (error
          (setf (ladybird--conn-on-ready conn) nil)
          (cond ((not (ladybird--conn-in-use-p conn)) (ladybird--disconnect conn))
@@ -492,16 +606,19 @@ Return the connection."
          (signal (car err) (cdr err))))))
     conn))
 
+(defun ladybird--dial-order (conn)
+  "Return CONN's endpoints in the order to dial them: the last that answered first."
+  (let ((last (ladybird--conn-endpoint conn)))
+    (append (and last (list last))
+            (remove last (ladybird--conn-endpoints conn)))))
+
 (defun ladybird--dial (conn &optional endpoints)
   "Open CONN's connection and send the hello.
 Try ENDPOINTS in order until one can be dialled; the others stay in
 CONN for when that one does not answer with a welcome.  By default
-these are all of CONN's, the one that last answered first.  Signal the
-last error if none can be dialled."
-  (let* ((last (ladybird--conn-endpoint conn))
-         (endpoints (or endpoints
-                        (append (and last (list last))
-                                (remove last (ladybird--conn-endpoints conn)))))
+these are those of `ladybird--dial-order'.  Signal the last error if
+none can be dialled."
+  (let* ((endpoints (or endpoints (ladybird--dial-order conn)))
          process err)
     (ladybird--cancel-timers conn)
     (while (and endpoints (not process))
@@ -609,26 +726,32 @@ An ssh that exits with status 255 lost its connection instead."
          (memq (process-status process) '(exit signal))
          (not (and (eq kind 'ssh) (eql (process-exit-status process) 255))))))
 
-(defun ladybird--stderr-summary (conn)
-  "Return what CONN's server last wrote to its standard error, for a message.
-This is the last line that is not empty, cut to a length that fits the
-echo area, with the name of the buffer that has all of it; or the
-empty string if the server of this dial wrote nothing."
-  (let ((line (when-let* ((buffer (get-buffer ladybird--stderr-buffer)))
-                (with-current-buffer buffer
-                  (let ((lines (split-string
-                                (buffer-substring-no-properties
-                                 (min (point-max)
-                                      (or (ladybird--conn-stderr-start conn)
-                                          (point-max)))
-                                 (point-max))
-                                "[\n\r]+" t "[ \t]+")))
-                    (car (last lines)))))))
-    (if line
-        (format ": %s (see buffer%s)"
-                (truncate-string-to-width line 200 nil nil t)
-                ladybird--stderr-buffer)
-      "")))
+(defun ladybird--last-line (text)
+  "Return the last line of TEXT that is not empty, or nil if there is none."
+  (car (last (split-string text "[\n\r]+" t "[ \t]+"))))
+
+(defun ladybird--stderr-note (line)
+  "Return LINE of a server's standard error for the end of a message.
+It is cut to a length that fits the echo area and followed by the name
+of `ladybird--stderr-buffer', which has all of it; a nil LINE is the
+empty string."
+  (if line
+      (format ": %s (see buffer \"%s\")"
+              (truncate-string-to-width line 200 nil nil t)
+              ladybird--stderr-buffer)
+    ""))
+
+(defun ladybird--stderr-summary (start)
+  "Return what a server wrote to its standard error after START, for a message.
+START is a position of `ladybird--stderr-buffer'.  This is the
+`ladybird--stderr-note' of the last line that is not empty, or the
+empty string if the server wrote nothing."
+  (ladybird--stderr-note
+   (when-let* ((buffer (get-buffer ladybird--stderr-buffer)))
+     (with-current-buffer buffer
+       (ladybird--last-line (buffer-substring-no-properties
+                           (min (point-max) (or start (point-max)))
+                           (point-max)))))))
 
 (defun ladybird--on-close (conn &optional process)
   "Handle the loss of CONN's connection.
@@ -637,7 +760,8 @@ welcome the endpoints not yet tried are dialled.  A connection that has
 views, or buffers waiting for one, is dialled again as
 `ladybird-reconnect' says, whether it was ready or still opening."
   (let ((state (ladybird--conn-state conn))
-        (server-exit (and process (ladybird--server-exit-p conn process))))
+        (server-exit (and process (ladybird--server-exit-p conn process)))
+        (stderr-start (ladybird--conn-stderr-start conn)))
     (ladybird--cancel-timers conn)
     (setf (ladybird--conn-process conn) nil
           (ladybird--conn-queue conn) nil
@@ -653,7 +777,7 @@ views, or buffers waiting for one, is dialled again as
     (when (and server-exit (memq state '(dialing hello ready)))
       (message "ladybird: the server on %s exited with status %s%s"
                (ladybird--conn-name conn) (process-exit-status process)
-               (ladybird--stderr-summary conn)))
+               (ladybird--stderr-summary stderr-start)))
     (pcase state
       ((or 'dialing 'hello)
        (let ((untried (ladybird--conn-untried conn)))
@@ -665,7 +789,7 @@ views, or buffers waiting for one, is dialled again as
                (ladybird--reconnect conn)
              (when (ladybird--conn-on-ready conn)
                (message "ladybird: cannot reach %s%s" (ladybird--conn-name conn)
-                        (ladybird--stderr-summary conn)))
+                        (ladybird--stderr-summary stderr-start)))
              (setf (ladybird--conn-on-ready conn) nil
                    (ladybird--conn-delay conn) nil)
              (ladybird--set-state conn 'closed)))))
@@ -682,7 +806,8 @@ views, or buffers waiting for one, is dialled again as
   (ladybird--on-close conn))
 
 (defun ladybird--disconnect (conn)
-  "Close CONN for good and forget it."
+  "Close CONN for good and forget it.
+The prompts for its requests end without an answer."
   (ladybird--cancel-timers conn)
   (ladybird--cancel-redial conn)
   (dolist (timer (list (ladybird--conn-stable-timer conn)
@@ -704,6 +829,7 @@ views, or buffers waiting for one, is dialled again as
         (ladybird--conn-delay conn) nil
         (ladybird--conn-queue conn) nil
         (ladybird--conn-input conn) nil)
+  (ladybird--cancel-conn-prompts conn)
   (setq ladybird--conns (delq conn ladybird--conns))
   (ladybird--set-state conn 'closed))
 
@@ -868,8 +994,11 @@ The name of its log file has its process id."
   (ladybird--drop conn))
 
 (ladybird--defhandler "replaced" (conn _msg)
-  "Leave CONN detached; another client has the server."
+  "Mark CONN taken over; another client has the server.
+The prompts for CONN's requests end without an answer: the server asks
+that client."
   (message "ladybird: another client took over %s" (ladybird--conn-name conn))
+  (ladybird--cancel-conn-prompts conn)
   (ladybird--set-state conn 'replaced)
   (ladybird--drop conn))
 
@@ -960,38 +1089,82 @@ A connection has one probe at a time."
 
 ;;; Prompting
 
-(defvar ladybird--prompt nil
-  "Key of the prompt being read, while one opened by `ladybird--later' is.")
+(cl-defstruct (ladybird--open-prompt (:constructor ladybird--make-open-prompt)
+                                     (:copier nil))
+  "A prompt being read."
+  key
+  answered                    ; non-nil once its request has its answer
+  dropped                     ; it sends neither its answer nor its decline
+  depth                       ; `minibuffer-depth' while it waits for input
+  timer                       ; the pending `ladybird--close-dropped'
+  done)                       ; non-nil once FUNCTION has returned
 
-(defvar ladybird--prompt-answered nil
-  "Non-nil once the request of the prompt being read has its answer.")
+(defvar ladybird--prompts nil
+  "The `ladybird--open-prompt's being read, innermost first.")
 
 (defvar ladybird--queued-prompts nil
   "Prompts not yet opened: a list of (KEY FUNCTION ON-QUIT).")
 
+(defun ladybird--find-prompt (key)
+  "Return the innermost prompt being read with KEY, or nil."
+  (seq-find (lambda (prompt) (equal (ladybird--open-prompt-key prompt) key))
+            ladybird--prompts))
+
 (defun ladybird--call-prompt (function &optional on-quit key)
   "Call FUNCTION, which prompts and answers a request of the server.
 ON-QUIT sends the answer that declines.  It is called when FUNCTION
-ends without `ladybird--prompt-answered' set, however it ends: by a
+ends without `ladybird--note-answer' for KEY, however it ends: by a
 quit, an error or any other exit from the prompt.  The page that asked
 waits for the answer.  KEY names the prompt for
-`ladybird--cancel-prompt', which ends it without an answer."
-  (let ((ladybird--prompt-answered nil)
-        (cancelled nil))
+`ladybird--cancel-prompt-later', which ends it without an answer; a KEY
+that is a list starting with a connection ends so when that connection
+closes for good or is taken over, see `ladybird--cancel-conn-prompts'.
+FUNCTION waits for input in a minibuffer of its own, unless it says
+otherwise with `ladybird--prompt-reads-keys'; it runs with
+`use-dialog-box' nil."
+  (let* ((prompt (ladybird--make-open-prompt
+                  :key key :depth (1+ (minibuffer-depth))))
+         (ladybird--prompts (cons prompt ladybird--prompts))
+         (cancelled nil))
     (unwind-protect
         (condition-case err
-            (when (eq (catch 'ladybird--cancelled
-                        (let ((ladybird--prompt key))
+            (when (eq (catch prompt
+                        ;; A dialog box of the toolkit cannot be closed from
+                        ;; a timer.
+                        (let ((use-dialog-box nil))
                           (funcall function))
                         nil)
                       'cancelled)
               (setq cancelled t))
           (quit nil)
           (error (message "ladybird: a prompt failed: %S" err)))
-      (unless (or cancelled ladybird--prompt-answered (null on-quit))
+      (setf (ladybird--open-prompt-done prompt) t)
+      (unless (or cancelled (ladybird--open-prompt-answered prompt)
+                  (ladybird--open-prompt-dropped prompt) (null on-quit))
         (condition-case err
             (funcall on-quit)
-          (error (message "ladybird: declining a request: %S" err)))))))
+          (error (message "ladybird: declining a request: %S" err))))
+      (when-let* ((timer (ladybird--open-prompt-timer prompt)))
+        (cancel-timer timer))
+      ;; A dropped prompt left open around this one closes now.
+      (when-let* ((outer (cadr ladybird--prompts))
+                  ((ladybird--open-prompt-dropped outer)))
+        (ladybird--close-later outer 0)))))
+
+(defun ladybird--prompt-reads-keys ()
+  "Say that the prompt being read waits for keys outside the minibuffer."
+  (when ladybird--prompts
+    (setf (ladybird--open-prompt-depth (car ladybird--prompts))
+          (minibuffer-depth))))
+
+(defun ladybird--note-answer (key)
+  "Note that the request of the prompt KEY has its answer.
+Return nil if the answer is not to be sent: the prompt being read with
+KEY is dropped."
+  (let ((prompt (ladybird--find-prompt key)))
+    (when prompt
+      (setf (ladybird--open-prompt-answered prompt) t))
+    (not (and prompt (ladybird--open-prompt-dropped prompt)))))
 
 (defun ladybird--minibuffer-busy-p ()
   "Return non-nil if a prompt cannot use the minibuffer now."
@@ -1011,33 +1184,64 @@ waits for the answer.  KEY names the prompt for
 A prompt inside the process filter would hold up the records after it,
 and a quit out of it would drop them.  While the minibuffer is in use
 the prompt waits for it.  ON-QUIT declines the request; KEY names the
-prompt for `ladybird--cancel-prompt'."
+prompt for `ladybird--cancel-prompt-later'."
   (let ((entry (list key function on-quit)))
     (setq ladybird--queued-prompts
           (nconc ladybird--queued-prompts (list entry)))
     (run-at-time 0 nil #'ladybird--run-prompt entry)))
 
-(defun ladybird--cancel-prompt (key)
-  "End the prompt named KEY without an answer.
-A prompt that waits to be opened is forgotten; the one being read is
-closed."
-  (when key
-    (setq ladybird--queued-prompts
-          (seq-remove (lambda (entry) (equal (car entry) key))
-                      ladybird--queued-prompts))
-    (when (equal key ladybird--prompt)
-      (throw 'ladybird--cancelled 'cancelled))))
+(defun ladybird--close-later (prompt delay)
+  "Close PROMPT, a `ladybird--open-prompt', from a timer in DELAY seconds.
+A prompt has one such timer at a time."
+  (unless (ladybird--open-prompt-timer prompt)
+    (setf (ladybird--open-prompt-timer prompt)
+          (run-at-time delay nil #'ladybird--close-dropped prompt))))
+
+(defun ladybird--close-dropped (prompt)
+  "Close PROMPT, a `ladybird--open-prompt', if it is the innermost.
+While a minibuffer that it did not open is in use inside it, such as one
+of a command the user runs there, it waits for that one."
+  (setf (ladybird--open-prompt-timer prompt) nil)
+  (when (and (eq prompt (car ladybird--prompts))
+             (not (ladybird--open-prompt-done prompt)))
+    (if (> (minibuffer-depth) (ladybird--open-prompt-depth prompt))
+        (ladybird--close-later prompt 0.2)
+      (throw prompt 'cancelled))))
+
+(defun ladybird--drop-prompts (predicate)
+  "End the prompts whose key satisfies PREDICATE without an answer.
+Those waiting to be opened are forgotten, and those being read are
+dropped: they send neither their answer nor the one that declines.  The
+innermost of them closes from a timer, and one around another prompt
+closes when that one ends."
+  (setq ladybird--queued-prompts
+        (seq-remove (lambda (entry) (funcall predicate (car entry)))
+                    ladybird--queued-prompts))
+  (dolist (prompt ladybird--prompts)
+    (when (funcall predicate (ladybird--open-prompt-key prompt))
+      (setf (ladybird--open-prompt-dropped prompt) t)))
+  (when-let* ((innermost (car ladybird--prompts))
+              ((ladybird--open-prompt-dropped innermost)))
+    (ladybird--close-later innermost 0)))
 
 (defun ladybird--cancel-prompt-later (key)
-  "End the prompt named KEY without an answer, from a timer.
-The process filter cannot leave the prompt it interrupts."
-  (setq ladybird--queued-prompts
-        (seq-remove (lambda (entry) (equal (car entry) key))
-                    ladybird--queued-prompts))
-  (run-at-time 0 nil #'ladybird--cancel-prompt key))
+  "End the prompt named KEY without an answer, see `ladybird--drop-prompts'.
+The process filter cannot leave the prompt it interrupts: the prompt
+closes from a timer."
+  (when key
+    (ladybird--drop-prompts (lambda (other) (equal other key)))))
+
+(defun ladybird--cancel-conn-prompts (conn)
+  "End the prompts for the requests of CONN without an answer.
+These are the prompts whose key is a list that starts with CONN, see
+`ladybird--drop-prompts'."
+  (ladybird--drop-prompts (lambda (key) (eq (car-safe key) conn))))
 
 (defun ladybird-conn-unload-function ()
-  "Close every connection and stop the keepalive, for `unload-feature'."
+  "Close every connection and stop the keepalive, for `unload-feature'.
+While a prompt of ladybird is being read this is a `user-error'."
+  (when ladybird--prompts
+    (user-error "Cannot unload ladybird-conn while one of its prompts is open"))
   (mapc #'ladybird--disconnect ladybird--conns)
   (when (timerp ladybird--keepalive-timer)
     (cancel-timer ladybird--keepalive-timer))

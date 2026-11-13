@@ -15,9 +15,9 @@ SERVER_PID="${SERVER_PIDS[0]}"
 [ "$(stat -c %a "$WORK/server.log" 2>/dev/null || stat -f %Lp "$WORK/server.log")" = 600 ] || fail "log mode is not 0600"
 
 # A second server does not take the socket of one that answers, and a path that is not a socket is left alone.
-"$LADYBIRD" --headless=emacs --emacs-socket="$SOCKET" --emacs-log="$WORK/second.log" 2>/dev/null
+"$LADYBIRD" --headless=emacs --emacs-socket="$SOCKET" --emacs-log="$WORK/second.log" 2>"$WORK/second.err"
 [ $? -ne 0 ] || fail "a second server started on the same socket"
-grep -q "already listens" "$WORK/second.log" || fail "no clear error from the second server"
+grep -q "already listens" "$WORK/second.err" || fail "no clear error from the second server"
 echo "user data" > "$WORK/precious.txt"
 "$LADYBIRD" --headless=emacs --emacs-socket="$WORK/precious.txt" --emacs-log="$WORK/third.log" 2>/dev/null
 [ $? -ne 0 ] || fail "a server started on a regular file"

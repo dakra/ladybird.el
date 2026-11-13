@@ -59,10 +59,11 @@ of a canvas, and tests substitute the fake module.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `ladybird-program` | `"Ladybird"` | Binary for the local server (`executable-find`), run as `PROGRAM --headless=emacs` (stdio). |
+| `ladybird-program` | `"Ladybird"` | Binary for the local server (`executable-find`), run as `PROGRAM --headless=emacs` (stdio), or by `ladybird-start-server` with `--emacs-default-socket --emacs-background`. |
 | `ladybird-program-arguments` | `nil` | Extra arguments for the local and ssh servers. |
 | `ladybird-hosts` | `nil` | Alist `(LABEL . ENDPOINT)` or `(LABEL ENDPOINT...)` tried in order; see 3.1 for the endpoint syntax. The local server has label `nil` and is always offered. |
 | `ladybird-default-host` | `nil` | Label used without prompting; `nil` = local; `ask` = prompt when several hosts exist. |
+| `ladybird-autostart-server` | `ask` | When the local server would be `ladybird-program` over stdio because nothing accepts connections on the default socket and no connection to the local server is open: `t` runs `ladybird-start-server`, `ask` asks with `y-or-n-p`, `nil` (or no, or `ask` in batch Emacs) keeps stdio and says once per connection that its pages end with Emacs. Not consulted for hosts of `ladybird-hosts` or for a redial. |
 | `ladybird-ssh-program` | `"ssh"` | with `-T` added. |
 | `ladybird-home-url` | `"about:blank"` | URL of `ladybird` without argument. |
 | `ladybird-device-pixel-ratio` | `1.0` on NS, else `nil` | `nil` = `(frame-scale-factor)`; a number overrides (1.0 renders in logical pixels, no `:scale` in the spec). On NS `nil` needs an Emacs with the canvas transform patch (03 §7). |
@@ -114,6 +115,8 @@ of a canvas, and tests substitute the fake module.
 | `ladybird-toggle-console` (`C-c C-t`) | `set_console`, pops the console buffer. |
 | `ladybird-new-buffer` (`c`) | New view on the same host with the current URL (like `xwidget-webkit-clone-and-split-*` without the split). |
 | `ladybird-quit` (`q`) | `quit-window`; `Q` = `ladybird-close` (sends `close_view`, kills buffer). |
+| `ladybird-detach` (`C-c C-d`; `d`) | Only for a server on a socket (`user-error` for stdio, local or over ssh): `ladybird--disconnect`, then kills the connection's page buffers, which sends no `close_view`; the next `welcome` lists the views. Interactively asks with `y-or-n-p` when more than one buffer would go; refused while the connection is down with views in `closing`. With a prefix argument kills only the current buffer as with `ladybird-keep-view-on-kill`, unless it is the connection's last. `ladybird--disconnect` ends the prompts of the connection's requests. |
+| `ladybird-attach` (`C-c C-a`; `a`) | `completing-read` (category `ladybird-page`) over the connection's `kept`, by view id, look-alikes numbered as in `ladybird-switch-to-page`, with a last entry `All N pages` when there are several; `ladybird--restore-kept` for the choice, `ladybird--display-new-page` for the first buffer. The connection is the current page buffer's, else that of `ladybird--host` (with a prefix argument `ladybird--read-host`), both with `ladybird-autostart-server` nil; a host that is not connected and has no socket endpoint is a `user-error` "No server on …". A connection that is not ready is dialled with `ladybird--attach-offer` in `on-ready` (once; a second attach while it waits only says so), trying only its `unix`, `tcp` and `tls` endpoints (`ladybird--connect`'s ONLY); the offer reads the page from `ladybird--later` with the key `(CONN attach)`, so a close for good or a takeover drops it. Such a welcome does not linger. Nothing in `kept` is a `user-error`, after a connect a message. A connection without page buffers before the read and after it, however the read ends, lingers (socket) or is disconnected, as after its last buffer; a lingering timer is cancelled while the page is read. A page that got a buffer meanwhile shows that buffer. |
 | `ladybird-kill-buffer-hook` | `kill-buffer-hook`: sends `close_view` unless `ladybird-keep-view-on-kill` (`defcustom`, default `nil`; `t` leaves the view on the server to reappear in the next `welcome`). |
 
 ### 2.3 Keymaps
@@ -169,8 +172,25 @@ item 13): every character from `SPC` up → `ladybird-hint-add-char`, `DEL` and
 | `tcp://HOST:PORT` | `tcp` | `open-network-stream NAME nil HOST PORT :type 'plain :nowait t :coding 'binary` |
 | `tls://HOST:PORT` | `tls` | same with `:type 'tls` (as `rexel--open-network`, `rexel.el` line 262; strip `[]` from IPv6 hosts; a status of `failed` right after the call is an error). |
 
-`ladybird--hosts` returns `((nil local) (LABEL ENDPOINT...) ...)`; the local entry is
-offered only when `(executable-find ladybird-program)` succeeds. `shm` in `hello` is `t`
+`ladybird--hosts` returns `((nil ENDPOINT...) (LABEL ENDPOINT...) ...)`; the local entry
+has the endpoints of an open (or redialing) connection to the local server over a socket,
+else the default socket when a server of this user listens there, else those of an open
+connection over stdio, else `local` when `(executable-find ladybird-program)` succeeds,
+and is left out otherwise. So the pages that `ladybird`, `ladybird-browse-url` and
+`ladybird-connect` open go to a server that appeared on the default socket, while pages
+open on a stdio server stay there, and so do the pages opened from them (a new buffer,
+a link in a new buffer, a blocked popup, windows the page opens), which use the host of
+their buffer. When `ladybird--host` or `ladybird--read-host` picks
+that `local` entry and no connection to it is open (neither to the local server nor one
+of a configured host with the same endpoints), `ladybird--local-host` applies
+`ladybird-autostart-server`: a server
+started by `ladybird-start-server` (an async process waited on with
+`accept-process-output`, so `C-g` stops only the waiting: the start goes on, and its
+sentinel deletes the stderr pipe and reports the outcome; an exit status other than 0 is
+an error with the last line of the stderr this start wrote, collected by its own filter,
+unless a server accepts connections on the socket afterwards) replaces it with the default
+socket. Without the native module it signals an error before asking or starting anything;
+in batch Emacs `ask` counts as `nil`. `shm` in `hello` is `t`
 only for kind `local` and `unix`; `ssh`, `tcp`, `tls` send `false`. A `unix` endpoint may
 be an `ssh -L` forward, so a failing `ladybird-module-set-shm` (or a mapped size below the
 `shm` message's `size`) is answered with `shm_failed` (protocol §4.3), not treated as an
@@ -238,7 +258,7 @@ any   --ladybird-disconnect--> closed
   buffer (displayed or not), and `set_viewport` for the displayed ones.
 - `reject`: message with `reason`, state `closed`, no redial.
 - `replaced`: `(message "ladybird: another client took over %s" …)`, state `replaced`,
-  buffers keep their last frame, header line shows `[detached]`.
+  buffers keep their last frame, header line shows `[taken over]`.
 - Sentinel `ladybird--sentinel`: on `exit`/`failed`/`closed`: if state was `ready` or
   `redialing` and `ladybird-reconnect` and the conn has views → `ladybird--reconnect` (backoff
   like `rexel--reconnect`, `rexel.el` line 460); otherwise closed. ssh exit code 255 is a
@@ -332,12 +352,26 @@ every conn silent for `ladybird-keepalive-interval` gets `{"type":"ping","id":n}
 
 ### 3.8 Prompting
 
-`ladybird--later FUNCTION` = `(run-at-time 0 nil (lambda () (condition-case nil (funcall
-function) (quit (funcall on-quit)))))` after `rexel--prompt-later` (`rexel.el` line 848):
-a prompt inside the filter would hold up the records after it in the same chunk and a
-`C-g` would drop them. Every dialog handler passes an `on-quit` that answers the server
-with the cancel value (`accepted:false`, `item:null`, `paths:[]`, `outcome:"dismiss"`,
-`open:false`) so the page never stays blocked.
+A handler never prompts from the filter: `ladybird--later FUNCTION ON-QUIT KEY` queues
+`(KEY FUNCTION ON-QUIT)` in `ladybird--queued-prompts` and opens it from a timer, after
+`rexel--prompt-later` (`rexel.el` line 848); while the minibuffer is in use without
+`enable-recursive-minibuffers` it tries again every 0.2 s. KEY is `(CONN VIEW ID)` of the
+request. `ladybird--call-prompt` runs FUNCTION with `use-dialog-box` nil and an
+`ladybird--open-prompt` on the stack `ladybird--prompts`, and calls ON-QUIT, which sends
+the cancel value (`accepted:false`, `item:null`, `paths:[]`, `outcome:"dismiss"`,
+`open:false`), whenever FUNCTION ends without `ladybird--note-answer` for KEY: by `C-g`,
+an error or any other exit. `ladybird--answer` notes the answer and sends it. An alert
+shown in the echo area is answered at once without a prompt.
+
+`request_cancelled` and `permission_cancelled` (`ladybird--cancel-prompt-later`), and a
+connection that closes for good or is taken over (`ladybird--cancel-conn-prompts`), drop
+the prompts of their keys (`ladybird--drop-prompts`): queued ones are forgotten, open ones
+send neither their answer nor their decline. The innermost dropped prompt closes from a
+timer by throwing to its own entry, the catch tag; one with another prompt inside closes
+when that one ends. A prompt has one such timer, and it waits while a minibuffer deeper
+than the prompt's own is in use (a command the user runs inside it); an alert read with
+`read-key` waits at its own depth (`ladybird--prompt-reads-keys`). Unloading `ladybird` or
+`ladybird-conn` while a prompt is open is a `user-error`.
 
 ## 4. Rendering (`ladybird.el`)
 
@@ -431,7 +465,7 @@ old canvas stays; a window shrunk below the image shows a cropped image for ≤ 
 ladybird-buffer-name-format …))` only when the formatted name changed, `force-mode-line-update`.
 Header line (`ladybird-header-line`): `(:eval (ladybird--header-line))` → favicon image (if
 any, `(create-image (base64-decode-string png) 'png t :height (frame-char-height)
-:ascent 'center)`), title, `" — "`, URL, `[loading]`, `[detached]`/`[reconnecting in Ns]`.
+:ascent 'center)`), title, `" — "`, URL, `[loading]`, `[taken over]`/`[reconnecting in Ns]`.
 `mode-line-process` carries the `:Page`/`:Command` tag and `:Loading` as `ghostel--mode-line-refresh`.
 
 `ime` handler: `ladybird--field-focused` is nil without a focused field, `user` once
@@ -465,8 +499,9 @@ with a prefix argument, `ladybird--follow-link` with a new buffer (hints, contex
 
 The limit is `welcome.max_views` (`ladybird--max-views`; 1 when the welcome has none).
 `ladybird--view-count` counts the views of the connection's buffers, those of buffers
-killed with `ladybird-keep-view-on-kill` (the connection's `kept`, cleared by the next
-welcome, which lists them) and the `create_view`s not yet answered. At the limit
+killed with `ladybird-keep-view-on-kill` or not given one (the connection's `kept`; the
+next welcome keeps the entries it lists, unless another server process answers) and the
+`create_view`s not yet answered. At the limit
 `ladybird--open` asks for nothing: a server that holds one page loads the URL in it
 (`ladybird--load-in-page`), any other is refused with a `user-error` that names the limit.
 An `error` answering a `create_view` kills the new buffer; only on a one-page server does
@@ -485,8 +520,11 @@ is told at once; after a welcome from the timer the welcome sets, so that
 the frames it painted and the full ones among them (`ladybird--frame-count`,
 `ladybird--full-frame-count`); the module's stats count frames per session only.
 
-A welcome gives every listed view without a buffer a new one, with its state, and says
-how many pages it found. `ladybird-connect` shows the page buffer used last if it is one
+A welcome gives every listed view that has neither a buffer nor a `kept` entry a new one,
+with its state, and says how many pages it found; a listed view in `kept` stays there
+with the welcome's state. When every function in the connection's `on-ready` is
+`ladybird--attach-offer`, the new views go to `kept` instead. The welcome sends
+`set_visibility` false and `set_focus` false for every view in `kept`. `ladybird-connect` shows the page buffer used last if it is one
 of the connection's, else the one with the lowest view id (the welcome does not say which
 view was used last), and says how many pages the server has. Closing the last page of a
 socket connection says that the server keeps running, with how many pages it kept; the
@@ -524,7 +562,7 @@ and its last `state`) counts against the limit, and the refusal says how many of
 pages are such. `state` messages for it update the kept state, `view_closed` drops it.
 `ladybird--restore-kept` gives such views buffers again: `ladybird-connect` on the open
 connection does it for all, `ladybird-switch-to-page` offers them among the pages and
-does it for the one chosen. The buffer has the kept state and gets its frame once a
+does it for the one chosen, and so does `ladybird-attach` (2.2). The buffer has the kept state and gets its frame once a
 window shows it (`set_visibility`, then a full frame).
 
 Page strings shown in Emacs pass `ladybird--clean`, which turns line breaks and tabs
@@ -945,7 +983,7 @@ M ≈ 300, L ≈ 600 of code plus tests.
   `after-focus-change-function` leave. elate (`--socket` variant): kill the mock, start it
   again with `--views 1` within 10 s → `[reconnecting]` then the buffer reattaches to view 1
   with no new buffer; `--exit-after` on stdio → message with the exit code; a second Emacs
-  client (a Python one-liner connecting to the socket) → `[detached]` and `ladybird-reconnect`
+  client (a Python one-liner connecting to the socket) → `[taken over]` and `ladybird-reconnect`
   takes over.
 
 **Group E (needs D)**

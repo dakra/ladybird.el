@@ -14,7 +14,10 @@ v1 delivers `Ladybird --headless=emacs`:
 - up to `--emacs-max-views` views (default 16), each an `EmacsWebView` with a WebContent
   process of its own (§2.10); `close_view` destroys one, and the server keeps running with
   zero views
-- transports: stdio (default) and `--emacs-socket=PATH` (Unix listener, 0600, unlinked on exit)
+- transports: stdio (default) and `--emacs-socket=PATH` or `--emacs-default-socket` (Unix
+  listener, 0600, one server per path, unlinked on exit); `--emacs-background` starts a
+  socket server that outlives the process that started it (§2.12);
+  `--emacs-socket-activation` serves a socket that systemd or launchd made (§2.13)
 - frame encodings raw (0), zstd (1), shm (2); one frame in flight, coalesced damage, `frame_ack`
 - full input: `mouse` (down/up/move/wheel/leave, click counts), `key`, `text`
 - navigation and page commands of protocol section 6 except `request_source` (see 8.4)
@@ -70,12 +73,19 @@ Changes to existing files:
     and extend the help string.
   - add options `--emacs-socket=PATH` and `--emacs-log=PATH` next to `--device-pixel-ratio` (line ~379).
   - next to `TerminalWebView::take_over_terminal()` (line ~573, after option parsing, before
-    `launch_services()` at ~706): `if (headless_mode == HeadlessMode::Emacs) TRY(EmacsTransport::take_over_stdio(emacs_socket_path.has_value() ? EmacsTransport::Kind::Socket : EmacsTransport::Kind::Stdio, emacs_log_path));`
+    `launch_services()` at ~706): `if (headless_mode == HeadlessMode::Emacs) TRY(EmacsTransport::take_over_stdio(emacs_socket_path.has_value() ? EmacsTransport::Kind::Socket : EmacsTransport::Kind::Stdio, emacs_socket_path, emacs_log_path));`
   - in `execute()` (line ~2103): the `Emacs` branch does **not** create a view up front and
     does **not** enforce "exactly one URL": `if (mode == Emacs) { m_emacs_server = TRY(EmacsServer::create(move(theme), m_browser_options)); return m_event_loop->exec(); }`
     placed before the `urls.size() != 1` check. With a URL on the command line the
     server creates the view at startup and loads it (so `ssh host Ladybird --headless=emacs URL` works).
   - `Application.h`: `OwnPtr<EmacsServer> m_emacs_server;` (forward-declared in `Forward.h`).
+  - options `--emacs-default-socket` and `--emacs-background` (§2.12), and
+    `--emacs-socket-activation` (§2.13);
+    `Application::background_start_exit_status()`, which `Services/Hub/main.cpp` returns
+    when it is set; `initialize` wraps `initialize_from_arguments` and passes any error to
+    the starting process of a background server.
+- `Libraries/LibCore/Process.h/.cpp`: `ProcessSpawnOptions::new_session` (`setsid()` in the
+  child on Linux, `POSIX_SPAWN_SETSID` elsewhere) for the background start.
 - `Libraries/LibWebView/CMakeLists.txt`: inside the existing `if (NOT WIN32)` block
   (line 114): `list(APPEND SOURCES EmacsProtocol.cpp EmacsTransport.cpp EmacsFrameEncoder.cpp EmacsWebView.cpp)`;
   after line 173: `target_link_libraries(LibWebView PRIVATE $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>)`.
@@ -202,14 +212,14 @@ Nothing but records may reach fd 1. Follow `TerminalWebView::take_over_terminal(
 (`TerminalWebView.cpp:70-90`) in `EmacsTransport::take_over_stdio()`:
 
 1. `s_stream_out = dup(STDOUT_FILENO)`, `s_stream_in = dup(STDIN_FILENO)`, both `FD_CLOEXEC` (helpers must not inherit the stream).
-2. log path: `--emacs-log` or `/tmp/ladybird-emacs-<pid>.log`; `open(O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644)`; `dup2(log, STDOUT_FILENO)`; `dup2(log, STDERR_FILENO)`; `dup2(open("/dev/null"), STDIN_FILENO)`.
+2. log path: `--emacs-log` (`open(O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0600)`), else `ladybird-emacs-<pid>.log` in the directory of the default socket (§2.12) with `--emacs-default-socket`, else in an absolute `XDG_RUNTIME_DIR` (both: `unlink`, then `open(O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC, 0600)`), and where there is neither or that open fails, `mkstemps("/tmp/ladybird-emacs-<pid>-XXXXXX.log")`, whose name nobody can tell beforehand. A log that cannot be opened fails the start with `Unable to open the log PATH: REASON` on stderr and to a waiting starter; `dup2(log, STDOUT_FILENO)`; `dup2(log, STDERR_FILENO)`; `dup2(open("/dev/null"), STDIN_FILENO)`.
 3. `signal(SIGPIPE, SIG_IGN)` so a dead reader shows up as `EPIPE` on write, handled as disconnect.
 
 It must run before `launch_services()` (helpers inherit fds) and before any `outln` — the
 call site in `Application::initialize` next to `take_over_terminal()` satisfies both;
 `outln`/`dbgln` after that point land in the log (e.g. `display_download_confirmation_dialog`
 uses `outln`, `Application.cpp:2308`). For the socket transport the same redirect
-runs, so the log location is identical for both. The log path is sent in `welcome` as `log` (8.12).
+runs. The log path is sent in `welcome` as `log` (8.12).
 
 ### 2.7 Reading and writing the stream
 
@@ -224,6 +234,25 @@ runs, so the log location is identical for both. The log path is sent in `welcom
 ### 2.8 Lifecycle
 
 - Startup: `EmacsServer::create(theme, options)` builds the transport; stdio starts in "connected, awaiting hello"; socket starts listening. If `options.urls` is non-empty, the view is created at once with `window_width/height` and `device_pixel_ratio` from the options and `load(urls.first())`.
+- One server per socket path. A path that does not fit `sockaddr_un.sun_path` (103 bytes
+  and the terminating NUL on macOS, 107 on Linux) or is empty is refused while the options
+  are parsed: `Runtime error: The Emacs socket path is longer than a Unix socket address
+  can hold`, exit 1. `take_over_stdio` listens on the socket before it opens the log, so a
+  server that cannot have the socket leaves the log of the one that has it alone, and its
+  error goes to stderr. When the path exists, the server connects to it: a connection that
+  succeeds means another server listens there, and the start fails with `Another server
+  already listens on the Emacs socket path`; a refused one means a stale socket, which is
+  removed; a path that is not a socket is left alone and the start fails. Two servers that
+  start on one path at once take turns: each holds an exclusive `flock` on `PATH.lock`
+  (created 0600 with `O_NOFOLLOW`) from the check until it listens, and then removes that
+  file, so none is left next to a running server. A server that gets the lock on a file
+  that was removed meanwhile (its inode is no longer the path's) opens the path again.
+  Waiting for the lock gives up after 10 s with `Another server is still starting on the
+  Emacs socket path`. A lock file that cannot be opened or a socket that cannot be bound
+  fails the start with `Unable to open the lock file PATH.lock: REASON` or `Unable to bind
+  the socket PATH: REASON`, on stderr and to a waiting starter. A server that cannot open
+  its log after it listens removes its socket again. Connections made before
+  `EmacsServer::create` wait in the backlog.
 - Hello timeout: none in v1 (ssh startup can be slow). Any non-`hello` first message → `reject`.
 - Client disconnect: drop notifiers and fds, reset in-flight state, keep the view, keep listening (socket) or, for stdio, quit the event loop with `Core::EventLoop::current().quit(0)` — once stdin is at EOF nobody can ever reconnect.
 - Page closes itself (`on_close`): `view_closed`, destroy view; the process stays up until the client goes away or sends nothing (stdio EOF ends it).
@@ -443,6 +472,182 @@ URL in it, so that `state` has `loading` true.
   `popups-detach.txt` / `popups-reattach.txt` on `popups-cross.html` (a client without
   `popups` comes back to opened views, one of another site in a WebContent process of
   its own), with the WebContent processes left after closing them.
+
+### 2.12 Background start and the default socket
+
+`--emacs-default-socket` is `--emacs-socket` with the default path, the checks of its
+directory below and the default log in that directory; `--emacs-socket` naming the same
+path gets neither. It needs `--headless=emacs`, and the two socket options cannot be given
+together. The default path is `$XDG_RUNTIME_DIR/ladybird-emacs.sock` when
+`XDG_RUNTIME_DIR` starts with `/`, and `$TMPDIR/ladybird-emacs-<uid>/ladybird-emacs.sock`
+otherwise, with `/tmp` for a `TMPDIR` that does not start with `/` (unset, empty or
+relative) and `<uid>` the numeric real user id. Trailing slashes of `XDG_RUNTIME_DIR` and
+`TMPDIR` are dropped (`EmacsTransport::default_socket_path()`).
+
+Anyone may create names in `TMPDIR` or `/tmp`, so outside `XDG_RUNTIME_DIR` the socket is
+in a directory only the user can enter, in a directory where nobody else can rename it.
+While parsing the options, `default_socket_path()` checks that the socket path fits
+(§2.8), `stat`s the parent (`TMPDIR` or `/tmp`) and fails when it is owned by neither root
+nor `getuid()` (`is in a directory of another user`) or has `S_IWGRP` or `S_IWOTH` without
+`S_ISVTX` (`is in a directory that others can write to`). It then calls `mkdir(dir, 0700)`
+and, when that made the directory, `chmod(dir, 0700)` against the umask (an `EEXIST` is
+fine), `lstat`s the directory and fails when it is a symbolic link (`is a symbolic link`),
+not a directory (`exists and is not a directory`), not owned by `getuid()` (`belongs to
+another user`), or has any of the bits `077` set (`grants permissions to its group or
+others`). Each message starts with `The directory of the default Emacs socket`. A failure,
+also of `stat` or `mkdir`, is reported as `Unable to use DIR for the default Emacs socket:
+REASON`, and a default socket path that does not fit, in `XDG_RUNTIME_DIR` too, as `Unable
+to use PATH as the default Emacs socket: REASON`, on stderr and to a waiting starter. A
+directory that fails is left as it is. The server does not remove the directory when it
+exits. The lock file `PATH.lock` and the default log are next to the socket, inside the
+directory. Access control lists are not checked: on macOS, a parent with an inheritable
+ACL that lets others add or delete entries gives a directory of mode 0700 that they can
+change; the default per-user `TMPDIR` has none.
+
+`--emacs-background` needs `--headless=emacs` and one of the two socket options. A server
+started with it runs in a session of its own, with no controlling terminal and its
+standard streams away from the caller, so that a server Emacs starts with `call-process`
+outlives Emacs and gets neither the `SIGHUP` of a terminal nor the signals sent to the
+caller's process group:
+
+1. The starting process parses and checks the options as usual (an unusable socket path
+   fails here), then, in place of `take_over_stdio`, creates a close-on-exec pipe whose
+   ends it moves above descriptor 2, and spawns its own executable
+   (`Core::System::current_executable_path()`, the `Hub`) with the same arguments through
+   `Core::Process::spawn` with `new_session`, stdin, stdout and stderr on `/dev/null`, the
+   write end of the pipe as descriptor N, and `LADYBIRD_EMACS_STARTER_FD=N` in its
+   environment. It closes its write end and reads the pipe.
+2. The server takes `LADYBIRD_EMACS_STARTER_FD` out of its environment before it parses
+   the options, so no helper sees it and the server does not start another one, and
+   fails unless the value is a descriptor above 2 and `--emacs-background` is given. It
+   makes the descriptor close-on-exec and `F_SETNOSIGPIPE` where there is one, and goes on
+   as a socket server in the foreground would. Its messages on the pipe end in a NUL,
+   which no path or error message contains: `log PATH` once it listens and has opened the
+   log, then `ready` after `EmacsServer::create` returned, or `error Unable to start the
+   Emacs server: REASON` for an error from `initialize` or `EmacsServer::create`; then it
+   closes the pipe.
+3. The starting process exits 0 after `ready`, with `Ladybird logs to PATH` on stderr and
+   nothing on stdout. After `error` it prints the reason on stderr and exits 1. At end of
+   file without either, the server has ended otherwise, for example by a crash; the
+   starting process waits for it and prints `The Emacs server ended with status N before
+   it accepted connections`, with `, see LOG` when the log line came, and exits 1. A
+   server that has said neither after 60 s is sent `SIGTERM`, and the starting process
+   prints `The Emacs server did not start within 60 s and was stopped` (with `, see LOG`)
+   and exits 1.
+
+So a client can connect as soon as the start exits 0. The server is not the starter's
+child afterwards (it is reparented); it ends on `SIGINT`, `SIGTERM` or `SIGHUP` sent to it
+as any socket server does, and removes its socket. It keeps the working directory of the
+start, so relative paths in the arguments mean what they meant to the caller.
+
+The server is a new process rather than a `fork()` of the starting one: by the time the
+options are parsed the process has run `platform_init` and may have threads, after which
+a child of `fork()` may only call async-signal-safe functions until it calls `exec`.
+
+- **Check:** `tools/checks/background.sh` (run.sh name `background`): the start returns
+  with its streams closed and the socket accepts a connection at once; the server leads a
+  session of its own and answers `ping`; a second start, in the background and in the
+  foreground with the same `--emacs-log`, fails with `already listens` and leaves the
+  first server its socket and its log; a stale socket is replaced; a start waits while
+  another process holds `PATH.lock` and goes on once it is released, and gives up with
+  `still starting` when the lock is held for 13 s; a start with `-- about:blank` leaves
+  one server; a start without `--emacs-log` and `XDG_RUNTIME_DIR` names a log
+  `/tmp/ladybird-emacs-<pid>-XXXXXX.log` of mode 0600, and so does one with an
+  `XDG_RUNTIME_DIR` that is missing when the log is opened; with an existing
+  `XDG_RUNTIME_DIR` a server on a socket and one over stdio log there, mode 0600; a path
+  of 120 bytes fails in the background and in the foreground; the reason a log cannot be
+  opened, naming it, reaches the start, and the socket is gone; `--emacs-background`
+  without a socket or without `--headless=emacs` fails, and so does
+  `--emacs-default-socket` without `--headless=emacs`, which makes no directory;
+  `--emacs-default-socket` with `XDG_RUNTIME_DIR` (trailing slash) logs to
+  `$XDG_RUNTIME_DIR/ladybird-emacs-<pid>.log`; with an empty `XDG_RUNTIME_DIR` and a
+  `TMPDIR` in `/tmp` (trailing slash) it makes the directory with mode 0700 and logs there
+  (mode 0600), and starts again with that directory there and a relative `XDG_RUNTIME_DIR`
+  (in a directory of the check, as Ladybird keeps other files in `XDG_RUNTIME_DIR`); a
+  directory of mode 0750 or 0701, a symbolic link to a directory of mode 0700, a plain
+  file in its place and a `TMPDIR` of mode 0777 or 0770 each fail in the background and in
+  the foreground with the reason and the directory on stderr, open no log and make no
+  socket; a missing `TMPDIR` fails naming the directory; a default socket path that does
+  not fit, in `XDG_RUNTIME_DIR` and in `TMPDIR`, is named and makes no directory; a
+  `TMPDIR` of mode 1777 and a umask of 277 give a directory of mode 0700; both socket
+  options together fail; every server is stopped with `SIGTERM` and leaves neither socket
+  nor lock file, and on a failure every server listening on a socket of the check is
+  stopped too. The 60 s limit of the start, a relative `TMPDIR`, which would use `/tmp`,
+  and the fallback to `/tmp` for a log that cannot be made in the directory of the default
+  socket are not covered.
+
+### 2.13 Socket activation
+
+`--emacs-socket-activation` serves the client on a listening socket that the process is
+handed instead of one it binds, so that systemd or launchd starts the server on the first
+connection. It needs `--headless=emacs` and goes with neither `--emacs-socket`,
+`--emacs-default-socket` nor `--emacs-background`; each of these is refused while the
+options are parsed, before the default socket's directory is made. The units that start it
+are `contrib/systemd/ladybird-emacs.socket` and `.service` in the client repository: the
+socket unit listens on `%t/ladybird-emacs.sock`, which is the default socket
+`$XDG_RUNTIME_DIR/ladybird-emacs.sock` (§2.12) of the user's systemd instance, with
+`SocketMode=0600`.
+
+`take_over_stdio` takes the socket where a socket server would bind
+(`EmacsTransport::take_activated_socket()`), so a server that cannot have the socket opens
+no log:
+
+1. It reads `LISTEN_PID` and `LISTEN_FDS` and takes them, `LISTEN_FDNAMES` and
+   `LISTEN_PIDFDID` out of the environment, so no helper sees them; `LISTEN_PIDFDID` is not
+   checked. When either is set, `LISTEN_PID` must be this
+   process's pid (`LISTEN_PID does not name this process`) and `LISTEN_FDS` exactly `1`
+   (`LISTEN_FDS does not count exactly one socket`), and the socket is descriptor 3
+   (`SD_LISTEN_FDS_START`).
+2. Without either variable, on macOS it calls `launch_activate_socket("Listeners")`, the
+   socket of that name in the `Sockets` dictionary of the launchd job; `ESRCH` is `Neither
+   LISTEN_FDS nor a launchd job hands this process a socket`, `ENOENT` `The launchd job of
+   this process has no socket named Listeners`, and a socket of more than one descriptor
+   is refused and its descriptors closed. Elsewhere it fails with `Neither LISTEN_PID nor
+   LISTEN_FDS is set`.
+3. The descriptor must be a socket (`It is not a socket`; `There is no open descriptor 3`
+   for `EBADF`) of type `SOCK_STREAM` (`It is not a stream socket`) and family `AF_LOCAL`
+   by `getsockname` (`It is not a Unix socket`) that listens by `SO_ACCEPTCONN` (`It does
+   not listen`). macOS answers `SO_ACCEPTCONN` with `ENOPROTOOPT`; there a socket whose
+   `getpeername` succeeds or fails with `EINVAL`, which a socket whose connection ended
+   gives, is refused (`It is or was connected`), and one that fails with `ENOTCONN` is
+   made to listen with `listen(fd, 32)`, whose `EINVAL` for a socket that is not bound is
+   `It is not bound to an address and cannot listen`. Any other error of these calls is
+   reported as the call and its errno.
+4. It makes the descriptor non-blocking and close-on-exec, so no helper inherits it.
+
+Each failure is `Unable to take the socket handed to the Emacs server: REASON` on stderr,
+exit 1. The server binds nothing and takes no `PATH.lock`; the socket file belongs to
+whoever made the socket, so the server neither changes its mode nor removes it on exit, and
+after the server ends systemd listens on it again. The server goes on as a socket server
+does: `Ladybird logs to PATH` on stderr (the journal under systemd), and without
+`--emacs-log` the log is `ladybird-emacs-<pid>.log` in an absolute `XDG_RUNTIME_DIR`, else
+the one in `/tmp` (§2.6). Connections made before `EmacsServer::create` wait in the backlog,
+including the one that had the server started.
+
+No LaunchAgent is shipped: launchd cannot expand `$TMPDIR` in `SockPathName` and does not
+create a missing directory for it, so a plist for the default socket in
+`$TMPDIR/ladybird-emacs-UID` names a path fixed when it is written, in a directory that
+has to exist whenever launchd loads the agent. A server that launchd starts is its own
+responsible process for the macOS privacy checks: at startup
+`FileDownloader::restore_persisted_downloads` opens the downloads directory, which for
+`~/Downloads` waits until the user answers the prompt for that folder, unless
+`XDG_DOWNLOAD_DIR` names another directory.
+
+- **Check:** `tools/checks/activation.sh` (run.sh name `activation`): a Python launcher
+  binds and listens on a socket, puts it at descriptor 3, sets `LISTEN_FDS=1` and
+  `LISTEN_PID` to its own pid and `exec`s the server. A client that connects at once gets
+  its `pong`; by `lsof` the server holds the socket at descriptor 3; the socket keeps its
+  inode and has no lock file next to it; the server names its log
+  `$XDG_RUNTIME_DIR/ladybird-emacs-<pid>.log`, mode 0600; its helper processes have no
+  `LISTEN_` variable in the environment `ps eww` shows and, by `lsof`, not the socket;
+  after `SIGTERM` the socket file is still there with its inode and refuses connections.
+  Refused, each with its reason, with exit 1, no log and the launcher's socket unchanged:
+  no variables (on macOS through `launch_activate_socket`), a `LISTEN_PID` of the parent
+  or missing, `LISTEN_FDS=2`, no descriptor 3, a file, a pipe, a datagram Unix socket, a
+  TCP socket, a connected socket and one that is not bound; a bound socket that does not
+  listen yet is refused on Linux and served on macOS. `--emacs-socket-activation` with
+  `--headless=text`, `--emacs-socket`, `--emacs-default-socket` (makes no directory) or
+  `--emacs-background` is refused. launchd itself is not covered.
 
 ## 3. Input mapping
 
@@ -724,9 +929,11 @@ Run (the `Ladybird` launcher `execv`s `Hub`; running `Hub` directly is equivalen
 # macOS
 ./Build/release/bin/Ladybird.app/Contents/MacOS/Ladybird --headless=emacs https://ladybird.dev
 ./Build/release/bin/Ladybird.app/Contents/MacOS/Hub --headless=emacs --emacs-socket=/tmp/ladybird.sock
+./Build/release/bin/Ladybird.app/Contents/MacOS/Ladybird --headless=emacs --emacs-default-socket --emacs-background
 # Linux
 ./Build/release/bin/Ladybird --headless=emacs https://ladybird.dev
 ./Build/release/bin/Hub --headless=emacs --emacs-socket=/tmp/ladybird.sock
+./Build/release/bin/Ladybird --headless=emacs --emacs-default-socket --emacs-background
 # Through ladybird.py (arguments after the target pass through)
 ./Meta/ladybird.py run Ladybird --headless=emacs --device-pixel-ratio 2 https://ladybird.dev
 # Test client
@@ -734,7 +941,7 @@ python3 -I /Users/daniel/src/dakra/ladybird/tools/ladybird-client.py --server ./
 ```
 
 Do not use `open -W … Ladybird.app` for the stdio transport (`open` does not pass stdin).
-Log: `/tmp/ladybird-emacs-<pid>.log` unless `--emacs-log=PATH`; also reported in `welcome.log`.
+Log: `--emacs-log=PATH`, else as in §2.6; also reported in `welcome.log`.
 Existing options that apply: `--window-width/--window-height` (initial view when a URL is given), `--device-pixel-ratio`, `--force-cpu-painting`, `--disable-sandbox`, `--profile-path`.
 
 ## 6. Risks and open questions
@@ -754,7 +961,11 @@ Existing options that apply: `--window-width/--window-height` (initial view when
 - **`HeadlessWebView` crash propagation**: children propagate crashes to the root via
   `propagate_web_content_crash`; a crash of a hidden child of a blocked popup would thus report `crashed` for its opener.
 - **Open question**: should a stdio server exit when the view closes itself (`on_close`)? This plan keeps it running until EOF; the Emacs side can send `create_view` again.
-- **Open question**: `--emacs-socket` on a path longer than `sizeof(sockaddr_un.sun_path)` (104 on macOS) fails in `SocketAddress::to_sockaddr_un`; report as a startup error.
+- **Socket path length**: a path that does not fit `sizeof(sockaddr_un.sun_path)` (104
+  bytes with the NUL on macOS, 108 on Linux) is a startup error (§2.8). The default path
+  under macOS's per-user `TMPDIR` (`/var/folders/xx/…/T/`, 49 bytes) is 87 bytes for uid
+  501 and at most 94 for a 10-digit uid, so it fits; a deep `XDG_RUNTIME_DIR` or `TMPDIR`
+  may not, and is reported, not shortened.
 
 ## 7. Size estimate
 

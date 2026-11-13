@@ -47,10 +47,17 @@
            (with-current-buffer buffer
              (setq ladybird-test-sent nil)
              ,@body)
-         (when (timerp ladybird--update-timer)
-           (cancel-timer ladybird--update-timer))
+         ;; Killing a page buffer schedules an update.
          (dolist (buffer (ladybird--buffers))
-           (kill-buffer buffer))))))
+           (kill-buffer buffer))
+         (when (timerp ladybird--update-timer)
+           (cancel-timer ladybird--update-timer))))))
+
+(defun ladybird-render-test-update ()
+  "Run `ladybird--update' now, in place of the update scheduled."
+  (when (timerp ladybird--update-timer)
+    (cancel-timer ladybird--update-timer))
+  (ladybird--update))
 
 (defmacro ladybird-render-test-messages (&rest body)
   "Run BODY and return the messages it showed, oldest first."
@@ -192,7 +199,7 @@ the canvas."
                      '(((type . "set_visibility") (view . 1) (visible)))))
       (setq ladybird-test-sent nil)
       (set-window-buffer (selected-window) buffer)
-      (ladybird--update)
+      (ladybird-render-test-update)
       (should (equal (ladybird-test-sent)
                      `(((type . "set_viewport") (view . 1)
                         (width . ,(window-body-width nil t))
@@ -202,11 +209,11 @@ the canvas."
                        ((type . "set_focus") (view . 1) (focused . t)))))
       ;; Nothing changed: nothing is sent.
       (setq ladybird-test-sent nil)
-      (ladybird--update)
+      (ladybird-render-test-update)
       (should-not (ladybird-test-sent))
       ;; A smaller window is a new viewport.
       (split-window nil 5)
-      (ladybird--update)
+      (ladybird-render-test-update)
       (should (equal (ladybird-test-sent)
                      `(((type . "set_viewport") (view . 1)
                         (width . ,(window-body-width nil t))
@@ -398,7 +405,7 @@ the canvas."
           (should (buffer-local-value 'ladybird-command-mode buffer)))))
     (ladybird-command-mode -1)
     (ladybird-test-receive conn '((type . "replaced")))
-    (should (string-suffix-p " [detached]" (ladybird--header-line)))
+    (should (string-suffix-p " [taken over]" (ladybird--header-line)))
     (ladybird--connect ladybird-test-host #'ignore)
     (should (string-suffix-p " [connecting]" (ladybird--header-line)))
     (ladybird-test-receive conn (ladybird-test-welcome))
@@ -437,7 +444,7 @@ the canvas."
       ;; an undisplayed one that it is hidden.
       (should-not (ladybird-test-sent "set_visibility"))
       (should (timerp ladybird--update-timer))
-      (ladybird--update)
+      (ladybird-render-test-update)
       (should (equal (ladybird-test-sent "set_visibility")
                      '(((type . "set_visibility") (view . 7) (visible)))))
       (ladybird-test-receive conn '((type . "view_created") (view . 8)
@@ -512,6 +519,584 @@ the canvas."
     (should-not (buffer-live-p buffer))
     (should (equal (ladybird-test-sent)
                    '(((type . "close_view") (view . 1)))))))
+
+(ert-deftest ladybird-render-test-detach ()
+  ;; The page buffers go, the server is told nothing and keeps the
+  ;; pages, and the connection closes for good.
+  (ladybird-render-test-with-view
+    (let ((second (ladybird--make-view-buffer conn 2 "mock://2"))
+          (process (ladybird--conn-process conn))
+          (ladybird-keep-view-on-kill nil))
+      (should (eq (key-binding (kbd "C-c C-d")) #'ladybird-detach))
+      (should (eq (lookup-key ladybird-command-mode-map "d") #'ladybird-detach))
+      (should (equal (ladybird-render-test-messages (ladybird-detach))
+                     '("ladybird: detached from test, which keeps its pages; \
+`ladybird-attach' or `ladybird-connect' shows them again")))
+      (should-not (buffer-live-p buffer))
+      (should-not (buffer-live-p second))
+      (should-not (ladybird-test-sent))
+      (should-not (process-live-p process))
+      (should (eq (ladybird--conn-state conn) 'closed))
+      (should-not (ladybird--conn-timer conn))
+      (should (= (hash-table-count (ladybird--conn-views conn)) 0))
+      (should-not ladybird--conns)))
+  ;; A connection being dialled again stops being dialled.
+  (ladybird-render-test-with-view
+    (ladybird--drop conn)
+    (should (eq (ladybird--conn-state conn) 'redialing))
+    (let ((timer (ladybird--conn-timer conn)))
+      (ladybird-detach)
+      (should-not (buffer-live-p buffer))
+      (should-not (memq timer timer-list))
+      (should-not (ladybird--conn-timer conn))
+      (should-not ladybird--conns)
+      (should-not (ladybird-test-sent)))))
+
+(ert-deftest ladybird-render-test-detach-asks ()
+  ;; Interactively a detach of several buffers asks first; one of a
+  ;; single buffer does not.
+  (ladybird-render-test-with-view
+    (let ((second (ladybird--make-view-buffer conn 2 "mock://2"))
+          (answer nil)
+          (asked nil)
+          (current-prefix-arg nil))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (prompt) (push prompt asked) answer)))
+        (call-interactively #'ladybird-detach)
+        (should (equal asked '("Detach 2 pages of test? ")))
+        (should (buffer-live-p second))
+        (should (ladybird--ready-p conn))
+        (setq answer t)
+        (call-interactively #'ladybird-detach)
+        (should-not (buffer-live-p second))
+        (should-not ladybird--conns)
+        (should-not (ladybird-test-sent)))))
+  (ladybird-render-test-with-view
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (&rest _) (ert-fail "asked")))
+              (current-prefix-arg nil))
+      (call-interactively #'ladybird-detach))
+    (should-not (buffer-live-p buffer))
+    (should-not ladybird--conns)))
+
+(ert-deftest ladybird-render-test-detach-while-closing ()
+  ;; A connection that is down while a killed buffer's page waits to be
+  ;; closed is not detached: the page is closed once it is back.
+  (ladybird-render-test-with-view
+    (let ((second (ladybird--make-view-buffer conn 2 "mock://2")))
+      (ladybird--drop conn)
+      (kill-buffer buffer)
+      (should (equal (ladybird--conn-closing conn) '(1)))
+      (with-current-buffer second
+        (dolist (only-this '(nil t))
+          (should (equal (cadr (should-error (ladybird-detach only-this)
+                                             :type 'user-error))
+                         "Wait until test is back to close the 1 page killed \
+meanwhile"))))
+      (should (buffer-live-p second))
+      (should (eq (ladybird--conn-state conn) 'redialing))
+      (should (ladybird--conn-timer conn))
+      (ladybird-test-run-timer (ladybird--conn-timer conn))
+      (ladybird-test-receive
+       conn (ladybird-test-welcome '(((view . 1) (url . "mock://one"))
+                                   ((view . 2) (url . "mock://2")))))
+      (should (equal (ladybird-test-sent "close_view")
+                     '(((type . "close_view") (view . 1)))))
+      (setq ladybird-test-sent nil)
+      (with-current-buffer second
+        (ladybird-detach))
+      (should-not (buffer-live-p second))
+      (should-not (ladybird-test-sent)))))
+
+;; A failed `should' or `ert-fail' inside a prompt is caught as a failed
+;; prompt and only reported in a message; the prompt tests run their
+;; prompts in `ladybird-render-test-prompts', which fails on that message.
+
+(defmacro ladybird-render-test-prompts (&rest body)
+  "Run BODY, which opens prompts, and fail if one of them failed.
+A timer that fails inside it fails the test too.
+Return the other messages BODY showed, oldest first."
+  (declare (indent 0) (debug t))
+  (let ((messages (make-symbol "messages")))
+    `(let ((,messages (ladybird-render-test-messages ,@body)))
+       (should-not (seq-filter
+                    (lambda (text)
+                      (string-match-p (rx bos (or "ladybird: a prompt failed"
+                                                  "ladybird: declining"
+                                                  "Error running timer"))
+                                      text))
+                    ,messages))
+       ,messages)))
+
+(defalias 'ladybird-render-test-close-timer #'ladybird-test-close-timer)
+
+(ert-deftest ladybird-render-test-detach-ends-prompts ()
+  ;; The prompts for the requests of a detached connection end without
+  ;; an answer: one waiting to be opened never opens, the one being
+  ;; read closes.
+  (ladybird-render-test-with-view
+    (let ((other (ladybird--make-conn :host "other")))
+      (ladybird-test-receive conn '((type . "dialog") (view . 1) (id . 7)
+                                    (kind . "confirm") (message . "hi")))
+      (ladybird--later #'ignore nil (list other 1 7))
+      (should (= (length ladybird--queued-prompts) 2))
+      (ladybird-detach)
+      (should (equal (mapcar #'car ladybird--queued-prompts)
+                     (list (list other 1 7))))
+      (setq ladybird--queued-prompts nil)
+      (dolist (timer timer-list)
+        (when (eq (timer--function timer) #'ladybird--run-prompt)
+          (cancel-timer timer)))))
+  (ladybird-render-test-with-view
+    (let ((declined nil)
+          (continued nil))
+      (ladybird-render-test-prompts
+        (ladybird--call-prompt
+         (lambda ()
+           (ladybird-detach)
+           (ladybird-test-run-timer (ladybird-render-test-close-timer))
+           (setq continued t))
+         (lambda () (setq declined t))
+         (list conn 1 7)))
+      (should-not continued)
+      (should-not declined)
+      (should-not (ladybird-test-sent)))))
+
+(ert-deftest ladybird-render-test-dropped-prompt-quit ()
+  ;; A dropped prompt left by a quit or an error before it is closed
+  ;; sends no answer that declines.
+  (dolist (exit '(quit error))
+    (ladybird-render-test-with-view
+      (let ((declined nil))
+        (ladybird-render-test-messages
+          (ladybird--call-prompt
+           (lambda ()
+             (ladybird-detach)
+             (if (eq exit 'quit)
+                 (signal 'quit nil)
+               (error "Minibuffer gone")))
+           (lambda () (setq declined t))
+           (list conn 1 7)))
+        (should-not declined)
+        (should-not (ladybird-test-sent))
+        (should-not (ladybird-render-test-close-timer))))))
+
+(ert-deftest ladybird-render-test-detach-outer-prompt ()
+  ;; A prompt of the detached connection open around one of another
+  ;; connection stays open until that one ends, so as not to end it, and
+  ;; sends neither its answer nor the one that declines.
+  (dolist (close '(nil t))
+    (ladybird-render-test-with-view
+      (let ((other (ladybird-test-connect
+                    '("other" (:kind unix :path "/nonexistent/other"))))
+            (declined nil)
+            (inner-done nil)
+            (outer-done nil))
+        (should-not
+         (seq-remove
+          (lambda (text) (string-prefix-p "ladybird: detached from" text))
+          (ladybird-render-test-prompts
+            (ladybird--call-prompt
+             (lambda ()
+               (ladybird--call-prompt
+                (lambda ()
+                  (with-current-buffer buffer
+                    (ladybird-detach))
+                  (should-not (ladybird-render-test-close-timer))
+                  (ladybird--answer other '((view . 1) (id . 8)) "dialog_closed"
+                                    '(accepted . t))
+                  (setq inner-done t))
+                (lambda () (ert-fail "the inner prompt was declined"))
+                (list other 1 8))
+               (should inner-done)
+               ;; The outer prompt closes once it is the innermost.
+               (let ((timer (ladybird-render-test-close-timer)))
+                 (should timer)
+                 (if close
+                     (ladybird-test-run-timer timer)
+                   (cancel-timer timer)))
+               (ladybird--answer conn '((view . 1) (id . 7)) "dialog_closed"
+                                 '(accepted . t))
+               (setq outer-done t))
+             (lambda () (setq declined t))
+             (list conn 1 7)))))
+        (should (eq outer-done (not close)))
+        (should-not declined)
+        (should-not ladybird--prompts)
+        (should (equal (ladybird-test-sent)
+                       '(((type . "dialog_closed") (view . 1) (id . 8)
+                          (accepted . t)))))))))
+
+(ert-deftest ladybird-render-test-dropped-prompts-cascade ()
+  ;; Nested prompts of a detached connection close one after the other.
+  (ladybird-render-test-with-view
+    (let ((inner-done nil)
+          (outer-done nil)
+          (declined nil))
+      (ladybird-render-test-prompts
+        (ladybird--call-prompt
+         (lambda ()
+           (ladybird--call-prompt
+            (lambda ()
+              (ladybird-detach)
+              (ladybird-test-run-timer (ladybird-render-test-close-timer))
+              (setq inner-done t))
+            (lambda () (setq declined t))
+            (list conn 2 8))
+           (ladybird-test-run-timer (ladybird-render-test-close-timer))
+           (setq outer-done t))
+         (lambda () (setq declined t))
+         (list conn 1 7)))
+      (should-not inner-done)
+      (should-not outer-done)
+      (should-not declined)
+      (should-not (ladybird-render-test-close-timer))
+      (should-not (ladybird-test-sent)))))
+
+(ert-deftest ladybird-render-test-close-waits-for-inner-prompt ()
+  ;; A dropped prompt due to close while another connection's prompt
+  ;; opened inside it leaves that one alone and closes after it.
+  (ladybird-render-test-with-view
+    (let ((other (ladybird-test-connect
+                  '("other" (:kind unix :path "/nonexistent/other"))))
+          (inner-done nil)
+          (outer-done nil))
+      (ladybird-render-test-prompts
+        (ladybird--call-prompt
+         (lambda ()
+           (ladybird-detach)
+           (let ((timer (ladybird-render-test-close-timer)))
+             (ladybird--call-prompt
+              (lambda ()
+                (ladybird-test-run-timer timer)
+                (setq inner-done t))
+              #'ignore (list other 1 8)))
+           (ladybird-test-run-timer (ladybird-render-test-close-timer))
+           (setq outer-done t))
+         #'ignore (list conn 1 7)))
+      (should inner-done)
+      (should-not outer-done)
+      (should-not (ladybird-render-test-close-timer)))))
+
+(ert-deftest ladybird-render-test-close-waits-for-minibuffer ()
+  ;; A dropped prompt does not close while a minibuffer opened inside it,
+  ;; such as one of a command the user runs there, is in use.
+  (ladybird-render-test-with-view
+    (let ((depth (minibuffer-depth))
+          (retried nil)
+          (outer-done nil))
+      (ladybird-render-test-prompts
+        (ladybird--call-prompt
+         (lambda ()
+           (ladybird-detach)
+           (let ((timer (ladybird-render-test-close-timer)))
+             (cl-letf (((symbol-function 'minibuffer-depth)
+                        (lambda () (+ depth 2))))
+               (ladybird-test-run-timer timer)))
+           (setq retried (ladybird-render-test-close-timer))
+           (ladybird-test-run-timer retried)
+           (setq outer-done t))
+         #'ignore (list conn 1 7)))
+      (should retried)
+      (should-not outer-done)
+      (should-not (ladybird-render-test-close-timer)))))
+
+(ert-deftest ladybird-render-test-alert-close-waits-for-minibuffer ()
+  ;; An alert waits for a key outside the minibuffer: withdrawn while
+  ;; another minibuffer is open inside it, it waits for that one.
+  (ladybird-render-test-with-view
+    (let ((ladybird-alert-style 'prompt)
+          (depth (minibuffer-depth))
+          (waited nil)
+          (continued nil))
+      (ladybird-render-test-prompts
+        (ladybird-render-test-prompting
+          (cl-letf (((symbol-function 'read-key)
+                     (lambda (&rest _)
+                       ;; The prompt runs inside the process filter here,
+                       ;; which takes no further record: the handler is
+                       ;; called.
+                       (ladybird--handle-control
+                        conn '((type . "request_cancelled") (view . 1) (id . 5)))
+                       ;; A minibuffer another package opened from a timer.
+                       (cl-letf (((symbol-function 'minibuffer-depth)
+                                  (lambda () (1+ depth))))
+                         (ladybird-test-run-timer (ladybird-render-test-close-timer)))
+                       (setq waited (and (ladybird-render-test-close-timer) t))
+                       (ladybird-test-run-timer (ladybird-render-test-close-timer))
+                       (setq continued t)
+                       ?x)))
+            (ladybird-test-receive
+             conn (ladybird-render-test-request "dialog" '(kind . "alert"))))))
+      (should waited)
+      (should-not continued)
+      (should-not (ladybird-test-sent)))))
+
+(ert-deftest ladybird-render-test-close-during-decline ()
+  ;; A prompt withdrawn while its decline is being sent, which can run
+  ;; timers, is not closed again, and the prompt around it goes on.
+  (ladybird-render-test-with-view
+    (let ((outer-done nil)
+          (declined nil))
+      (ladybird-render-test-prompts
+        (ladybird--call-prompt
+         (lambda ()
+           (ladybird--call-prompt
+            (lambda () (signal 'quit nil))
+            (lambda ()
+              (ladybird--cancel-prompt-later '(inner))
+              (when-let* ((timer (ladybird-render-test-close-timer)))
+                (timer-event-handler timer))
+              (setq declined t))
+            '(inner))
+           (setq outer-done t)
+           (ladybird--note-answer '(outer)))
+         #'ignore '(outer)))
+      (should declined)
+      (should outer-done)
+      (should-not (ladybird-render-test-close-timer)))))
+
+(ert-deftest ladybird-render-test-one-close-timer ()
+  ;; A dropped prompt has one timer that closes it, however often it is
+  ;; dropped.
+  (ladybird-render-test-with-view
+    (let ((count nil))
+      (ladybird-render-test-prompts
+        (ladybird--call-prompt
+         (lambda ()
+           (ladybird--cancel-prompt-later (list conn 1 7))
+           (ladybird--cancel-prompt-later (list conn 1 7))
+           (ladybird-detach)
+           (setq count (seq-count (lambda (timer)
+                                    (eq (timer--function timer)
+                                        #'ladybird--close-dropped))
+                                  timer-list)))
+         #'ignore (list conn 1 7)))
+      (should (eql count 1))
+      (should-not (ladybird-render-test-close-timer)))))
+
+(ert-deftest ladybird-render-test-answer-of-another-request ()
+  ;; An alert answered in the echo area while a prompt is open leaves
+  ;; that prompt unanswered: a quit declines it.
+  (ladybird-render-test-with-view
+    (let ((ladybird-alert-style 'echo))
+      (ladybird-render-test-prompts
+        (ladybird--call-prompt
+         (lambda ()
+           (ladybird-test-receive conn '((type . "dialog") (view . 1) (id . 9)
+                                         (kind . "alert") (message . "x")))
+           (signal 'quit nil))
+         (lambda ()
+           (ladybird--answer conn '((view . 1) (id . 7)) "dialog_closed"
+                             '(accepted . :false)))
+         (list conn 1 7)))
+      (should (equal (ladybird-test-sent "dialog_closed")
+                     '(((type . "dialog_closed") (view . 1) (id . 9)
+                        (accepted . t))
+                       ((type . "dialog_closed") (view . 1) (id . 7)
+                        (accepted))))))))
+
+(ert-deftest ladybird-render-test-decline-under-dropped-prompt ()
+  ;; A request asked again after a takeover, while its dropped prompt is
+  ;; still open around another, is declined by a quit.
+  (ladybird-render-test-with-view
+    (let ((other (ladybird-test-connect
+                  '("other" (:kind unix :path "/nonexistent/other"))))
+          (key (list conn 1 7))
+          (msg '((view . 1) (id . 7))))
+      (ladybird-render-test-prompts
+        (ladybird--call-prompt
+         (lambda ()
+           (ladybird--call-prompt
+            (lambda ()
+              (ladybird-test-receive conn '((type . "replaced"))))
+            #'ignore (list other 1 8))
+           ;; Its close is due; the request comes again before it.
+           (should (ladybird-render-test-close-timer))
+           (with-current-buffer buffer
+             (ladybird-reconnect))
+           (ladybird-test-receive
+            conn (ladybird-test-welcome '(((view . 1) (url . "mock://one")))))
+           (should (ladybird--ready-p conn))
+           (setq ladybird-test-sent nil)
+           (ladybird--call-prompt
+            (lambda () (signal 'quit nil))
+            (lambda ()
+              (ladybird--answer conn msg "dialog_closed" '(accepted . :false)))
+            key))
+         #'ignore key))
+      (should-not (ladybird-render-test-close-timer))
+      (should (equal (ladybird-test-sent "dialog_closed")
+                     '(((type . "dialog_closed") (view . 1) (id . 7)
+                        (accepted))))))))
+
+(ert-deftest ladybird-render-test-echo-alert-under-dropped-prompt ()
+  ;; An alert shown in the echo area, asked again after a takeover while
+  ;; its dropped prompt is still open around another, is answered.
+  (ladybird-render-test-with-view
+    (let ((other (ladybird-test-connect
+                  '("other" (:kind unix :path "/nonexistent/other"))))
+          (ladybird-alert-style 'echo))
+      (ladybird-render-test-prompts
+        (ladybird--call-prompt
+         (lambda ()
+           (ladybird--call-prompt
+            (lambda ()
+              (ladybird-test-receive conn '((type . "replaced"))))
+            #'ignore (list other 1 8))
+           (with-current-buffer buffer
+             (ladybird-reconnect))
+           (ladybird-test-receive
+            conn (ladybird-test-welcome '(((view . 1) (url . "mock://one")))))
+           (setq ladybird-test-sent nil)
+           (ladybird-test-receive conn '((type . "dialog") (view . 1) (id . 7)
+                                         (kind . "alert") (message . "x"))))
+         #'ignore (list conn 1 7)))
+      (should (equal (ladybird-test-sent "dialog_closed")
+                     '(((type . "dialog_closed") (view . 1) (id . 7)
+                        (accepted . t))))))))
+
+(ert-deftest ladybird-render-test-prompt-without-dialog-box ()
+  ;; A prompt opened by a click reads in the minibuffer, not in a dialog
+  ;; box, which could not be closed from a timer.
+  (let ((use-dialog-box t)
+        (inside 'unset))
+    (ladybird--call-prompt (lambda () (setq inside use-dialog-box)) nil '(x))
+    (should-not inside)
+    (should use-dialog-box)))
+
+(ert-deftest ladybird-render-test-withdrawn-outer-prompt ()
+  ;; A request withdrawn while its prompt has another inside it sends
+  ;; nothing: the prompt closes once the other one ends.
+  (ladybird-render-test-with-view
+    (let ((inner-done nil)
+          (outer-done nil)
+          (declined nil))
+      (ladybird-render-test-prompts
+        (ladybird--call-prompt
+         (lambda ()
+           (ladybird--call-prompt
+            (lambda ()
+              (ladybird-test-receive conn '((type . "request_cancelled")
+                                            (view . 1) (id . 7)))
+              (should-not (ladybird-render-test-close-timer))
+              (ladybird--answer conn '((view . 1) (id . 8)) "select_closed"
+                                '(item . :null))
+              (setq inner-done t))
+            (lambda () (ert-fail "the inner prompt was declined"))
+            (list conn 1 8))
+           (ladybird-test-run-timer (ladybird-render-test-close-timer))
+           (setq outer-done t))
+         (lambda () (setq declined t))
+         (list conn 1 7)))
+      (should inner-done)
+      (should-not outer-done)
+      (should-not declined)
+      (should (equal (ladybird-test-sent)
+                     '(((type . "select_closed") (view . 1) (id . 8)
+                        (item))))))))
+
+(ert-deftest ladybird-render-test-replaced-ends-prompts ()
+  ;; A connection taken over ends the prompts for its requests without
+  ;; an answer; the server asks the other client.
+  (ladybird-render-test-with-view
+    (ladybird-test-receive conn '((type . "dialog") (view . 1) (id . 7)
+                                  (kind . "confirm") (message . "hi")))
+    (should (= (length ladybird--queued-prompts) 1))
+    (ladybird-test-receive conn '((type . "replaced")))
+    (should (eq (ladybird--conn-state conn) 'replaced))
+    (should-not ladybird--queued-prompts)
+    (dolist (timer timer-list)
+      (when (eq (timer--function timer) #'ladybird--run-prompt)
+        (cancel-timer timer))))
+  (ladybird-render-test-with-view
+    (let ((declined nil)
+          (continued nil))
+      (ladybird-render-test-prompts
+        (ladybird--call-prompt
+         (lambda ()
+           (ladybird-test-receive conn '((type . "replaced")))
+           (ladybird-test-run-timer (ladybird-render-test-close-timer))
+           (setq continued t))
+         (lambda () (setq declined t))
+         (list conn 1 7)))
+      (should-not continued)
+      (should-not declined)
+      (should-not (ladybird-test-sent)))))
+
+(ert-deftest ladybird-render-test-detach-one ()
+  ;; With a prefix argument only the current buffer goes: its page is
+  ;; hidden on the server and kept, the connection stays.
+  (ladybird-render-test-with-view
+    (let ((second (ladybird--make-view-buffer conn 2 "mock://2"))
+          (process (ladybird--conn-process conn)))
+      (with-current-buffer second
+        (should (equal (ladybird-render-test-messages (ladybird-detach t))
+                       '("ladybird: *ladybird: mock://2* detached; C-c C-s \
+shows its page again"))))
+      (should-not (buffer-live-p second))
+      (should (buffer-live-p buffer))
+      (should (equal (ladybird-test-sent)
+                     '(((type . "set_visibility") (view . 2) (visible))
+                       ((type . "set_focus") (view . 2) (focused)))))
+      (should (process-live-p process))
+      (should (ladybird--ready-p conn))
+      (should (equal (mapcar #'car (ladybird--conn-kept conn)) '(2)))
+      (should-not (gethash 2 (ladybird--conn-views conn)))
+      ;; The last buffer detaches the connection.
+      (setq ladybird-test-sent nil)
+      (ladybird-detach t)
+      (should-not (buffer-live-p buffer))
+      (should-not (ladybird-test-sent "close_view"))
+      (should-not (process-live-p process))
+      (should-not ladybird--conns)))
+  ;; Killing a buffer still closes its page.
+  (ladybird-render-test-with-view
+    (let ((second (ladybird--make-view-buffer conn 2 "mock://2")))
+      (with-current-buffer second
+        (ladybird-detach t))
+      (kill-buffer buffer)
+      (should (equal (ladybird-test-sent "close_view")
+                     '(((type . "close_view") (view . 1))))))))
+
+(ert-deftest ladybird-render-test-detach-stdio ()
+  ;; A server over standard input and output ends its pages with the
+  ;; connection: detaching from it is refused and changes nothing.
+  (dolist (host '((nil (:kind local))
+                  ("devbox" (:kind ssh :host "devbox"))
+                  ("cmd" (:kind local :command ("ladybird-server")))))
+    (ladybird-render-test-with-view
+      (ladybird-render-test-messages (kill-buffer buffer))
+      (setq conn (ladybird-test-connect host)
+            buffer (ladybird--make-view-buffer conn 1 "mock://one"))
+      (with-current-buffer buffer
+        (let ((second (ladybird--make-view-buffer conn 2 "mock://2")))
+          (dolist (only-this '(nil t))
+            (should (string-match-p
+                     "talks over standard input and output; its pages end with \
+the connection"
+                     (cadr (should-error (ladybird-detach only-this)
+                                         :type 'user-error)))))
+          (should (buffer-live-p buffer))
+          (should (buffer-live-p second))
+          (should (ladybird--ready-p conn))
+          (should-not (ladybird-test-sent)))))))
+
+(ert-deftest ladybird-render-test-lost-and-quit-keep-pages ()
+  ;; A lost connection sends nothing and keeps the buffers, which wait
+  ;; for it to come back.  Quitting Emacs runs no hook of the package,
+  ;; and kills no buffer.
+  (ladybird-render-test-with-view
+    (ladybird--drop conn)
+    (should (buffer-live-p buffer))
+    (should (eq (ladybird--conn-state conn) 'redialing))
+    (should-not (ladybird-test-sent))
+    (dolist (hook '(kill-emacs-hook kill-emacs-query-functions))
+      (should-not (seq-find (lambda (function)
+                              (and (symbolp function)
+                                   (string-prefix-p "ladybird"
+                                                    (symbol-name function))))
+                            (symbol-value hook))))))
 
 (ert-deftest ladybird-render-test-view-closed ()
   (ladybird-render-test-with-view
@@ -886,7 +1471,7 @@ the canvas."
     (should (eq (key-binding (kbd "C-a")) #'ladybird-send-edit-key))
     ;; Command mode: single keys are commands, others say how to type.
     (ladybird-command-mode 1)
-    (should (eq (key-binding "a") #'ladybird-command-mode-self-insert))
+    (should (eq (key-binding "z") #'ladybird-command-mode-self-insert))
     (should (eq (key-binding "é") #'ladybird-command-mode-self-insert))
     (should (equal (cadr (should-error (ladybird-command-mode-self-insert)
                                        :type 'user-error))
@@ -1618,18 +2203,29 @@ https://example.org? (allow once, allow always, deny) "))
         (dolist (type '("permission_cancelled" "request_cancelled"))
           (setq ladybird-test-sent nil)
           (ladybird-render-test-answering
-              (progn (ladybird--cancel-prompt (list conn 1 6))
-                     (ladybird--cancel-prompt (list conn 1 5))
+              ;; The prompt runs inside the process filter here, which
+              ;; takes no further record: the handler is called.
+              (progn (ladybird--handle-control conn `((type . ,type) (view . 1)
+                                                      (id . 6)))
+                     (should-not (ladybird-render-test-close-timer))
+                     (ladybird--handle-control conn `((type . ,type) (view . 1)
+                                                      (id . 5)))
+                     (ladybird-test-run-timer (ladybird-render-test-close-timer))
                      (ert-fail "the prompt stayed open"))
             (ladybird-test-receive conn request))
           (should-not (ladybird-test-sent))
-          ;; The cancellation is delivered from a timer.
-          (ladybird-test-receive conn `((type . ,type) (view . 1) (id . 5)))
-          (let ((timer (seq-find (lambda (timer)
-                                   (eq (timer--function timer)
-                                       #'ladybird--cancel-prompt))
-                                 timer-list)))
-            (should (equal (timer--args timer) (list (list conn 1 5))))
+          ;; From the process filter the prompt closes from a timer.
+          (let ((timer nil)
+                (continued nil))
+            (ladybird--call-prompt
+             (lambda ()
+               (ladybird-test-receive conn `((type . ,type) (view . 1) (id . 5)))
+               (setq timer (ladybird-render-test-close-timer)
+                     continued t))
+             nil (list conn 1 5))
+            (should continued)
+            (should (equal (ladybird--open-prompt-key (car (timer--args timer)))
+                           (list conn 1 5)))
             (cancel-timer timer)))))))
 
 (ert-deftest ladybird-render-test-request-cancelled ()
@@ -1648,8 +2244,13 @@ https://example.org? (allow once, allow always, deny) "))
                                (ladybird-render-test-request "date_picker")
                                (ladybird-render-test-request
                                 "external_url" '(url . "https://example.org"))))
+          ;; The prompt runs inside the process filter here, which takes
+          ;; no further record: the handler is called.
           (let ((withdraw (lambda (&rest _)
-                            (ladybird--cancel-prompt (list conn 1 5))
+                            (ladybird--handle-control
+                             conn '((type . "request_cancelled") (view . 1) (id . 5)))
+                            (ladybird-test-run-timer
+                             (ladybird-render-test-close-timer))
                             (ert-fail "the prompt stayed open"))))
             (cl-letf (((symbol-function 'y-or-n-p) withdraw)
                       ((symbol-function 'read-string) withdraw)
@@ -1671,7 +2272,7 @@ https://example.org? (allow once, allow always, deny) "))
       (should-not (ladybird-test-sent))
       (dolist (timer timer-list)
         (when (memq (timer--function timer)
-                    '(ladybird--cancel-prompt ladybird--run-prompt))
+                    '(ladybird--close-dropped ladybird--run-prompt))
           (cancel-timer timer))))))
 
 (ert-deftest ladybird-render-test-external-url ()
@@ -2063,6 +2664,371 @@ https://example.org? (allow once, allow always, deny) "))
                              ((type . "set_console") (view . 1) (enabled))))))
         (when (get-buffer ladybird-console-buffer)
           (kill-buffer ladybird-console-buffer))))))
+
+(ert-deftest ladybird-render-test-host ()
+  ;; A host picked by its label needs no look at the default socket.
+  (ladybird-test-with-env
+    (let ((ladybird-program "ladybird-no-such-program")
+          (ladybird-hosts '(("one" . "ssh:one")))
+          (ladybird-default-host nil)
+          (probed nil))
+      (cl-letf (((symbol-function 'ladybird--socket-live-p)
+                 (lambda (_path) (setq probed t) nil)))
+        (should (equal (ladybird--host "one") '("one" (:kind ssh :host "one"))))
+        (should-error (ladybird--host "two") :type 'user-error)
+        (let ((ladybird-default-host "one"))
+          (should (equal (ladybird--host nil) '("one" (:kind ssh :host "one")))))
+        (should-not probed)
+        (should (equal (ladybird--host nil) '("one" (:kind ssh :host "one"))))
+        (should probed)
+        (let ((ladybird-hosts nil))
+          (should (string-match-p
+                   (regexp-quote (ladybird-default-socket))
+                   (cadr (should-error (ladybird--host nil) :type 'user-error)))))))))
+
+;;; Starting a server
+
+(defmacro ladybird-render-test-autostart (&rest body)
+  "Run BODY where the local server is `ladybird-program' over stdio.
+`ladybird-start-server' is a stand-in that returns the default socket;
+`started' counts its calls, `asked' the questions `y-or-n-p' was asked
+and `answer' is its answer."
+  (declare (indent 0) (debug t))
+  `(ladybird-test-with-env
+     (let ((ladybird-program "sh")
+           (ladybird-hosts nil)
+           (ladybird-default-host nil)
+           (ladybird-autostart-server 'ask)
+           (noninteractive nil)
+           (started 0)
+           (asked nil)
+           (answer nil))
+       (cl-letf (((symbol-function 'ladybird-start-server)
+                  (lambda () (cl-incf started) (ladybird-default-socket)))
+                 ((symbol-function 'y-or-n-p)
+                  (lambda (prompt) (push prompt asked) answer)))
+         ,@body))))
+
+(ert-deftest ladybird-render-test-autostart ()
+  (ladybird-render-test-autostart
+    (let ((stdio '(nil (:kind local)))
+          (socket (list nil (list :kind 'unix :path (ladybird-default-socket))))
+          (note (format "ladybird: no server on %s; pages end with Emacs"
+                        (ladybird-default-socket))))
+      ;; t starts a server without asking.
+      (let ((ladybird-autostart-server t))
+        (should (equal (ladybird--host nil) socket))
+        (should (= started 1))
+        (should-not asked))
+      ;; ask starts one when the answer is yes.
+      (setq answer t)
+      (should (equal (ladybird--host nil) socket))
+      (should (= started 2))
+      (should (equal asked '("No Ladybird server is running.  Start one? ")))
+      ;; No is the server over stdio, and so is nil, which does not ask.
+      (setq answer nil asked nil)
+      (should (equal (ladybird-render-test-messages
+                       (should (equal (ladybird--host nil) stdio)))
+                     (list note)))
+      (should (= (length asked) 1))
+      (let ((ladybird-autostart-server nil))
+        (setq asked nil)
+        (should (equal (ladybird-render-test-messages
+                         (should (equal (ladybird--host nil) stdio)))
+                       (list note)))
+        (should-not asked))
+      ;; Batch Emacs takes ask for nil.
+      (setq answer t)
+      (let ((noninteractive t))
+        (should (equal (ladybird-render-test-messages
+                         (should (equal (ladybird--host nil) stdio)))
+                       (list note)))
+        (should-not asked))
+      (setq answer nil)
+      (should (= started 2))
+      ;; The local entry picked from several hosts.
+      (let ((ladybird-hosts '(("one" . "ssh:one")))
+            (ladybird-autostart-server t))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) "local")))
+          (should (equal (ladybird--read-host) socket))
+          (let ((ladybird-default-host 'ask))
+            (should (equal (ladybird--host nil) socket))))
+        (should (= started 4))
+        ;; The implicit local host comes first with hosts too.
+        (should (equal (ladybird--host nil) socket))
+        (should (= started 5))))))
+
+(ert-deftest ladybird-render-test-autostart-not ()
+  ;; Neither the question nor the stdio server where the local server
+  ;; is not the one over stdio.
+  (ladybird-render-test-autostart
+    (setq answer t)
+    ;; A configured host is used as it is, and failing to reach it is an
+    ;; error.
+    (let ((ladybird-hosts '(("one" . "ssh:one") ("two" . "local"))))
+      (should (equal (ladybird--host "one") '("one" (:kind ssh :host "one"))))
+      (should (equal (ladybird--host "two") '("two" (:kind local))))
+      (let ((ladybird-default-host "one"))
+        (should (equal (ladybird--host nil) '("one" (:kind ssh :host "one")))))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "one")))
+        (should (equal (ladybird--read-host) '("one" (:kind ssh :host "one")))))
+      (let ((ladybird-test-open-error t))
+        (should-error (ladybird-connect "one"))
+        (should (equal ladybird-test-opened '((:kind ssh :host "one"))))))
+    ;; No program: no question, and no server.
+    (let ((ladybird-program "ladybird-no-such-program"))
+      (should-error (ladybird--host nil) :type 'user-error)
+      (let ((ladybird-hosts '(("one" . "ssh:one"))))
+        (should (equal (ladybird--host nil) '("one" (:kind ssh :host "one"))))))
+    ;; A server on the default socket.
+    (ladybird-test-with-runtime
+      (let ((listener (funcall listen)))
+        (should (equal (ladybird--host nil) (list nil socket)))
+        (delete-process listener)))
+    ;; An open connection of a host whose endpoint is "local".
+    (let ((ladybird-hosts '(("here" . "local"))))
+      (let ((here (ladybird-test-connect (assoc "here" (ladybird--hosts t)))))
+        (should (equal (ladybird-render-test-messages
+                         (dotimes (_ 2)
+                           (let ((host (ladybird--host nil)))
+                             (should (equal host '(nil (:kind local))))
+                             (should (eq (ladybird--find-conn host) here)))))
+                       nil))
+        (ladybird--disconnect here)))
+    ;; An open connection to the local server over stdio.
+    (let ((ladybird-autostart-server nil))
+      (ladybird-render-test-messages
+        (ladybird-test-connect (ladybird--host nil))))
+    (should (equal (ladybird-render-test-messages
+                     (should (equal (ladybird--host nil) '(nil (:kind local)))))
+                   nil))
+    (should-not asked)
+    (should (= started 0))))
+
+(ert-deftest ladybird-render-test-autostart-pages ()
+  ;; M-x ladybird with the server over stdio says once that its pages
+  ;; end with Emacs; started, the server on the default socket gets them.
+  (ladybird-render-test-autostart
+    (let ((ladybird--frame-function #'ladybird--on-frame)
+          (ladybird--welcome-function #'ladybird--on-welcome)
+          (ladybird--change-function #'ladybird--on-conn-change)
+          (ladybird--viewport-function #'ladybird--hello-viewport)
+          (ladybird-device-pixel-ratio 1.0)
+          (ladybird--last-buffer nil))
+      (save-window-excursion
+        (unwind-protect
+            (progn
+              (should (equal (seq-filter
+                              (lambda (m) (string-search "pages end with Emacs" m))
+                              (ladybird-render-test-messages
+                                (ladybird "mock://one")
+                                (ladybird "mock://two")))
+                             (list (format "ladybird: no server on %s; pages end \
+with Emacs" (ladybird-default-socket)))))
+              (should (equal ladybird-test-opened '((:kind local))))
+              (should (= (length asked) 1))
+              (mapc #'kill-buffer (ladybird--buffers))
+              (mapc #'ladybird--disconnect ladybird--conns)
+              (setq answer t)
+              (ladybird "mock://three")
+              (should (= started 1))
+              (should (equal (car ladybird-test-opened)
+                             (list :kind 'unix :path (ladybird-default-socket)))))
+          (mapc #'kill-buffer (ladybird--buffers)))))))
+
+(ert-deftest ladybird-render-test-autostart-no-module ()
+  ;; Without the module nothing is asked or started.
+  (ladybird-render-test-autostart
+    (setq answer t)
+    (cl-letf (((symbol-function 'ladybird--module-available-p) #'ignore)
+              ((symbol-function 'ladybird--ensure-module) #'ignore)
+              ((symbol-function 'completing-read) (lambda (&rest _) "local")))
+      (should (equal (cadr (should-error (ladybird "mock://one") :type 'user-error))
+                     "The ladybird-module is not loaded"))
+      (should-error (call-interactively #'ladybird-connect) :type 'user-error))
+    (should-not asked)
+    (should (= started 0))))
+
+(ert-deftest ladybird-render-test-autostart-connect ()
+  ;; `ladybird-connect' to a new server over stdio says in its own
+  ;; message that the pages end with Emacs.
+  (ladybird-render-test-autostart
+    (let ((note (format "ladybird: connected to local, which has no page open; \
+with no server on %s its pages end with Emacs" (ladybird-default-socket))))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "local")))
+        (should (equal (ladybird-render-test-messages
+                         (call-interactively #'ladybird-connect)
+                         (ladybird-test-receive (car ladybird--conns)
+                                                (ladybird-test-welcome)))
+                       (list note)))
+        (should (equal (ladybird-render-test-messages
+                         (call-interactively #'ladybird-connect))
+                       '("ladybird: connected to local, which has no page open")))
+        (should (= (length asked) 1))))))
+
+(defun ladybird-render-test-program (script)
+  "Return an executable shell script with the text SCRIPT."
+  (let ((file (make-temp-file "ladybird-program" nil ".sh"
+                              (concat "#!/bin/sh\n" script "\n"))))
+    (set-file-modes file #o700)
+    file))
+
+(ert-deftest ladybird-render-test-start-server-ends-once ()
+  ;; A start that Emacs sees end before it has run the start's sentinel,
+  ;; as under load, reports once and leaves no process behind.
+  (ladybird-test-with-env
+    (ladybird-test-with-runtime
+      (let* ((path (plist-get socket :path))
+             (ladybird-program-arguments nil)
+             (ladybird-program
+              (ladybird-render-test-program
+               "echo 'Ladybird logs to /tmp/l.log' >&2"))
+             (processes (length (process-list)))
+             (accept (symbol-function 'accept-process-output)))
+        (unwind-protect
+            (progn
+              (should (equal
+                       (ladybird-render-test-messages
+                         ;; The wait for the start takes no note of its end.
+                         (cl-letf (((symbol-function 'accept-process-output)
+                                    (lambda (&optional process &rest args)
+                                      (if (equal (and (processp process)
+                                                      (process-name process))
+                                                 "ladybird start")
+                                          (call-process "sleep" nil nil nil "0.1")
+                                        (apply accept process args)))))
+                           (should (equal (ladybird-start-server) path))))
+                       (list (format "ladybird: starting a server on %s..." path)
+                             (format "ladybird: started a server on %s, \
+logging to /tmp/l.log" path))))
+              (should (= (length (process-list)) processes)))
+          (delete-file ladybird-program))))))
+
+(ert-deftest ladybird-render-test-start-server ()
+  (ladybird-test-with-env
+    (ladybird-test-with-runtime
+      (let* ((path (plist-get socket :path))
+             (arguments (make-temp-file "ladybird-arguments"))
+             (ladybird-program-arguments '("--x"))
+             (ladybird-program
+              (ladybird-render-test-program
+               (format "printf '%%s\\n' \"$@\" > %s
+sleep 0.3
+echo 'Ladybird logs to /tmp/l.log' >&2"
+                       arguments)))
+             (processes (length (process-list))))
+        (unwind-protect
+            (progn
+              ;; The start returns once the program exited, and what it
+              ;; wrote to stderr is in the buffer of servers' stderr too.
+              (should (equal (ladybird-render-test-messages
+                               (should (equal (ladybird-start-server) path)))
+                             (list (format "ladybird: starting a server on %s..." path)
+                                   (format "ladybird: started a server on %s, \
+logging to /tmp/l.log" path))))
+              (with-current-buffer ladybird--stderr-buffer
+                (should (string-suffix-p "Ladybird logs to /tmp/l.log\n"
+                                         (buffer-string))))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents arguments)
+                               (split-string (buffer-string) "\n" t))
+                             '("--headless=emacs" "--x" "--emacs-default-socket"
+                               "--emacs-background")))
+              (should (= (length (process-list)) processes))
+              ;; A start that fails names the last line of its stderr.
+              (delete-file ladybird-program)
+              (setq ladybird-program
+                    (ladybird-render-test-program
+                     "echo 'Starting' >&2
+echo 'Unable to start the Emacs server: no room' >&2
+sleep 0.4
+exit 1"))
+              ;; What another server writes meanwhile is not its reason.
+              (run-at-time 0.2 nil
+                           (lambda ()
+                             (with-current-buffer ladybird--stderr-buffer
+                               (goto-char (point-max))
+                               (insert "Another server's line\n"))))
+              (should (equal (cadr (should-error (ladybird-start-server)))
+                             (format "Cannot start a server on %s: Unable to start \
+the Emacs server: no room (see buffer \" *ladybird-stderr*\")" path)))
+              (should (= (length (process-list)) processes))
+              ;; A server on the socket already is left as it is.
+              (delete-file arguments)
+              (let ((listener (funcall listen)))
+                (should (equal (ladybird-render-test-messages
+                                 (should (equal (ladybird-start-server) path)))
+                               (list (format "ladybird: a server runs on %s already"
+                                             path))))
+                (delete-process listener))
+              (should-not (file-exists-p arguments))
+              ;; A start that fails because another one made a server on
+              ;; the socket meanwhile finds that server.
+              (delete-file path)
+              (let ((listener (funcall listen))
+                    (checks 0)
+                    (live (symbol-function 'ladybird--socket-live-p)))
+                (cl-letf (((symbol-function 'ladybird--socket-live-p)
+                           (lambda (path)
+                             (and (> (cl-incf checks) 1) (funcall live path)))))
+                  (should (equal (ladybird-render-test-messages
+                                   (should (equal (ladybird-start-server) path)))
+                                 (list (format "ladybird: starting a server on %s..."
+                                               path)
+                                       (format "ladybird: a server runs on %s already"
+                                               path)))))
+                (should (= checks 2))
+                (delete-process listener))
+              ;; \[keyboard-quit] leaves the start running, and the echo
+              ;; area says how it ended.
+              (delete-file ladybird-program)
+              (setq ladybird-program
+                    (ladybird-render-test-program
+                     (format "sleep 0.4
+echo 'Ladybird logs to /tmp/l.log' >&2
+touch %s" arguments)))
+              (should (equal
+                       (ladybird-render-test-messages
+                         (let ((accept (symbol-function 'accept-process-output)))
+                           (cl-letf (((symbol-function 'accept-process-output)
+                                      (lambda (&rest _) (signal 'quit nil))))
+                             (should (eq (condition-case nil
+                                             (ladybird-start-server)
+                                           (quit 'quit))
+                                         'quit)))
+                           (with-timeout (5 (ert-fail "the start did not end"))
+                             (while (> (length (process-list)) processes)
+                               (funcall accept nil 0.05)))))
+                       (list (format "ladybird: starting a server on %s..." path)
+                             (format "ladybird: started a server on %s, \
+logging to /tmp/l.log" path))))
+              (should (file-exists-p arguments))
+              ;; Pages open over stdio stay there.
+              (delete-file path)
+              (let ((stdio (ladybird--connect '(nil (:kind local)) #'ignore)))
+                (puthash 1 (current-buffer) (ladybird--conn-views stdio))
+                (let ((listener (funcall listen)))
+                  (should (equal (ladybird-render-test-messages
+                                   (ladybird-start-server))
+                                 (list (format "ladybird: a server runs on %s \
+already; new pages open there, the page open over stdio stays until it is closed"
+                                               path))))
+                  (puthash 2 (current-buffer) (ladybird--conn-views stdio))
+                  (should (equal (ladybird-render-test-messages
+                                   (ladybird-start-server))
+                                 (list (format "ladybird: a server runs on %s \
+already; new pages open there, the 2 pages open over stdio stay until they are closed"
+                                               path))))
+                  (delete-process listener))
+                (clrhash (ladybird--conn-views stdio))
+                (ladybird--disconnect stdio))
+              ;; Without the program nothing starts.
+              (let ((ladybird-program "ladybird-no-such-program"))
+                (should-error (ladybird-start-server))))
+          (delete-file ladybird-program)
+          (when (file-exists-p arguments)
+            (delete-file arguments)))))))
 
 (ert-deftest ladybird-render-test-browse-url ()
   (ladybird-render-test-with-view
@@ -2628,7 +3594,7 @@ ID defaults to the last one sent, ITEMS to the test items."
         (should (= (length ladybird--queued-prompts) 1))
         (dolist (timer timer-list)
           (when (memq (timer--function timer)
-                      '(ladybird--cancel-prompt ladybird--run-prompt))
+                      '(ladybird--close-dropped ladybird--run-prompt))
             (cancel-timer timer)))))))
 
 (ert-deftest ladybird-render-test-hint-error ()
@@ -2926,7 +3892,7 @@ ID defaults to the last one sent, ITEMS to the test items."
       (ladybird-test-receive conn '((type . "replaced")))
       (should (eq (ladybird--conn-state conn) 'replaced))
       (should-not (ladybird--conn-timer conn))
-      (should (string-suffix-p " [detached]" (ladybird--header-line)))
+      (should (string-suffix-p " [taken over]" (ladybird--header-line)))
       ;; The last frame stays, and input is dropped without a message.
       (should (eq (get-text-property 1 'display) canvas))
       (should-not (ladybird-render-test-messages
@@ -2955,7 +3921,7 @@ ID defaults to the last one sent, ITEMS to the test items."
       (should-not ladybird--buttons)
       (should (timerp ladybird--update-timer))
       (setq ladybird-test-sent nil)
-      (ladybird--update)
+      (ladybird-render-test-update)
       (should (equal (ladybird-test-sent "set_focus")
                      '(((type . "set_focus") (view . 1) (focused))))))
     (setq track-mouse nil)))
@@ -2967,14 +3933,22 @@ ID defaults to the last one sent, ITEMS to the test items."
       (kill-buffer second)
       (should-not (ladybird-test-sent "close_view"))
       (should-not (gethash 2 (ladybird--conn-views conn)))
-      ;; The next welcome lists the view, which gets a buffer again.
+      ;; The next welcome lists the view, which stays without a buffer,
+      ;; hidden and without the focus.
       (ladybird--drop conn)
       (ladybird-test-run-timer (ladybird--conn-timer conn))
+      (setq ladybird-test-sent nil)
       (ladybird-test-receive
        conn (ladybird-test-welcome '(((view . 1) (url . "mock://one"))
-                                   ((view . 2) (url . "mock://2")))))
-      (should (buffer-live-p (gethash 2 (ladybird--conn-views conn))))
-      (should (eq (gethash 1 (ladybird--conn-views conn)) buffer)))))
+                                   ((view . 2) (url . "mock://2") (title . "Two")))))
+      (should-not (gethash 2 (ladybird--conn-views conn)))
+      (should (equal (ladybird--conn-kept conn)
+                     '((2 (view . 2) (url . "mock://2") (title . "Two")))))
+      (should (equal (ladybird-test-sent)
+                     '(((type . "set_visibility") (view . 2) (visible))
+                       ((type . "set_focus") (view . 2) (focused)))))
+      (should (eq (gethash 1 (ladybird--conn-views conn)) buffer))
+      (should (= (length (ladybird--buffers conn)) 1)))))
 
 
 ;;; Review fixes
@@ -3177,7 +4151,7 @@ close one first"))
       (should (equal (cadr (should-error (ladybird "mock://3" ladybird-test-host)
                                          :type 'user-error))
                      "ladybird: test has 2 pages open, the most it holds, 1 of them \
-left by killed buffers, which C-c C-s or M-x ladybird-connect shows again; close one first"))
+without a buffer here, which C-c C-s, C-c C-a or M-x ladybird-connect shows again; close one first"))
       ;; The server's state of the kept page is kept up to date.
       (ladybird-test-receive conn '((type . "state") (view . 2) (url . "mock://2b")
                                     (title . "Two later") (loading . :false)))
@@ -3193,7 +4167,7 @@ left by killed buffers, which C-c C-s or M-x ladybird-connect shows again; close
         (should (equal (buffer-name again) "*ladybird: Two later*"))
         (should-not (ladybird--conn-kept conn))
         ;; Shown, it is told it is visible, which brings its frame.
-        (ladybird--update)
+        (ladybird-render-test-update)
         (should (member '((type . "set_visibility") (view . 2) (visible . t))
                         (ladybird-test-sent "set_visibility")))
         (let ((ladybird-keep-view-on-kill t))
@@ -3209,6 +4183,455 @@ left by killed buffers, which C-c C-s or M-x ladybird-connect shows again; close
       (ladybird-test-receive conn '((type . "view_closed") (view . 2) (reason . "closed")))
       (should-not (ladybird--conn-kept conn))
       (should (= (ladybird--view-count conn) 1)))))
+
+(defvar ladybird-render-test-reads nil
+  "The reads of `ladybird-render-test-reader', newest first.")
+
+(defun ladybird-render-test-reader (choose)
+  "Return a stand-in for `completing-read' that answers with CHOOSE.
+CHOOSE gets the candidates and returns one of them.  Each read is
+pushed to `ladybird-render-test-reads' as (PROMPT CANDIDATES METADATA
+DEFAULT)."
+  (lambda (prompt table _predicate _require _initial _history default &rest _)
+    (let ((candidates (all-completions "" table)))
+      (push (list prompt candidates (cdr (funcall table "" nil 'metadata)) default)
+            ladybird-render-test-reads)
+      (funcall choose candidates))))
+
+(defun ladybird-render-test-run-prompt ()
+  "Run the timer that opens a prompt still queued."
+  (ladybird-test-run-timer
+   (seq-find (lambda (timer)
+               (and (eq (timer--function timer) #'ladybird--run-prompt)
+                    (memq (car (timer--args timer)) ladybird--queued-prompts)))
+             timer-list)))
+
+(ert-deftest ladybird-render-test-attach ()
+  ;; On a connected server the pages without a buffer are offered by
+  ;; view id, look-alikes numbered, with one entry for all of them; the
+  ;; page picked gets a buffer and is shown, the others stay hidden.
+  (ladybird-render-test-with-view
+    (save-window-excursion
+      (set-window-buffer (selected-window) buffer)
+      (should (eq (key-binding (kbd "C-c C-a")) #'ladybird-attach))
+      (should (eq (lookup-key ladybird-command-mode-map "a") #'ladybird-attach))
+      (should (equal (cadr (should-error (call-interactively #'ladybird-attach)
+                                         :type 'user-error))
+                     "Every page of test has a buffer"))
+      (setf (ladybird--conn-kept conn)
+            (list (cons 3 '((view . 3) (url . "mock://three") (title . "Three")))
+                  (cons 4 '((view . 4) (url . "mock://same") (title . "Same")))
+                  (cons 2 '((view . 2) (url . "mock://same") (title . "Same")))))
+      (should (equal (ladybird--attach-candidates conn)
+                     '(("Same  mock://same" . 2) ("Three  mock://three" . 3)
+                       ("Same  mock://same <2>" . 4) ("All 3 pages" . t))))
+      (let ((ladybird-render-test-reads nil))
+        (cl-letf (((symbol-function 'completing-read)
+                   (ladybird-render-test-reader
+                    (lambda (candidates) (nth 1 candidates)))))
+          (call-interactively #'ladybird-attach))
+        (should (equal (mapcar (lambda (read) (seq-take read 2))
+                               ladybird-render-test-reads)
+                       '(("Attach page of test: "
+                          ("Same  mock://same" "Three  mock://three"
+                           "Same  mock://same <2>" "All 3 pages")))))
+        (pcase-let ((`(,_ ,_ ,metadata ,default) (car ladybird-render-test-reads)))
+          (should (eq (alist-get 'category metadata) 'ladybird-page))
+          (should (equal default "Same  mock://same")))
+        (let ((three (gethash 3 (ladybird--conn-views conn))))
+          (should (eq (window-buffer) three))
+          (should (eq ladybird--last-buffer three))
+          (should (equal (buffer-name three) "*ladybird: Three*")))
+        (should (equal (sort (mapcar #'car (ladybird--conn-kept conn)) #'<) '(2 4)))
+        (should (= (length (ladybird--buffers conn)) 2))
+        ;; All the others.
+        (setq ladybird-render-test-reads nil)
+        (should (equal (ladybird-render-test-messages
+                         (cl-letf (((symbol-function 'completing-read)
+                                    (ladybird-render-test-reader
+                                     (lambda (candidates) (car (last candidates))))))
+                           (call-interactively #'ladybird-attach)))
+                       '("ladybird: 2 pages of test attached; C-c C-s switches")))
+        (should (equal (cadr (car ladybird-render-test-reads))
+                       '("Same  mock://same" "Same  mock://same <2>" "All 2 pages")))
+        (should (eq (window-buffer) (gethash 2 (ladybird--conn-views conn))))
+        (should (buffer-live-p (gethash 4 (ladybird--conn-views conn))))
+        (should-not (ladybird--conn-kept conn))
+        (should (= (length (ladybird--buffers conn)) 4)))
+      ;; A single page has no entry for all.
+      (setf (ladybird--conn-kept conn)
+            (list (cons 5 '((view . 5) (url . "mock://five")))))
+      (should (equal (ladybird--attach-candidates conn) '(("mock://five" . 5)))))))
+
+(ert-deftest ladybird-render-test-attach-connect ()
+  ;; Without a connection `ladybird-attach' connects, gives no page a
+  ;; buffer, hides them and offers them; the pages not picked stay
+  ;; without a buffer, also on a redial.  A plain connection shows every
+  ;; page.
+  (ladybird-test-with-env
+    (let* ((ladybird--frame-function #'ladybird--on-frame)
+           (ladybird--welcome-function #'ladybird--on-welcome)
+           (ladybird--change-function #'ladybird--on-conn-change)
+           (ladybird-device-pixel-ratio 1.0)
+           (ladybird--last-buffer nil)
+           (ladybird--queued-prompts nil)
+           (ladybird-render-test-reads nil)
+           (welcome (ladybird-test-welcome
+                     '(((view . 1) (url . "mock://one") (title . "One"))
+                       ((view . 2) (url . "mock://two") (title . "Two"))
+                       ((view . 3) (url . "mock://three") (title . "Three"))))))
+      (save-window-excursion
+        (unwind-protect
+            (cl-letf (((symbol-function 'completing-read)
+                       (ladybird-render-test-reader
+                        (lambda (candidates) (nth 1 candidates)))))
+              (should-not (ladybird-attach ladybird-test-host))
+              (let ((conn (car ladybird--conns)))
+                (should-not (ladybird--ready-p conn))
+                (setq ladybird-test-sent nil)
+                (ladybird-test-receive conn welcome)
+                (should-not (ladybird--buffers))
+                (should (equal (sort (mapcar #'car (ladybird--conn-kept conn)) #'<)
+                               '(1 2 3)))
+                (should (equal (ladybird-test-sent)
+                               (mapcan (lambda (view)
+                                         `(((type . "set_visibility") (view . ,view)
+                                            (visible))
+                                           ((type . "set_focus") (view . ,view)
+                                            (focused))))
+                                       '(3 2 1))))
+                (should-not ladybird-render-test-reads)
+                (ladybird-render-test-prompts
+                  (ladybird-render-test-run-prompt))
+                (should (equal (cadr (car ladybird-render-test-reads))
+                               '("One  mock://one" "Two  mock://two"
+                                 "Three  mock://three" "All 3 pages")))
+                (let ((two (gethash 2 (ladybird--conn-views conn))))
+                  (should (equal (ladybird--buffers conn) (list two)))
+                  (should (eq (window-buffer) two)))
+                (should (equal (sort (mapcar #'car (ladybird--conn-kept conn)) #'<)
+                               '(1 3)))
+                ;; A redial gives the pages not picked no buffer.
+                (ladybird--drop conn)
+                (ladybird-test-run-timer (ladybird--conn-timer conn))
+                (setq ladybird-test-sent nil)
+                (ladybird-test-receive conn welcome)
+                (should (ladybird--ready-p conn))
+                (should (= (length (ladybird--buffers conn)) 1))
+                (should (equal (sort (mapcar #'car (ladybird--conn-kept conn)) #'<)
+                               '(1 3)))
+                (should-not (ladybird-test-sent "create_view"))
+                (should (equal (ladybird-test-sent "set_visibility")
+                               '(((type . "set_visibility") (view . 3) (visible))
+                                 ((type . "set_visibility") (view . 1) (visible)))))
+                (should (= (length ladybird-render-test-reads) 1))
+                ;; `ladybird-connect' gives them buffers.
+                (ladybird-connect ladybird-test-host)
+                (should (= (length (ladybird--buffers conn)) 3))
+                (should-not (ladybird--conn-kept conn)))
+              ;; A new plain connection shows every page.
+              (let ((plain (ladybird-connect '("plain" (:kind unix :path "/p")))))
+                (ladybird-test-receive plain welcome)
+                (should (= (length (ladybird--buffers plain)) 3))
+                (should-not (ladybird--conn-kept plain)))
+              ;; So does `ladybird' on a new connection.
+              (let* ((page (ladybird "mock://four" '("url" (:kind unix :path "/u"))))
+                     (conn (buffer-local-value 'ladybird--conn page)))
+                (ladybird-test-receive conn welcome)
+                (should (= (length (ladybird--buffers conn)) 4))
+                (should-not (ladybird--conn-kept conn)))
+              ;; A server without a page to attach is only reported.
+              (setq ladybird-render-test-reads nil)
+              (ladybird-attach '("empty" (:kind unix :path "/e")))
+              (ladybird-test-receive (car ladybird--conns) (ladybird-test-welcome))
+              (should (member "ladybird: empty has no page open"
+                              (ladybird-render-test-prompts
+                                (ladybird-render-test-run-prompt))))
+              (should-not ladybird-render-test-reads))
+          (mapc #'kill-buffer (ladybird--buffers)))))))
+
+(ert-deftest ladybird-render-test-attach-no-server ()
+  ;; Nothing is started for `ladybird-attach': a server over standard
+  ;; input and output that is not connected has no pages to attach, and
+  ;; a socket that cannot be dialled has no server.
+  (ladybird-test-with-env
+    (let ((ladybird-hosts nil)
+          (ladybird-default-host nil)
+          (ladybird-autostart-server t)
+          (ladybird-program (expand-file-name "true" "/usr/bin"))
+          (socket (ladybird-default-socket)))
+      (skip-unless (file-executable-p ladybird-program))
+      (cl-letf (((symbol-function 'ladybird-start-server)
+                 (lambda () (ert-fail "a server was started")))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (ert-fail "a start was offered"))))
+        (should (equal (cadr (should-error (call-interactively #'ladybird-attach)
+                                           :type 'user-error))
+                       (format "No server on %s" socket)))
+        (should (equal (cadr (should-error (ladybird-attach '("box" (:kind local)))
+                                           :type 'user-error))
+                       "No server on box"))
+        ;; Nor is a socket nothing listens on.
+        (cl-letf (((symbol-function 'ladybird--open-process)
+                   (lambda (_endpoint)
+                     (signal 'file-missing '("make client process failed"
+                                             "No such file or directory")))))
+          (should (equal (cadr (should-error
+                                (ladybird-attach '("sock" (:kind unix :path "/s")))
+                                :type 'user-error))
+                         "No server on sock: No such file or directory")))
+        ;; A host whose socket is gone does not fall back to its other
+        ;; endpoints.
+        (let ((tried nil))
+          (cl-letf (((symbol-function 'ladybird--open-process)
+                     (lambda (endpoint)
+                       (push endpoint tried)
+                       (signal 'file-missing '("make client process failed"
+                                               "No such file or directory")))))
+            (should (equal (cadr (should-error
+                                  (ladybird-attach '("work" (:kind unix :path "/w")
+                                                     (:kind local)))
+                                  :type 'user-error))
+                           "No server on work: No such file or directory")))
+          (should (equal tried '((:kind unix :path "/w")))))
+        (should-not ladybird--conns)
+        (should-not ladybird-test-opened)))))
+
+(defmacro ladybird-render-test-with-attach (&rest body)
+  "Run BODY in a test environment for `ladybird-attach'.
+`welcome' is a welcome with the views 1, 2 and 3, titled One, Two and
+Three."
+  (declare (indent 0) (debug t))
+  `(ladybird-test-with-env
+     (let* ((ladybird--frame-function #'ladybird--on-frame)
+            (ladybird--welcome-function #'ladybird--on-welcome)
+            (ladybird--change-function #'ladybird--on-conn-change)
+            (ladybird-device-pixel-ratio 1.0)
+            (ladybird--last-buffer nil)
+            (ladybird--queued-prompts nil)
+            (ladybird-render-test-reads nil)
+            (welcome (ladybird-test-welcome
+                      '(((view . 1) (url . "mock://one") (title . "One"))
+                        ((view . 2) (url . "mock://two") (title . "Two"))
+                        ((view . 3) (url . "mock://three") (title . "Three"))))))
+       (ignore welcome)
+       (save-window-excursion
+         (unwind-protect
+             (progn ,@body)
+           (mapc #'kill-buffer (ladybird--buffers))
+           (dolist (timer timer-list)
+             (when (eq (timer--function timer) #'ladybird--run-prompt)
+               (cancel-timer timer))))))))
+
+(defun ladybird-render-test-quit-reader (&rest _)
+  "Stand in for `completing-read' that quits, as \\[keyboard-quit] does."
+  (signal 'quit nil))
+
+(ert-deftest ladybird-render-test-attach-name-pages ()
+  ;; A page that looks like a string in use is numbered.
+  (should (equal (ladybird--name-pages '((1 "" "All 2 pages") (2 "" "All 2 pages"))
+                                       '(("All 2 pages" . t)))
+                 '(("All 2 pages <2>" . 1) ("All 2 pages <3>" . 2)))))
+
+(ert-deftest ladybird-render-test-attach-quit ()
+  ;; A quit in the picker of a connection opened for the attach closes
+  ;; it; one that had page buffers before stays.  So does nothing to
+  ;; attach.
+  (ladybird-render-test-with-attach
+    (cl-letf (((symbol-function 'completing-read) #'ladybird-render-test-quit-reader))
+      (ladybird-attach ladybird-test-host)
+      (let* ((conn (car ladybird--conns))
+             (process (ladybird--conn-process conn)))
+        (ladybird-test-receive conn welcome)
+        (ladybird-render-test-prompts
+          (ladybird-render-test-run-prompt))
+        (should-not (ladybird--buffers))
+        (should-not (memq conn ladybird--conns))
+        (should-not (process-live-p process))))
+    (ladybird-attach '("empty" (:kind unix :path "/e")))
+    (let ((conn (car ladybird--conns)))
+      (ladybird-test-receive conn (ladybird-test-welcome))
+      (ladybird-render-test-prompts
+        (ladybird-render-test-run-prompt))
+      (should-not (memq conn ladybird--conns))))
+  (ladybird-render-test-with-view
+    (setf (ladybird--conn-kept conn)
+          (list (cons 2 '((view . 2) (url . "mock://two")))))
+    (cl-letf (((symbol-function 'completing-read) #'ladybird-render-test-quit-reader))
+      (should (eq (condition-case nil
+                      (call-interactively #'ladybird-attach)
+                    (quit 'quit))
+                  'quit)))
+    (should (ladybird--ready-p conn))
+    (should (memq conn ladybird--conns))
+    (should (equal (mapcar #'car (ladybird--conn-kept conn)) '(2)))))
+
+(ert-deftest ladybird-render-test-attach-dropped ()
+  ;; A picker waiting to be opened goes when its connection closes for
+  ;; good or is taken over, and opens no read; on a connection lost
+  ;; meanwhile it says so.
+  (ladybird-render-test-with-attach
+    (cl-letf (((symbol-function 'completing-read)
+               (ladybird-render-test-reader #'car)))
+      (ladybird-attach ladybird-test-host)
+      (let ((conn (car ladybird--conns)))
+        (ladybird-test-receive conn welcome)
+        (should (= (length ladybird--queued-prompts) 1))
+        (ladybird--disconnect conn)
+        (should-not ladybird--queued-prompts))
+      (ladybird-attach ladybird-test-host)
+      (let ((conn (car ladybird--conns)))
+        (ladybird-test-receive conn welcome)
+        (should (= (length ladybird--queued-prompts) 1))
+        (ladybird-test-receive conn '((type . "replaced")))
+        (should (eq (ladybird--conn-state conn) 'replaced))
+        (should-not ladybird--queued-prompts)
+        (ladybird--disconnect conn))
+      (ladybird-attach ladybird-test-host)
+      (let ((conn (car ladybird--conns)))
+        (ladybird-test-receive conn welcome)
+        (ladybird--drop conn)
+        (should (member "ladybird: test is not connected"
+                        (ladybird-render-test-prompts
+                          (ladybird-render-test-run-prompt))))
+        (should-not (memq conn ladybird--conns)))
+      (should-not ladybird-render-test-reads))))
+
+(ert-deftest ladybird-render-test-attach-with-connect ()
+  ;; A second attach while the first waits opens no second picker; a
+  ;; plain connection asked for meanwhile shows every page, and the
+  ;; picker then has nothing to offer.
+  (ladybird-render-test-with-attach
+    (cl-letf (((symbol-function 'completing-read)
+               (ladybird-render-test-reader #'car)))
+      (ladybird-attach ladybird-test-host)
+      (let ((conn (car ladybird--conns)))
+        (should (equal (ladybird-render-test-messages
+                         (ladybird-attach ladybird-test-host))
+                       '("ladybird: connecting to test; its pages are offered then")))
+        (should (equal (ladybird--conn-on-ready conn) (list #'ladybird--attach-offer)))
+        (ladybird-connect ladybird-test-host)
+        (ladybird-test-receive conn welcome)
+        (should (= (length (ladybird--buffers conn)) 3))
+        (should-not (ladybird--conn-kept conn))
+        (should (= (length ladybird--queued-prompts) 1))
+        (should (member "ladybird: Every page of test has a buffer"
+                        (ladybird-render-test-prompts
+                          (ladybird-render-test-run-prompt))))
+        (should-not ladybird-render-test-reads)
+        (should (ladybird--ready-p conn))))))
+
+(ert-deftest ladybird-render-test-attach-closing ()
+  ;; A connection dialled again for an attach with pages to close and no
+  ;; buffer left closes them and does not linger under the picker.
+  (ladybird-render-test-with-attach
+    (ladybird-connect ladybird-test-host)
+    (let ((conn (car ladybird--conns)))
+      (ladybird-test-receive conn welcome)
+      (ladybird--drop conn)
+      (let ((ladybird-keep-view-on-kill t))
+        (kill-buffer (gethash 3 (ladybird--conn-views conn)))
+        (kill-buffer (gethash 2 (ladybird--conn-views conn))))
+      (kill-buffer (gethash 1 (ladybird--conn-views conn)))
+      (should (equal (ladybird--conn-closing conn) '(1)))
+      (cl-letf (((symbol-function 'completing-read)
+                 (ladybird-render-test-reader #'car)))
+        (ladybird-attach ladybird-test-host)
+        (should (eq (car ladybird--conns) conn))
+        (setq ladybird-test-sent nil)
+        (ladybird-test-receive conn welcome)
+        (should (equal (ladybird-test-sent "close_view")
+                       '(((type . "close_view") (view . 1)))))
+        (should-not (ladybird--conn-lingering conn))
+        (ladybird-render-test-prompts
+          (ladybird-render-test-run-prompt))
+        (should (equal (cadr (car ladybird-render-test-reads))
+                       '("Two  mock://two" "Three  mock://three" "All 2 pages")))
+        (should (memq conn ladybird--conns))
+        (should (equal (mapcar (lambda (buffer) (buffer-local-value 'ladybird--view buffer))
+                               (ladybird--buffers conn))
+                       '(2)))))))
+
+(ert-deftest ladybird-render-test-attach-lingering ()
+  ;; A connection that lingers without a page buffer does not close
+  ;; while the picker is open.
+  (ladybird-render-test-with-attach
+    (let ((conn (ladybird-connect ladybird-test-host))
+          (ran nil))
+      (ladybird-test-receive conn (ladybird-test-welcome))
+      (setf (ladybird--conn-kept conn)
+            (list (cons 2 '((view . 2) (url . "mock://two")))
+                  (cons 3 '((view . 3) (url . "mock://three")))))
+      (ladybird--linger conn)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _)
+                   ;; More than a second passes.
+                   (when (timerp (ladybird--conn-lingering conn))
+                     (setq ran t)
+                     (ladybird-test-run-timer (ladybird--conn-lingering conn)))
+                   "mock://two")))
+        (ladybird-attach ladybird-test-host))
+      (should-not ran)
+      (should (memq conn ladybird--conns))
+      (should (equal (mapcar (lambda (buffer) (buffer-local-value 'ladybird--view buffer))
+                             (ladybird--buffers conn))
+                     '(2))))))
+
+(ert-deftest ladybird-render-test-attach-lost-while-reading ()
+  ;; A connection lost while the picker is open gets no buffer.
+  (ladybird-render-test-with-attach
+    (ladybird-attach ladybird-test-host)
+    (let ((conn (car ladybird--conns)))
+      (ladybird-test-receive conn welcome)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _)
+                   (ladybird--drop conn)
+                   "Two  mock://two")))
+        (should (member "ladybird: test is not connected"
+                        (ladybird-render-test-prompts
+                          (ladybird-render-test-run-prompt)))))
+      (should-not (ladybird--buffers))
+      (should-not (memq conn ladybird--conns)))))
+
+(ert-deftest ladybird-render-test-attach-quit-while-connecting ()
+  ;; A quit in the picker leaves a connection that `ladybird-connect'
+  ;; dials meanwhile, which then shows every page.
+  (ladybird-render-test-with-attach
+    (ladybird-attach ladybird-test-host)
+    (let ((conn (car ladybird--conns)))
+      (ladybird-test-receive conn welcome)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _)
+                   (ladybird--drop conn)
+                   (ladybird-connect ladybird-test-host)
+                   (signal 'quit nil))))
+        (ladybird-render-test-prompts
+          (ladybird-render-test-run-prompt)))
+      (should (memq conn ladybird--conns))
+      (should (process-live-p (ladybird--conn-process conn)))
+      (ladybird-test-receive conn welcome)
+      (should (= (length (ladybird--buffers conn)) 3)))))
+
+(ert-deftest ladybird-render-test-attach-stale ()
+  ;; A page that got a buffer while the picker was open shows that
+  ;; buffer; a string that names no page is refused.
+  (ladybird-render-test-with-view
+    (save-window-excursion
+      (set-window-buffer (selected-window) buffer)
+      (setf (ladybird--conn-kept conn)
+            (list (cons 2 '((view . 2) (url . "mock://two")))
+                  (cons 3 '((view . 3) (url . "mock://three")))))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _)
+                   (ladybird--restore-kept conn 2)
+                   "mock://two")))
+        (call-interactively #'ladybird-attach))
+      (should (eq (window-buffer) (gethash 2 (ladybird--conn-views conn))))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "bogus")))
+        (should (equal (cadr (should-error (call-interactively #'ladybird-attach)
+                                           :type 'user-error))
+                       "No such page")))
+      (should (equal (mapcar #'car (ladybird--conn-kept conn)) '(3))))))
 
 (ert-deftest ladybird-render-test-clean-page-strings ()
   ;; Page strings lose control and bidi override characters wherever
@@ -3458,6 +4881,7 @@ background; C-c C-s switches to it")))
                   #'ladybird--frame-visibility-changed))
       (should (eq (lookup-key special-event-map [make-frame-visible])
                   #'ladybird--frame-visibility-changed))
+      (cancel-timer ladybird--update-timer)
       (setq ladybird--update-timer nil)
       (ladybird--frame-visibility-changed (list 'iconify-frame (selected-frame)))
       (should (timerp ladybird--update-timer))
@@ -3484,6 +4908,7 @@ background; C-c C-s switches to it")))
                  (add-to-list 'emulation-mode-map-alists 'ladybird--hint-map-alist)
                  (setq ladybird--hint nil)
                  (ladybird--schedule-update)
+                 (ladybird--later #'ignore)
                  (unload-feature 'ladybird t)
                  (let ((left nil))
                    (dolist (hook '(post-command-hook window-buffer-change-functions
@@ -3494,6 +4919,8 @@ background; C-c C-s switches to it")))
                          (push (list hook f) left))))
                    (when (memq 'ladybird--hint-map-alist emulation-mode-map-alists)
                      (push 'emulation left))
+                   (when ladybird--queued-prompts
+                     (push 'queued-prompts left))
                    (when (eq (lookup-key special-event-map [iconify-frame])
                              'ladybird--frame-visibility-changed)
                      (push 'special-event-map left))
@@ -3505,6 +4932,44 @@ background; C-c C-s switches to it")))
                    (princ (format "LEFT %S" left))))))
             (buffer-string))))
     (should (string-match-p "LEFT nil" output))))
+
+(ert-deftest ladybird-render-test-unload-in-prompt ()
+  ;; Neither ladybird nor ladybird-conn is unloaded while one of their
+  ;; prompts is open; afterwards they are.
+  (skip-unless (executable-find (expand-file-name invocation-name invocation-directory)))
+  (let* ((dir (file-name-directory (locate-library "ladybird")))
+         (test-dir (file-name-directory (locate-library "ladybird-fake-module")))
+         (output
+          (with-temp-buffer
+            (call-process
+             (expand-file-name invocation-name invocation-directory) nil t nil
+             "--batch" "-Q" "-L" dir "-L" test-dir
+             "--eval"
+             (prin1-to-string
+              '(progn
+                 (require 'ladybird-fake-module)
+                 (require 'ladybird)
+                 (let ((refused nil))
+                   (ladybird--call-prompt
+                    (lambda ()
+                      (dolist (feature '(ladybird ladybird-conn))
+                        (condition-case err
+                            (unload-feature feature t)
+                          (user-error (push (cadr err) refused))))
+                      (ladybird--note-answer '(x)))
+                    nil '(x))
+                   (princ (format "REFUSED %S LOADED %S\n" (nreverse refused)
+                                  (list (featurep 'ladybird)
+                                        (featurep 'ladybird-conn))))
+                   (unload-feature 'ladybird t)
+                   (unload-feature 'ladybird-conn t)
+                   (princ (format "AFTER %S\n" (list (featurep 'ladybird)
+                                                     (featurep 'ladybird-conn))))))))
+            (buffer-string))))
+    (should (string-match-p (regexp-quote "REFUSED (\"Cannot unload ladybird while \
+one of its prompts is open\" \"Cannot unload ladybird-conn while one of its prompts \
+is open\") LOADED (t t)") output))
+    (should (string-match-p (regexp-quote "AFTER (nil nil)") output))))
 
 (ert-deftest ladybird-render-test-new-page-display ()
   ;; Where a new page appears.
@@ -3563,7 +5028,7 @@ background; C-c C-s switches to it")))
                                (ladybird-test-sent "set_visibility")))))
         (set-window-buffer (selected-window) buffer)
         (setq ladybird-test-sent nil)
-        (ladybird--update)
+        (ladybird-render-test-update)
         (should (equal (sort (funcall visible) (lambda (a b) (< (car a) (car b))))
                        '((1 t) (2 nil))))
         ;; The global hook schedules an update when a window changes.
@@ -3571,24 +5036,24 @@ background; C-c C-s switches to it")))
                       (default-value 'window-buffer-change-functions)))
         (setq ladybird-test-sent nil)
         (set-window-buffer (selected-window) second)
-        (ladybird--update)
+        (ladybird-render-test-update)
         (should (equal (sort (funcall visible) (lambda (a b) (< (car a) (car b))))
                        '((1 nil) (2 t))))
         ;; Two windows on one buffer: still one visible view, told once.
         (setq ladybird-test-sent nil)
         (set-window-buffer (split-window) second)
-        (ladybird--update)
+        (ladybird-render-test-update)
         (should-not (funcall visible))
         ;; A buffer in no window at all is hidden; shown again, visible.
         (with-temp-buffer
           (dolist (window (window-list))
             (set-window-buffer window (current-buffer)))
-          (ladybird--update)
+          (ladybird-render-test-update)
           (should (equal (funcall visible) '((2 nil)))))
         (setq ladybird-test-sent nil)
         (delete-other-windows)
         (set-window-buffer (selected-window) buffer)
-        (ladybird--update)
+        (ladybird-render-test-update)
         (should (equal (funcall visible) '((1 t))))))))
 
 (ert-deftest ladybird-render-test-reattach-pages ()
@@ -3615,7 +5080,7 @@ background; C-c C-s switches to it")))
               (should (equal (buffer-local-value 'ladybird--view (window-buffer)) 1))
               ;; Each view is told its visibility once, the shown one visible.
               (setq ladybird-test-sent nil)
-              (ladybird--update)
+              (ladybird-render-test-update)
               (should (equal (sort (mapcar (lambda (m) (list (alist-get 'view m)
                                                              (alist-get 'visible m)))
                                            (ladybird-test-sent "set_visibility"))
@@ -3638,9 +5103,9 @@ background; C-c C-s switches to it")))
               (ladybird-test-receive conn (ladybird-test-welcome views))
               (should (= (length (ladybird--buffers conn)) 3))
               (should (equal (buffer-local-value 'ladybird--view (window-buffer)) 2))))
+        (mapc #'kill-buffer (ladybird--buffers))
         (when (timerp ladybird--update-timer)
-          (cancel-timer ladybird--update-timer))
-        (mapc #'kill-buffer (ladybird--buffers))))))
+          (cancel-timer ladybird--update-timer))))))
 
 (ert-deftest ladybird-render-test-last-page-on-socket ()
   ;; The last page of a socket server closed: the server keeps running.
@@ -3653,7 +5118,7 @@ background; C-c C-s switches to it")))
                          (let ((ladybird-keep-view-on-kill t))
                            (kill-buffer buffer)))
                        '("ladybird: no page is open here on test; its server keeps \
-running with 1 page, which `ladybird-connect' shows again"))))))
+running with 1 page, which `ladybird-attach' or `ladybird-connect' shows again"))))))
   (ladybird-render-test-with-view
     (cl-letf (((symbol-function 'process-type) (lambda (_) 'network)))
       (should (equal (ladybird-render-test-messages (kill-buffer buffer))
@@ -3761,7 +5226,7 @@ running until it is stopped where it runs"))))))
           (should (eq track-mouse 'dragging))
           (should (equal ladybird--saved-tracking '(nil nil))))
         ;; The update timer fires during the drag.
-        (ladybird--update)
+        (ladybird-render-test-update)
         (should (eq track-mouse 'dragging))
         (should (equal ladybird--saved-tracking '(nil nil)))
         (funcall end-drag)
@@ -3774,7 +5239,7 @@ running until it is stopped where it runs"))))))
         ;; Leaving the page puts back what was there before either.
         (with-temp-buffer
           (set-window-buffer (selected-window) (current-buffer))
-          (ladybird--update))
+          (ladybird-render-test-update))
         (should-not track-mouse)
         (should-not mouse-fine-grained-tracking)
         (should-not ladybird--saved-tracking)))))
@@ -3791,13 +5256,13 @@ running until it is stopped where it runs"))))))
         ;; A timer runs while a command waits with the variable bound.
         (let ((track-mouse 'bound)
               (this-command 'mouse-drag-region))
-          (ladybird--update)
+          (ladybird-render-test-update)
           (should (eq track-mouse 'bound))
           (should-not ladybird--saved-tracking))
         ;; So does one inside a recursive edit.
         (cl-letf (((symbol-function 'recursion-depth) (lambda () 1)))
           (let ((track-mouse 'bound))
-            (ladybird--update)
+            (ladybird-render-test-update)
             (ladybird--after-command)
             (should (eq track-mouse 'bound))
             (should-not ladybird--saved-tracking)))
@@ -3812,7 +5277,7 @@ running until it is stopped where it runs"))))))
           (set-window-buffer (selected-window) (current-buffer))
           (let ((track-mouse 'bound)
                 (this-command 'mouse-drag-region))
-            (ladybird--update)
+            (ladybird-render-test-update)
             (should (eq track-mouse 'bound))
             (should ladybird--saved-tracking))
           (should (eq track-mouse t))
@@ -4157,6 +5622,368 @@ running until it is stopped where it runs"))))))
           (kill-buffer buffer))
         (delete-file log)))))
 
+(ert-deftest ladybird-mock-test-default-socket ()
+  ;; With no hosts and no program, M-x ladybird finds the server on the
+  ;; default socket and offers it shared memory; a second page goes to
+  ;; the same connection.
+  :tags '(mock)
+  (skip-unless (executable-find "python3"))
+  (let* ((runtime (make-temp-file "ladybird-runtime" t))
+         (process-environment (cons (concat "XDG_RUNTIME_DIR=" runtime)
+                                    process-environment))
+         (socket (ladybird-default-socket))
+         (log (make-temp-file "ladybird-mock" nil ".log"))
+         (ladybird--conns nil)
+         (ladybird--keepalive-timer nil)
+         (ladybird--last-buffer nil)
+         (ladybird-device-pixel-ratio 1.0)
+         (ladybird-hosts nil)
+         (ladybird-default-host nil)
+         (ladybird-program "ladybird-no-such-program")
+         (inhibit-message t)
+         (logged (lambda (type)
+                   (seq-filter (lambda (m) (equal (alist-get 'type m) type))
+                               (ladybird-test-log log))))
+         (server (make-process
+                  :name "ladybird-test-mock" :buffer nil :noquery t
+                  :command (list "python3" "-I" ladybird-test-mock "--fps" "0"
+                                 "--log" log "--socket" socket))))
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (with-timeout (10 (ert-fail "the mock server does not listen"))
+              (while (not (ladybird--socket-live-p socket))
+                (sleep-for 0.05)))
+            (cl-letf (((symbol-function 'read-string)
+                       (lambda (&rest _) "mock://one")))
+              (let ((current-prefix-arg nil))
+                (call-interactively #'ladybird)))
+            (let* ((buffer (car (ladybird--buffers)))
+                   (conn (buffer-local-value 'ladybird--conn buffer)))
+              (should-not (ladybird--conn-host conn))
+              (should (equal (ladybird--conn-endpoints conn)
+                             `((:kind unix :path ,socket))))
+              (ladybird-test-wait conn (lambda ()
+                                         (buffer-local-value 'ladybird--canvas
+                                                             buffer)))
+              (should (eq (alist-get 'shm (car (funcall logged "hello"))) t))
+              (let ((second (ladybird "mock://two")))
+                (should (eq (buffer-local-value 'ladybird--conn second) conn)))
+              (ladybird-test-wait
+               conn (lambda () (= (length (funcall logged "create_view")) 2)))
+              (should (= (length (funcall logged "hello")) 1))))
+        (mapc #'kill-buffer (ladybird--buffers))
+        (mapc #'ladybird--disconnect ladybird--conns)
+        (delete-process server)
+        (delete-file log)
+        (delete-directory runtime t)))))
+
+(defun ladybird-render-test-attach (log urls)
+  "Connect to the local server and wait for the pages of URLS.
+LOG is the mock server's log.  Return the page buffers, sorted by URL."
+  (ladybird-connect (car (ladybird--hosts)))
+  (let ((conn (car ladybird--conns))
+        (urls (sort (copy-sequence urls) #'string<))
+        (buffers nil))
+    (ladybird-test-wait
+     conn (lambda ()
+            (setq buffers (sort (ladybird--buffers conn)
+                                (lambda (a b)
+                                  (string< (with-current-buffer a (ladybird--url))
+                                           (with-current-buffer b (ladybird--url))))))
+            (equal (mapcar (lambda (buffer)
+                             (with-current-buffer buffer (ladybird--url)))
+                           buffers)
+                   urls)))
+    (should-not (seq-find (lambda (m) (equal (alist-get 'type m) "close_view"))
+                          (ladybird-test-log log)))
+    buffers))
+
+(defun ladybird-render-test-wait-unattached (log)
+  "Wait until the mock server of LOG has no client.
+Every connection it logged as made it has logged as gone."
+  (let ((count (lambda (type)
+                 (length (seq-filter (lambda (m) (equal (alist-get 'type m) type))
+                                     (ladybird-test-log log))))))
+    (with-timeout (10 (ert-fail "the server still has a client"))
+      (while (< (funcall count "_disconnected") (funcall count "_connected"))
+        (sleep-for 0.05)))))
+
+(defun ladybird-render-test-child-attach (log how)
+  "Attach a child Emacs to the local server and end it HOW.
+HOW is `kill-emacs' or `crash'.  LOG is the mock server's log; this
+returns once the server has seen the child go."
+  (let* ((form
+          `(let ((ladybird-hosts nil)
+                 (ladybird-default-host nil)
+                 (ladybird-program "ladybird-no-such-program")
+                 (inhibit-message t))
+             (ladybird-connect (car (ladybird--hosts)))
+             (let ((conn (car ladybird--conns)))
+               (with-timeout (10 (kill-emacs 2))
+                 (while (< (length (ladybird--buffers conn)) 2)
+                   (accept-process-output (ladybird--conn-process conn) 0.05))))
+             ,(if (eq how 'crash)
+                  '(signal-process (emacs-pid) 'kill)
+                '(kill-emacs 0))))
+         (status (call-process
+                  (expand-file-name invocation-name invocation-directory)
+                  nil nil nil "--batch" "-Q"
+                  "-L" (expand-file-name "../lisp" ladybird-test-directory)
+                  "-L" ladybird-test-directory
+                  "-l" "ladybird-conn-test" "-l" "ladybird"
+                  "--eval" (prin1-to-string form))))
+    (if (eq how 'crash)
+        (should (stringp status))
+      (should (eql status 0)))
+    (ladybird-render-test-wait-unattached log)))
+
+(ert-deftest ladybird-mock-test-detach ()
+  ;; A detach, quitting Emacs and a crash of Emacs leave the pages on a
+  ;; server on a socket, and the next connection shows them again.
+  :tags '(mock)
+  (skip-unless (executable-find "python3"))
+  (let* ((runtime (make-temp-file "ladybird-runtime" t))
+         (process-environment (cons (concat "XDG_RUNTIME_DIR=" runtime)
+                                    process-environment))
+         (socket (ladybird-default-socket))
+         (log (make-temp-file "ladybird-mock" nil ".log"))
+         (ladybird--conns nil)
+         (ladybird--keepalive-timer nil)
+         (ladybird--last-buffer nil)
+         (ladybird-device-pixel-ratio 1.0)
+         (ladybird-hosts nil)
+         (ladybird-default-host nil)
+         (ladybird-program "ladybird-no-such-program")
+         (ladybird-new-page-display 'background)
+         (inhibit-message t)
+         (logged (lambda (type)
+                   (seq-filter (lambda (m) (equal (alist-get 'type m) type))
+                               (ladybird-test-log log))))
+         (server (make-process
+                  :name "ladybird-test-mock" :buffer nil :noquery t
+                  :command (list "python3" "-I" ladybird-test-mock "--fps" "0"
+                                 "--log" log "--socket" socket))))
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (with-timeout (10 (ert-fail "the mock server does not listen"))
+              (while (not (ladybird--socket-live-p socket))
+                (sleep-for 0.05)))
+            (let* ((one (ladybird "mock://one"))
+                   (conn (buffer-local-value 'ladybird--conn one)))
+              (ladybird "mock://two")
+              (ladybird-test-wait
+               conn (lambda () (= (hash-table-count (ladybird--conn-views conn)) 2)))
+              (with-current-buffer one
+                (ladybird-detach))
+              (should-not (ladybird--buffers))
+              (should-not ladybird--conns)
+              (ladybird-render-test-wait-unattached log))
+            (should-not (funcall logged "close_view"))
+            ;; The pages come back, with their state.
+            (let ((buffers (ladybird-render-test-attach log '("mock://one" "mock://two"))))
+              (should (equal (mapcar (lambda (buffer) (buffer-local-value 'ladybird--view
+                                                                          buffer))
+                                     buffers)
+                             '(1 2)))
+              (should (equal (buffer-name (car buffers)) "*ladybird: Mock: mock://one*"))
+              ;; One page detached alone stays on the server, the
+              ;; connection stays open.
+              (let ((conn (buffer-local-value 'ladybird--conn (car buffers))))
+                (with-current-buffer (cadr buffers)
+                  (ladybird-detach t))
+                (should (ladybird--ready-p conn))
+                (should (equal (ladybird--buffers conn) (list (car buffers))))
+                (with-current-buffer (car buffers)
+                  (ladybird-detach))))
+            (ladybird-render-test-wait-unattached log)
+            (should-not (funcall logged "close_view"))
+            ;; Another Emacs that quits, or crashes, leaves them too.
+            (ladybird-render-test-child-attach log 'kill-emacs)
+            (ladybird-render-test-child-attach log 'crash)
+            (ladybird-render-test-attach log '("mock://one" "mock://two"))
+            (should (= (length (funcall logged "hello")) 5))
+            (should (= (length (funcall logged "create_view")) 2)))
+        (dolist (buffer (ladybird--buffers))
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer
+              (ignore-errors (ladybird-detach)))))
+        (mapc #'ladybird--disconnect ladybird--conns)
+        (delete-process server)
+        (delete-file log)
+        (delete-directory runtime t)))))
+
+(ert-deftest ladybird-mock-test-attach ()
+  ;; After a detach `ladybird-attach' connects to the server on the
+  ;; default socket and gives only the page picked a buffer; the others
+  ;; stay hidden until all of them are picked.
+  :tags '(mock)
+  (skip-unless (executable-find "python3"))
+  (let* ((runtime (make-temp-file "ladybird-runtime" t))
+         (process-environment (cons (concat "XDG_RUNTIME_DIR=" runtime)
+                                    process-environment))
+         (socket (ladybird-default-socket))
+         (log (make-temp-file "ladybird-mock" nil ".log"))
+         (ladybird--conns nil)
+         (ladybird--keepalive-timer nil)
+         (ladybird--last-buffer nil)
+         (ladybird--queued-prompts nil)
+         (ladybird-device-pixel-ratio 1.0)
+         (ladybird-hosts nil)
+         (ladybird-default-host nil)
+         (ladybird-program "ladybird-no-such-program")
+         (ladybird-new-page-display 'background)
+         (inhibit-message t)
+         (logged (lambda (type)
+                   (seq-filter (lambda (m) (equal (alist-get 'type m) type))
+                               (ladybird-test-log log))))
+         (server (make-process
+                  :name "ladybird-test-mock" :buffer nil :noquery t
+                  :command (list "python3" "-I" ladybird-test-mock "--fps" "0"
+                                 "--log" log "--socket" socket)))
+         (urls (lambda (conn)
+                 (sort (mapcar (lambda (buffer)
+                                 (with-current-buffer buffer (ladybird--url)))
+                               (ladybird--buffers conn))
+                       #'string<)))
+         (choice nil))
+    (save-window-excursion
+      (unwind-protect
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt table &rest _)
+                       (seq-find (lambda (candidate)
+                                   (string-suffix-p choice candidate))
+                                 (all-completions "" table)))))
+            (with-timeout (10 (ert-fail "the mock server does not listen"))
+              (while (not (ladybird--socket-live-p socket))
+                (sleep-for 0.05)))
+            (let* ((one (ladybird "mock://one"))
+                   (conn (buffer-local-value 'ladybird--conn one)))
+              (ladybird "mock://two")
+              (ladybird "mock://three")
+              (ladybird-test-wait
+               conn (lambda () (= (hash-table-count (ladybird--conn-views conn)) 3)))
+              (with-current-buffer one
+                (ladybird-detach))
+              (should-not (ladybird--buffers))
+              (ladybird-render-test-wait-unattached log))
+            ;; One page picked.
+            (setq choice "mock://two")
+            (with-temp-buffer
+              (ladybird-attach))
+            (let ((conn (car ladybird--conns)))
+              (ladybird-test-wait conn (lambda () (ladybird--buffers conn)))
+              (should (equal (funcall urls conn) '("mock://two")))
+              (should (equal (sort (mapcar #'car (ladybird--conn-kept conn)) #'<)
+                             '(1 3)))
+              ;; The server is told they are hidden, and not that they
+              ;; are shown.
+              (let ((since nil))
+                (ladybird-test-wait
+                 conn (lambda ()
+                        ;; The messages since the last hello.
+                        (setq since (seq-take-while
+                                     (lambda (m) (not (equal (alist-get 'type m) "hello")))
+                                     (reverse (ladybird-test-log log))))
+                        (seq-every-p
+                         (lambda (view)
+                           (member `((type . "set_visibility") (view . ,view) (visible))
+                                   since))
+                         '(1 3))))
+                (should-not (seq-find (lambda (m)
+                                        (and (memq (alist-get 'view m) '(1 3))
+                                             (alist-get 'visible m)))
+                                      since)))
+              ;; All the others.
+              (setq choice "All 2 pages")
+              (with-temp-buffer
+                (ladybird-attach))
+              (should (equal (funcall urls conn)
+                             '("mock://one" "mock://three" "mock://two")))
+              (should-not (ladybird--conn-kept conn))
+              (should-error (ladybird-attach) :type 'user-error))
+            (should-not (funcall logged "close_view"))
+            (should (= (length (funcall logged "create_view")) 3))
+            (should (= (length (funcall logged "hello")) 2)))
+        (dolist (buffer (ladybird--buffers))
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer
+              (ignore-errors (ladybird-detach)))))
+        (mapc #'ladybird--disconnect ladybird--conns)
+        (delete-process server)
+        (delete-file log)
+        (delete-directory runtime t)))))
+
+(ert-deftest ladybird-mock-test-autostart ()
+  ;; M-x ladybird without a server starts one in the background on the
+  ;; default socket when asked to, and attaches to it; the server keeps
+  ;; running when the connection ends.
+  :tags '(mock)
+  (skip-unless (executable-find "python3"))
+  (let* ((runtime (make-temp-file "ladybird-runtime" t))
+         (process-environment (cons (concat "XDG_RUNTIME_DIR=" runtime)
+                                    process-environment))
+         (socket (ladybird-default-socket))
+         (log (make-temp-file "ladybird-mock" nil ".log"))
+         (ladybird--conns nil)
+         (ladybird--keepalive-timer nil)
+         (ladybird--last-buffer nil)
+         (ladybird-device-pixel-ratio 1.0)
+         (ladybird-hosts nil)
+         (ladybird-default-host nil)
+         (ladybird-autostart-server 'ask)
+         (ladybird-program
+          (ladybird-render-test-program
+           (format "exec python3 -I %s --fps 0 --log %s --exit-after 60 \"$@\""
+                   ladybird-test-mock log)))
+         (inhibit-message t)
+         (noninteractive nil)
+         (asked nil)
+         (pid nil))
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function 'read-string)
+                       (lambda (&rest _) "mock://one"))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (prompt) (push prompt asked) t)))
+              (let ((current-prefix-arg nil))
+                (call-interactively #'ladybird)))
+            (should (= (length asked) 1))
+            (let* ((buffer (car (ladybird--buffers)))
+                   (conn (buffer-local-value 'ladybird--conn buffer)))
+              (should (equal (ladybird--conn-endpoints conn)
+                             `((:kind unix :path ,socket))))
+              (ladybird-test-wait conn (lambda ()
+                                         (buffer-local-value 'ladybird--canvas
+                                                             buffer)))
+              (let ((server (alist-get 'server (ladybird--conn-server-info conn))))
+                (should (string-match "(\\([0-9]+\\))" server))
+                (setq pid (string-to-number (match-string 1 server))))
+              ;; The server is not a process of this Emacs.
+              (should-not (seq-find (lambda (process)
+                                      (eql (process-id process) pid))
+                                    (process-list))))
+            (mapc #'kill-buffer (ladybird--buffers))
+            (mapc #'ladybird--disconnect ladybird--conns)
+            (should (ladybird--socket-live-p socket))
+            (should (equal (ladybird-start-server) socket))
+            ;; Started again, the server refuses: one listens already.
+            (should (string-match-p
+                     "Another server already listens"
+                     (cadr (should-error
+                            (cl-letf (((symbol-function 'ladybird--socket-live-p)
+                                       #'ignore))
+                              (ladybird-start-server)))))))
+        (mapc #'kill-buffer (ladybird--buffers))
+        (mapc #'ladybird--disconnect ladybird--conns)
+        (when pid
+          (signal-process pid 'term))
+        (delete-file ladybird-program)
+        (delete-file log)
+        (delete-directory runtime t)))))
+
 (ert-deftest ladybird-mock-test-single-view ()
   ;; A server whose welcome has no max_views shows one page: the second
   ;; page loads in the first and is not asked for.
@@ -4236,7 +6063,7 @@ running until it is stopped where it runs"))))))
               (should (= 2 (length (funcall logged "create_view"))))
               ;; One is shown, the other is not: only the shown one animates.
               ;; Batch Emacs does no redisplay, which runs the window hooks.
-              (ladybird--update)
+              (ladybird-render-test-update)
               (ladybird-test-wait conn (lambda ()
                                          (funcall logged "set_visibility"
                                                   'view (buffer-local-value 'ladybird--view one)
@@ -4254,7 +6081,7 @@ running until it is stopped where it runs"))))))
                 ;; Shown again it starts with a full frame.
                 (let ((full (buffer-local-value 'ladybird--full-frame-count one)))
                   (set-window-buffer (selected-window) one)
-                  (ladybird--update)
+                  (ladybird-render-test-update)
                   (ladybird-test-wait conn (lambda ()
                                              (> (buffer-local-value 'ladybird--full-frame-count one)
                                                 full)))))
@@ -4372,7 +6199,7 @@ running until it is stopped where it runs"))))))
                                 (ladybird-test-log log))))
          (show (lambda (buffer)
                  (set-window-buffer (selected-window) buffer)
-                 (ladybird--update)))
+                 (ladybird-render-test-update)))
          one two)
     (save-window-excursion
       (unwind-protect
@@ -4385,7 +6212,7 @@ running until it is stopped where it runs"))))))
                              (buffer-local-value 'ladybird--view one))))
               (ladybird-test-wait conn (lambda () (funcall sent a 'more nil)))
               (setq two (ladybird "mock://two" host))
-              (ladybird--update)
+              (ladybird-render-test-update)
               (let ((b (progn (ladybird-test-wait
                                conn (lambda () (buffer-local-value 'ladybird--view two)))
                               (buffer-local-value 'ladybird--view two))))
@@ -4427,7 +6254,7 @@ running until it is stopped where it runs"))))))
                 (ladybird-test-wait conn (lambda () (funcall dropped "closed")))
                 (should (ladybird--ready-p conn))
                 (set-window-buffer (selected-window) one)
-                (ladybird--update)
+                (ladybird-render-test-update)
                 (let ((count (buffer-local-value 'ladybird--frame-count one)))
                   (ladybird--send conn `((type . "mouse") (view . ,a) (kind . "down")
                                          (x . 5) (y . 5) (button . "left")
@@ -4473,7 +6300,7 @@ running until it is stopped where it runs"))))))
               (should (string-match-p "Mock confirm" prompted))
               ;; The prompt was left without returning, and unanswered.
               (should-not returned)
-              (should-not ladybird--prompt)
+              (should-not ladybird--prompts)
               ;; The page is still served.
               (with-current-buffer buffer
                 (ladybird--request conn "request_selection" `((view . ,ladybird--view))

@@ -25,12 +25,19 @@ native module from the checkout and fall back to `test/ladybird-fake-module.el`.
 | `reconnect` | unix, tcp | a lost connection, another server process, a second client, server exit |
 | `limit` | stdio | a server whose welcome names no `max_views` holds one page: a second page (`c` in command mode) loads in the first |
 | `pages` | unix | several pages on one server: a second buffer and view, the shared cookie, a hidden page without frames and a full frame when shown again, `C-c C-s`, a page opened in the background, the limit, killing one page, connecting again to the pages the server kept |
+| `server` | (default socket) | the local server on a default socket of the session's own, the mock server being `ladybird-program`: `M-x ladybird` without a server asking to start one, `y` starting it in the background and the page opening there, a second page without a question, `C-c C-d` asking and `n` keeping the pages, `y` leaving them on the server, `M-x ladybird-connect` bringing them back, `C-u C-c C-d` and `C-c C-s`, `ladybird-start-server` with a server running; with none, `n` giving a server over standard input and output with its note once, detaching from it refused, and `ladybird-start-server` taking the next page while those pages stay |
+| `attach` | unix | `M-x ladybird-attach` after a detach: connecting without giving the pages buffers, the page picked getting one and the others told they are hidden, `C-c C-a` with the entry for all of them, nothing left to attach |
 | `popups` | stdio, unix | pages that pages open: a page in the background, told it is hidden, with a message; `C-c C-s` naming its opener; a page that closes its window, the window going back to the opener; one that closes itself at once; a burst stopped by the limit with `popup_blocked`, taking no window; a kept page brought back with its state |
 | `hints` | stdio | following links by their labels (`C-c C-o`, `o` in command mode): narrowing, refusal, `DEL`, buttons, links, `C-u`, fields, `C-g`, `<escape>`, `ESC x` on the terminal, wheel and mouse movement, a session the server ends, before or after its labels, a page's question and an alert that waits for a key during the hints, no labels |
 | `mouse` | (graphical frame) | clicks, wheel and movement at canvas positions |
 
 A variant is how the mock server is reached: started by the connection on standard
-input and output, or started first and listening on a Unix socket or a TCP port.
+input and output, or started first and listening on a Unix socket or a TCP port.  The
+`server` scenario has none: its mock server is started by the package, in the background
+on the default socket, and stopped by the scenario.  Every session has an
+`XDG_RUNTIME_DIR` of its own, so the default socket is the session's and a server on
+this machine's own is never found.
+
 `lib/ladybird-setup.el` has the helpers, also for a session started by hand:
 
 ```sh
@@ -55,8 +62,12 @@ It prints one line per scenario and variant, `PASS` or `FAIL` with the steps tha
 failed, and exits non-zero when one failed.  Every scenario runs in a graphical elate
 session, because the page has the size of its window in pixels and the mouse acts on
 positions of the canvas; the sessions need no screenshot, so a locked screen is fine.
-Afterwards the runner stops the sessions, servers and ssh processes of its run and
-removes their sockets and temporary files, here and on the remote machine.
+Each session, and an Emacs it starts, has an `XDG_RUNTIME_DIR` of its own named after
+the run, so a server on this machine's own default socket is never found.  Afterwards the runner stops the sessions, servers and ssh processes of its run and
+removes their sockets and temporary files, here and on the remote machine.  A server a
+scenario starts in the background on the default socket logs to a file in that
+directory (`--emacs-log`), so its command line names the run and it is found and stopped
+by that.
 
 A variant says where the server is:
 
@@ -114,6 +125,7 @@ places, and `ladybird-live-color` reads a pixel through the module's test access
 | `live-popups` | pages that pages open (the server started with `--emacs-max-views=3`): a link with `target=_blank` opening a page in the background that sees itself hidden, `C-c C-s`, the page closing its window, `window.open` with `window.opener` reaching the opener, a page closing itself at once, the limit giving `popup_blocked`, a hinted click opening a page |
 | `live-events` | console, a popup blocked on a server that holds one page, refused download, clipboard, screenshot |
 | `live-socket` | a kept page found again, a second client, a server restart (`socket`, `forward`) |
+| `live-session` | a server on the default socket, in the session's `XDG_RUNTIME_DIR` or the same directory on the remote machine (`socket`, `forward`): a batch Emacs that opens two pages and quits, starting the server in the background itself (`socket`) or using one that `ssh HOST Ladybird ... --emacs-background` started (`forward`); this Emacs finding the server and `M-x ladybird-attach` bringing the pages back with their history and without loading them again; `C-c C-d` asking and keeping the pages; `M-x ladybird-attach` and `C-c C-a` bringing them back one at a time; killing a buffer closing its page; the server, found by its `--emacs-log`, stopped afterwards |
 
 Every scenario ends with a check that each frame was acknowledged and none dropped.
 

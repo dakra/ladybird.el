@@ -29,6 +29,7 @@
   "Directory of the tests.")
 
 (defvar ladybird-module-directory)
+(defvar ladybird--update-timer)
 
 (defconst ladybird-test-native
   (and (getenv "LADYBIRD_TEST_MODULE")
@@ -87,15 +88,22 @@
           (ash (aref string (+ position 2)) 16)
           (ash (aref string (+ position 3)) 24)))
 
+(defconst ladybird-test-runtime-directory "/nonexistent/ladybird-runtime"
+  "XDG_RUNTIME_DIR of the tests, where no server listens.")
+
 (defmacro ladybird-test-with-env (&rest body)
   "Run BODY with connections isolated from Emacs and from each other."
   (declare (indent 0) (debug t))
   `(let ((ladybird--conns nil)
+         (process-environment
+          (cons (concat "XDG_RUNTIME_DIR=" ladybird-test-runtime-directory)
+                process-environment))
          (ladybird-test-sent nil)
          (ladybird-test-processes nil)
          (ladybird-test-open-error nil)
          (ladybird-test-opened nil)
          (ladybird--keepalive-timer nil)
+         (ladybird--update-timer nil)
          (ladybird-reconnect t)
          (ladybird-fake-module-shm-size nil)
          (ladybird--no-shm-endpoints nil)
@@ -114,6 +122,9 @@
            (ladybird--disconnect conn))
          (when ladybird--keepalive-timer
            (cancel-timer ladybird--keepalive-timer))
+         ;; Page buffers killed by BODY schedule an update.
+         (when (timerp ladybird--update-timer)
+           (cancel-timer ladybird--update-timer))
          (dolist (process ladybird-test-processes)
            (when (process-live-p process)
              (delete-process process)))))))
@@ -190,6 +201,12 @@ The server holds up to 16 views."
   (puthash view (or buffer (current-buffer)) (ladybird--conn-views conn))
   (ladybird-module-register-view (ladybird--conn-decoder conn) view))
 
+(defun ladybird-test-close-timer ()
+  "Return the timer that closes a dropped prompt, or nil."
+  (seq-find (lambda (timer)
+              (eq (timer--function timer) #'ladybird--close-dropped))
+            timer-list))
+
 (defun ladybird-test-run-timer (timer)
   "Run TIMER now, as if its time had come."
   (should (timerp timer))
@@ -257,21 +274,275 @@ The server holds up to 16 views."
     (should-not (ladybird--parse-endpoint bad))))
 
 (ert-deftest ladybird-conn-test-hosts ()
-  (let ((ladybird-hosts '(("one" . "ssh:one")
-                        ("two" "/tmp/two.sock" "tcp://two:9000")
-                        ("three" :ssh "three" :program "lb")
-                        ("four" (:kind unix :path "/tmp/four" :shm nil)
-                         "bogus")
-                        ("none" . "bogus")))
-        (ladybird-program "ladybird-no-such-program"))
-    (should (equal (ladybird--hosts)
-                   '(("one" (:kind ssh :host "one"))
-                     ("two" (:kind unix :path "/tmp/two.sock")
-                      (:kind tcp :host "two" :port 9000))
-                     ("three" (:kind ssh :host "three" :program "lb"))
-                     ("four" (:kind unix :path "/tmp/four" :shm nil)))))
-    (let ((ladybird-program "sh"))
-      (should (equal (car (ladybird--hosts)) '(nil (:kind local)))))))
+  (ladybird-test-with-env
+    (let ((ladybird-hosts '(("one" . "ssh:one")
+                          ("two" "/tmp/two.sock" "tcp://two:9000")
+                          ("three" :ssh "three" :program "lb")
+                          ("four" (:kind unix :path "/tmp/four" :shm nil)
+                           "bogus")
+                          ("none" . "bogus")))
+          (ladybird-program "ladybird-no-such-program"))
+      (should (equal (ladybird--hosts)
+                     '(("one" (:kind ssh :host "one"))
+                       ("two" (:kind unix :path "/tmp/two.sock")
+                        (:kind tcp :host "two" :port 9000))
+                       ("three" (:kind ssh :host "three" :program "lb"))
+                       ("four" (:kind unix :path "/tmp/four" :shm nil)))))
+      (let ((ladybird-program "sh"))
+        (should (equal (car (ladybird--hosts)) '(nil (:kind local))))
+        (should (equal (car (ladybird--hosts t)) '("one" (:kind ssh :host "one"))))))))
+
+(defun ladybird-test-default-socket (runtime temporary)
+  "Return the default socket with RUNTIME and TEMPORARY in the environment.
+They are the values of XDG_RUNTIME_DIR and TMPDIR, nil for unset."
+  (let ((process-environment
+         (append (list (if runtime (concat "XDG_RUNTIME_DIR=" runtime) "XDG_RUNTIME_DIR")
+                       (if temporary (concat "TMPDIR=" temporary) "TMPDIR"))
+                 process-environment)))
+    (ladybird-default-socket)))
+
+(ert-deftest ladybird-conn-test-default-socket ()
+  (let ((name (format "ladybird-emacs-%d/ladybird-emacs.sock" (user-real-uid))))
+    (should (equal (ladybird-test-default-socket "/run/user/1000" "/var/tmp")
+                   "/run/user/1000/ladybird-emacs.sock"))
+    (should (equal (ladybird-test-default-socket "/run/user/1000/" nil)
+                   "/run/user/1000/ladybird-emacs.sock"))
+    (should (equal (ladybird-test-default-socket "/run/user/1000//" nil)
+                   "/run/user/1000/ladybird-emacs.sock"))
+    (should (equal (ladybird-test-default-socket "/" nil) "/ladybird-emacs.sock"))
+    (should (equal (ladybird-test-default-socket "" "/var/tmp")
+                   (concat "/var/tmp/" name)))
+    (should (equal (ladybird-test-default-socket nil "/var/tmp/")
+                   (concat "/var/tmp/" name)))
+    (should (equal (ladybird-test-default-socket nil "")
+                   (concat "/tmp/" name)))
+    (should (equal (ladybird-test-default-socket "" nil)
+                   (concat "/tmp/" name)))
+    ;; A relative directory counts as unset.
+    (should (equal (ladybird-test-default-socket "run/user" "/var/tmp")
+                   (concat "/var/tmp/" name)))
+    (should (equal (ladybird-test-default-socket nil "tmp")
+                   (concat "/tmp/" name)))
+    (should (equal (ladybird-test-default-socket nil "~/tmp")
+                   (concat "/tmp/" name)))))
+
+(defmacro ladybird-test-with-runtime (&rest body)
+  "Run BODY with XDG_RUNTIME_DIR naming a new directory.
+`socket' is the endpoint of the default socket there and `listen' a
+function that makes a server listen on it."
+  (declare (indent 0) (debug t))
+  `(let* ((runtime (make-temp-file "ladybird-runtime" t))
+          (process-environment (cons (concat "XDG_RUNTIME_DIR=" runtime)
+                                     process-environment))
+          (socket (list :kind 'unix :path (ladybird-default-socket)))
+          (listen (lambda ()
+                    (make-network-process
+                     :name "ladybird-test-listener" :server t :family 'local
+                     :service (plist-get socket :path) :noquery t))))
+     (ignore listen)
+     (unwind-protect
+         (progn ,@body)
+       (dolist (process (process-list))
+         (when (string-prefix-p "ladybird-test-listener" (process-name process))
+           (delete-process process)))
+       (delete-directory runtime t))))
+
+(ert-deftest ladybird-conn-test-hosts-default-socket ()
+  ;; The local server is the one on the default socket when something
+  ;; of this user accepts connections there, else the program over stdio.
+  (ladybird-test-with-env
+    (ladybird-test-with-runtime
+      (let ((ladybird-hosts '(("one" . "ssh:one")))
+            (ladybird-program "ladybird-no-such-program"))
+        (should (equal (ladybird--hosts) '(("one" (:kind ssh :host "one")))))
+        (let ((ladybird-program "sh"))
+          (should (equal (car (ladybird--hosts)) '(nil (:kind local)))))
+        (let ((listener (funcall listen)))
+          (should (equal (ladybird--hosts)
+                         `((nil ,socket) ("one" (:kind ssh :host "one")))))
+          (let ((ladybird-program "sh"))
+            (should (equal (car (ladybird--hosts)) (list nil socket))))
+          (should (ladybird--shm-p socket))
+          ;; A socket of another user is not the local server.
+          (let ((uid (user-real-uid)))
+            (cl-letf (((symbol-function 'user-real-uid) (lambda () (1+ uid))))
+              (should (equal (ladybird--hosts) '(("one" (:kind ssh :host "one")))))))
+          ;; Nor is a socket file that nothing listens on.
+          (delete-process listener))
+        (should (file-exists-p (plist-get socket :path)))
+        (should (equal (ladybird--hosts) '(("one" (:kind ssh :host "one")))))
+        (let ((ladybird-program "sh"))
+          (should (equal (car (ladybird--hosts)) '(nil (:kind local)))))))))
+
+(defun ladybird-test-file-attributes (file n value)
+  "Return a `file-attributes' that gives FILE VALUE as its attribute N."
+  (let ((file-attributes (symbol-function 'file-attributes)))
+    (lambda (name &optional id-format)
+      (let ((attributes (funcall file-attributes name id-format)))
+        (if (equal name file)
+            (append (take n attributes) (list value) (nthcdr (1+ n) attributes))
+          attributes)))))
+
+(defun ladybird-test-owned-by-other (file)
+  "Return a `file-attributes' that makes FILE owned by another user."
+  (ladybird-test-file-attributes file 2 (1+ (user-real-uid))))
+
+(ert-deftest ladybird-conn-test-hosts-private-directory ()
+  ;; Outside XDG_RUNTIME_DIR the default socket counts only in a
+  ;; directory that this user owns and nobody else may enter, in a
+  ;; directory where nobody else can rename it.  TMPDIR is in /tmp, as
+  ;; the socket path under a long TMPDIR such as that of macOS would not
+  ;; fit a Unix socket address.
+  (ladybird-test-with-env
+    (let* ((temporary (make-temp-file "/tmp/ladybird-test" t))
+           (process-environment (append (list "XDG_RUNTIME_DIR=run"
+                                              (concat "TMPDIR=" temporary))
+                                        process-environment))
+           (path (ladybird-default-socket))
+           (directory (directory-file-name (file-name-directory path)))
+           (moved (concat temporary "/moved"))
+           (socket (list :kind 'unix :path path))
+           (ladybird-hosts nil)
+           (ladybird-program "ladybird-no-such-program"))
+      (unwind-protect
+          (progn
+            (should (equal directory (format "%s/ladybird-emacs-%d"
+                                             temporary (user-real-uid))))
+            (make-directory directory)
+            (set-file-modes directory #o700)
+            ;; The listener accepts no connection, so few probes reach it.
+            (make-network-process :name "ladybird-test-listener" :server t
+                                  :family 'local :service path :noquery t)
+            (should (equal (ladybird--hosts) `((nil ,socket))))
+            (set-file-modes directory #o750)
+            (should-not (ladybird--hosts))
+            (dolist (modes '(#o750 #o720 #o710 #o740 #o701 #o702 #o704))
+              (set-file-modes directory modes)
+              (should-not (ladybird--private-directory-p directory)))
+            (set-file-modes directory #o700)
+            (should (ladybird--private-directory-p directory))
+            (cl-letf (((symbol-function 'file-attributes)
+                       (ladybird-test-owned-by-other directory)))
+              (should-not (ladybird--private-directory-p directory)))
+            ;; The parent may be written to by its group or others only
+            ;; when sticky.
+            (dolist (modes '(#o777 #o770 #o730 #o703))
+              (set-file-modes temporary modes)
+              (should-not (ladybird--private-directory-p directory)))
+            (dolist (modes '(#o1777 #o755 #o700))
+              (set-file-modes temporary modes)
+              (should (ladybird--private-directory-p directory)))
+            (let ((parent (file-truename (file-name-as-directory temporary))))
+              (cl-letf (((symbol-function 'file-attributes)
+                         (ladybird-test-owned-by-other parent)))
+                (should-not (ladybird--private-directory-p directory)))
+              ;; A parent of root, such as /tmp, is fine.
+              (cl-letf (((symbol-function 'file-attributes)
+                         (ladybird-test-file-attributes parent 2 0)))
+                (should (ladybird--private-directory-p directory))))
+            ;; S and T are the setgid and sticky bits without x, s and t
+            ;; with it.
+            (dolist (modes '("drwx--S---" "drwx-----T" "drwx--S--T"))
+              (cl-letf (((symbol-function 'file-attributes)
+                         (ladybird-test-file-attributes directory 8 modes)))
+                (should (ladybird--private-directory-p directory))))
+            (dolist (modes '("drwx--s---" "drwx-----t" "lrwx------" "-rwx------"))
+              (cl-letf (((symbol-function 'file-attributes)
+                         (ladybird-test-file-attributes directory 8 modes)))
+                (should-not (ladybird--private-directory-p directory))))
+            ;; A link to a private directory is not one.
+            (rename-file directory moved)
+            (make-symbolic-link moved directory)
+            (should (file-exists-p path))
+            (should-not (ladybird--private-directory-p directory))
+            (should-not (ladybird--hosts))
+            (delete-file directory)
+            ;; Nor is a file.
+            (write-region "" nil directory nil 'silent)
+            (set-file-modes directory #o600)
+            (should-not (ladybird--private-directory-p directory)))
+        (dolist (process (process-list))
+          (when (string-prefix-p "ladybird-test-listener" (process-name process))
+            (delete-process process)))
+        (set-file-modes temporary #o700)
+        (delete-directory temporary t)))))
+
+(ert-deftest ladybird-conn-test-hosts-local-conn ()
+  ;; A connection to the local server keeps it, also while it is
+  ;; dialled again, and whichever server it found.
+  (ladybird-test-with-env
+    (ladybird-test-with-runtime
+      (let ((ladybird-program "sh"))
+        (funcall listen)
+        (let ((conn (ladybird--connect (car (ladybird--hosts)) #'ignore)))
+          (should (equal (ladybird--conn-endpoints conn) (list socket)))
+          (puthash 1 (current-buffer) (ladybird--conn-views conn))
+          (ladybird--drop conn)
+          (should (eq (ladybird--conn-state conn) 'redialing))
+          (dolist (process (process-list))
+            (when (string-prefix-p "ladybird-test-listener" (process-name process))
+              (delete-process process)))
+          (should (equal (car (ladybird--hosts)) (list nil socket)))
+          (should (eq (ladybird--find-conn (car (ladybird--hosts))) conn))
+          (ladybird--disconnect conn))
+        ;; A server over stdio stays the local one until a socket server
+        ;; appears; then new pages go to that, and a connection to it
+        ;; comes before the one over stdio.
+        (delete-file (plist-get socket :path))
+        (let ((conn (ladybird--connect (car (ladybird--hosts)) #'ignore)))
+          (should (equal (ladybird--conn-endpoints conn) '((:kind local))))
+          (should (equal (car (ladybird--hosts)) '(nil (:kind local))))
+          (should (eq (ladybird--find-conn (car (ladybird--hosts))) conn))
+          (should (= (length ladybird--conns) 1))
+          (let ((listener (funcall listen)))
+            (should (equal (car (ladybird--hosts)) (list nil socket)))
+            (let ((other (ladybird--connect (car (ladybird--hosts)) #'ignore)))
+              (should-not (eq other conn))
+              (should (eq (ladybird--local-conn) other))
+              (delete-process listener)
+              (should (equal (car (ladybird--hosts)) (list nil socket)))
+              (ladybird--disconnect other)))
+          (should (equal (car (ladybird--hosts)) '(nil (:kind local))))
+          (ladybird--disconnect conn)
+          (should (equal (car (ladybird--hosts)) '(nil (:kind local)))))
+        ;; The connection to the socket comes first also when the one
+        ;; over stdio is newer.
+        (delete-file (plist-get socket :path))
+        (let* ((listener (funcall listen))
+               (other (ladybird--connect (car (ladybird--hosts)) #'ignore))
+               (conn (ladybird--connect '(nil (:kind local)) #'ignore)))
+          (should (eq (car ladybird--conns) conn))
+          (should (eq (ladybird--local-conn) other))
+          (should (equal (car (ladybird--hosts)) (list nil socket)))
+          (delete-process listener)
+          (ladybird--disconnect other)
+          (should (eq (ladybird--local-conn) conn))
+          (ladybird--disconnect conn))))))
+
+(ert-deftest ladybird-conn-test-hosts-configured-default-socket ()
+  ;; A host of `ladybird-hosts' connected to the default socket is the
+  ;; local server; one that reached another of its endpoints is not.
+  (ladybird-test-with-env
+    (ladybird-test-with-runtime
+      (let* ((path (plist-get socket :path))
+             (ladybird-program "sh")
+             (ladybird-hosts `(("p" ,path "local")
+                               ("q" (:kind unix :path ,path :shm nil)))))
+        (let ((conn (cl-letf (((symbol-function 'ladybird--open-process)
+                               (lambda (endpoint)
+                                 (if (eq (plist-get endpoint :kind) 'unix)
+                                     (error "Cannot connect")
+                                   (ladybird-test-open endpoint)))))
+                      (ladybird--connect (assoc "p" (ladybird--hosts t)) #'ignore))))
+          (should (equal (ladybird--conn-dialed conn) '(:kind local)))
+          (should (equal (car (ladybird--hosts)) '(nil (:kind local))))
+          (should-not (eq (ladybird--find-conn (car (ladybird--hosts))) conn))
+          (ladybird--disconnect conn))
+        (dolist (label '("p" "q"))
+          (let ((conn (ladybird--connect (assoc label (ladybird--hosts t)) #'ignore)))
+            (should (equal (plist-get (ladybird--conn-dialed conn) :path) path))
+            (should (eq (ladybird--find-conn (car (ladybird--hosts))) conn))
+            (ladybird--disconnect conn)))))))
 
 (ert-deftest ladybird-conn-test-shm-p ()
   (should (ladybird--shm-p '(:kind local)))
@@ -1070,20 +1341,23 @@ session.  A canvas of the first frame's size is attached to view 1."
       (should (equal (reverse messages)
                      (list (concat "ladybird: the server on far exited with status 255"
                                    ": ssh: Could not resolve hostname far"
-                                   " (see buffer *ladybird-stderr*)")
+                                   " (see buffer \" *ladybird-stderr*\")")
                            (concat "ladybird: cannot reach far"
                                    ": ssh: Could not resolve hostname far"
-                                   " (see buffer *ladybird-stderr*)"))))
+                                   " (see buffer \" *ladybird-stderr*\")"))))
       (should-not (string-search "\n" (car messages))))
     ;; A server that wrote nothing: the old line of another one is not
     ;; taken for its message, and a long line is cut.
     (let ((conn (ladybird-test-connect)))
-      (should (equal (ladybird--stderr-summary conn) ""))
+      (should (equal (ladybird--stderr-summary (ladybird--conn-stderr-start conn))
+                     ""))
       (with-current-buffer ladybird--stderr-buffer
         (setf (ladybird--conn-stderr-start conn) (point-max))
         (goto-char (point-max))
         (insert (make-string 500 ?x) "\n"))
-      (should (< (length (ladybird--stderr-summary conn)) 260)))))
+      (should (< (length (ladybird--stderr-summary
+                          (ladybird--conn-stderr-start conn)))
+                 260)))))
 
 (ert-deftest ladybird-conn-test-shm-frames ()
   (skip-unless (not ladybird-test-native))
@@ -1141,7 +1415,7 @@ session.  A canvas of the first frame's size is attached to view 1."
          (decline (lambda () (push 'declined log)))
          (inhibit-message t))
     ;; Answered.
-    (ladybird--call-prompt (lambda () (setq ladybird--prompt-answered t)) decline)
+    (ladybird--call-prompt (lambda () (ladybird--note-answer nil)) decline)
     (should-not log)
     ;; A quit.
     (ladybird--call-prompt (lambda () (signal 'quit nil)) decline)
@@ -1163,18 +1437,27 @@ session.  A canvas of the first frame's size is attached to view 1."
     ;; Answered, and an error after that: no second answer.
     (setq log nil)
     (ladybird--call-prompt (lambda ()
-                             (setq ladybird--prompt-answered t)
+                             (ladybird--note-answer nil)
                              (error "Later"))
                            decline)
     (should-not log)
-    ;; Withdrawn by the server: closed without an answer.
-    (ladybird--call-prompt (lambda () (ladybird--cancel-prompt 'other) (push 'kept log))
+    ;; Withdrawn by the server: closed from a timer without an answer.
+    (ladybird--call-prompt (lambda ()
+                             (ladybird--cancel-prompt-later 'other)
+                             (push (ladybird-test-close-timer) log)
+                             (push 'kept log))
                            decline 'mine)
-    (should (equal log '(declined kept)))
+    (should (equal log '(declined kept nil)))
     (setq log nil)
-    (ladybird--call-prompt (lambda () (ladybird--cancel-prompt 'mine) (push 'not log))
+    (ladybird--call-prompt (lambda ()
+                             (ladybird--cancel-prompt-later 'mine)
+                             (let ((timer (ladybird-test-close-timer)))
+                               (push (and timer t) log)
+                               (when timer
+                                 (timer-event-handler timer)))
+                             (push 'not log))
                            decline 'mine)
-    (should-not log)
+    (should (equal log '(t)))
     ;; An error in the declining answer does not escape.
     (ladybird--call-prompt #'ignore (lambda () (error "Broken pipe")))))
 
@@ -1182,7 +1465,7 @@ session.  A canvas of the first frame's size is attached to view 1."
   (let ((log nil)
         (ladybird--queued-prompts nil))
     (let ((timer (ladybird--later (lambda ()
-                                    (setq ladybird--prompt-answered t)
+                                    (ladybird--note-answer nil)
                                     (push 'timer log)))))
       (should (timerp timer))
       (ladybird-test-run-timer timer)
@@ -1191,7 +1474,7 @@ session.  A canvas of the first frame's size is attached to view 1."
     ;; A prompt withdrawn before it opened never opens.
     (let ((timer (ladybird--later (lambda () (push 'opened log))
                                   (lambda () (push 'declined log)) 'key)))
-      (ladybird--cancel-prompt 'key)
+      (ladybird--cancel-prompt-later 'key)
       (ladybird-test-run-timer timer)
       (should (equal log '(timer))))))
 
@@ -1209,7 +1492,7 @@ session.  A canvas of the first frame's size is attached to view 1."
                  (timer-create))))
       (let ((enable-recursive-minibuffers nil))
         (ladybird--later (lambda ()
-                           (setq ladybird--prompt-answered t)
+                           (ladybird--note-answer 'key)
                            (push 'opened log))
                          (lambda () (push 'declined log)) 'key)
         (pcase-let ((`(,delay ,function ,args) (pop later)))
@@ -1580,6 +1863,97 @@ the state messages received, newest first."
   (skip-unless (executable-find "python3"))
   (ladybird-test-with-mock ("--reject")
     (should (eq (ladybird--conn-state conn) 'closed))))
+
+(ert-deftest ladybird-mock-test-takeover ()
+  ;; A connection that closes or says no valid hello first leaves the
+  ;; client of a server on a socket alone; a hello takes over.
+  :tags '(mock)
+  (skip-unless (executable-find "python3"))
+  (let* ((runtime (make-temp-file "ladybird-runtime" t))
+         (process-environment (cons (concat "XDG_RUNTIME_DIR=" runtime)
+                                    process-environment))
+         (socket (expand-file-name "mock.sock" runtime))
+         (log (make-temp-file "ladybird-mock" nil ".log"))
+         (ladybird--conns nil)
+         (ladybird--keepalive-timer nil)
+         (ladybird--frame-function #'ignore)
+         (ladybird--welcome-function #'ignore)
+         (ladybird--change-function #'ignore)
+         (ladybird--viewport-function (lambda () (list 64 48 1.0)))
+         (inhibit-message t)
+         (server (make-process
+                  :name "ladybird-test-mock" :buffer nil :noquery t
+                  :command (list "python3" "-I" ladybird-test-mock "--fps" "0"
+                                 "--log" log "--socket" socket)))
+         (count (lambda (type)
+                  (seq-count (lambda (m) (equal (alist-get 'type m) type))
+                             (ladybird-test-log log))))
+         (others nil)
+         (other (lambda (message)
+                  ;; A connection that sends MESSAGE, an alist or the
+                  ;; bytes of records, and returns what it read once the
+                  ;; server has closed it.
+                  (let* ((output "")
+                         (process (make-network-process
+                                   :name "ladybird-test-other" :family 'local
+                                   :service socket :coding 'binary :noquery t
+                                   :filter (lambda (_ string)
+                                             (setq output (concat output string))))))
+                    (push process others)
+                    (process-send-string
+                     process (if (stringp message)
+                                 message
+                               (ladybird--encode-record 1 (json-serialize message))))
+                    (with-timeout (10 (ert-fail "the server keeps the connection"))
+                      (while (process-live-p process)
+                        (accept-process-output process 0.05)))
+                    output)))
+         conn)
+    (unwind-protect
+        (progn
+          (with-timeout (10 (ert-fail "the mock server does not listen"))
+            (while (not (ladybird--socket-live-p socket))
+              (sleep-for 0.05)))
+          (setq conn (ladybird--connect
+                      (list "mock" (list :kind 'unix :path socket)) #'ignore))
+          (ladybird-test-wait conn (lambda () (ladybird--ready-p conn)))
+          (dotimes (_ 3)
+            (should (ladybird--socket-live-p socket)))
+          (should (string-search "the first message must be hello"
+                                 (funcall other '((type . "ping") (id . 1)))))
+          (should (string-search "unsupported protocol version"
+                                 (funcall other '((type . "hello") (protocol . 2)))))
+          ;; A framing error behind a record.
+          (should (string-search "framing error"
+                                 (funcall other (concat (ladybird--encode-record 2 "xx")
+                                                        (unibyte-string 0 0 0 0 1)))))
+          (ladybird--probe conn)
+          (ladybird-test-wait conn (lambda () (not (ladybird--conn-ping-timer conn))))
+          (should (ladybird--ready-p conn))
+          (should (= (funcall count "_connected") 1))
+          (should (= (funcall count "_disconnected") 0))
+          ;; A second client takes over.
+          (let ((second (make-network-process
+                         :name "ladybird-test-other" :family 'local
+                         :service socket :coding 'binary :noquery t
+                         :filter #'ignore)))
+            (push second others)
+            (process-send-string
+             second
+             (ladybird--encode-record
+              1 (json-serialize '((type . "hello") (protocol . 1)
+                                  (viewport . ((width . 80) (height . 24)
+                                               (dpr . 1.0)))
+                                  (encodings . ["raw"]) (shm . :false))))))
+          (ladybird-test-wait conn (lambda () (eq (ladybird--conn-state conn)
+                                                  'replaced)))
+          (ladybird-test-wait conn (lambda () (= (funcall count "_connected") 2)))
+          (should (= (funcall count "_disconnected") 1)))
+      (mapc #'delete-process others)
+      (mapc #'ladybird--disconnect ladybird--conns)
+      (delete-process server)
+      (delete-file log)
+      (delete-directory runtime t))))
 
 (ert-deftest ladybird-mock-test-exit ()
   :tags '(mock)

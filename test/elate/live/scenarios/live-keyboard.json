@@ -122,7 +122,7 @@
     {"keys": "C-c C-e"},
     {"assert": {"eval": "(ladybird-live-in-page ladybird-command-mode)"}},
     {"eval": "(setq ladybird-live-scratch (ladybird-live-number \"keys\"))"},
-    {"keys": "a", "delivery": "events"},
+    {"keys": "x", "delivery": "events"},
     {"eval": "(progn (sleep-for 0.3) t)"},
     {"assert": {"eval": "(= (ladybird-live-number \"keys\") ladybird-live-scratch)"}},
     {"assert": {"eval": "(ladybird-live-messages-p \"Keys are commands here; i sends them to the page again\")"}},

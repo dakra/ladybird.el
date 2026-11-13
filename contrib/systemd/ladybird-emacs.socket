@@ -1,0 +1,18 @@
+# The default socket of the Ladybird server for Emacs.  Install with
+#   mkdir -p ~/.config/systemd/user
+#   cp ladybird-emacs.socket ladybird-emacs.service ~/.config/systemd/user/
+# then, unless Ladybird is in /usr/local/bin or /usr/bin, set its full path in ExecStart of
+# ~/.config/systemd/user/ladybird-emacs.service, and enable the socket:
+#   systemctl --user enable --now ladybird-emacs.socket
+# Run systemctl --user daemon-reload after editing the installed units.
+
+[Unit]
+Description=Ladybird server for Emacs (socket)
+
+[Socket]
+ListenStream=%t/ladybird-emacs.sock
+SocketMode=0600
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

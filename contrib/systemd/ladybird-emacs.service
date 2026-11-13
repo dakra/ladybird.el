@@ -1,0 +1,10 @@
+# Started by ladybird-emacs.socket on the first connection.  A command without a slash is looked up in
+# /usr/local/bin, /usr/bin and the like; give the full path of Ladybird when it is elsewhere.
+
+[Unit]
+Description=Ladybird server for Emacs
+Requires=ladybird-emacs.socket
+After=ladybird-emacs.socket
+
+[Service]
+ExecStart=Ladybird --headless=emacs --emacs-socket-activation

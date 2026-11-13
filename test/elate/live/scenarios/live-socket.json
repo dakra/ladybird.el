@@ -1,6 +1,6 @@
 {
   "name": "live-socket",
-  "comment": "A server on a socket outlives its clients: a page left there is found again with what was typed into it, a second client detaches this one until it reconnects, and a server that is restarted is dialled again and shows the page anew.",
+  "comment": "A server on a socket outlives its clients: a page left there is found again with what was typed into it, a second client takes over from this one until it reconnects, and a server that is restarted is dialled again and shows the page anew.",
   "params": {"server": "socket"},
   "variants": {"socket": {"server": "socket"}, "forward": {"server": "forward"}},
   "defaults": {"timeout": 20},
@@ -29,10 +29,10 @@
     {"type": " on"},
     {"wait": "until", "pred": "(equal (ladybird-live-field \"value\") \"kept on\")", "comment": "and typing goes on"},
 
-    {"group": "replaced", "comment": "a second client detaches this one, which takes the page back on request"},
+    {"group": "replaced", "comment": "a second client takes over from this one, which takes the page back on request"},
     {"eval": "(progn (ladybird-live-intrude) t)"},
     {"wait": "until", "pred": "(eq (ladybird--conn-state (ladybird-live-conn)) (quote replaced))"},
-    {"assert": {"eval": "(string-suffix-p \" [detached]\" (ladybird-live-header))"}},
+    {"assert": {"eval": "(string-suffix-p \" [taken over]\" (ladybird-live-header))"}},
     {"assert": {"eval": "(ladybird-live-messages-p \"ladybird: another client took over live\")"}},
     {"eval": "(progn (sleep-for 1.5) t)"},
     {"assert": {"eval": "(eq (ladybird--conn-state (ladybird-live-conn)) (quote replaced))"}, "comment": "it does not dial again by itself"},
