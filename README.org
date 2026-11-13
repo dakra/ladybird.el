@@ -20,9 +20,10 @@ of [[file:plans/01-protocol.md][plans/01-protocol.md]], is under development on 
 The two are run together by the live test matrix (see Testing): a macOS server on this
 machine over standard input and output and over a Unix socket, with frames in shared
 memory, and a Linux server in a virtual machine over ssh and over an ssh-forwarded
-socket, with frames in the stream.  The matrix runs at a device pixel ratio of 1; a
-ratio of 2 is checked by hand on a Retina display.  Not tested: TCP, Emacs on Linux and
-a server on a machine across a real network.
+socket, with frames in the stream; the same server started by systemd socket activation
+in a user session answers on the default socket.  The matrix runs at a device pixel
+ratio of 1; a ratio of 2 is checked by hand on a Retina display.  Not tested: TCP, Emacs
+on Linux and a server on a machine across a real network.
 
 =tools/mock-server.py= stands in for the server in the tests: it draws a test gradient,
 marks mouse presses and typed keys, draws hint labels, and answers the protocol's
