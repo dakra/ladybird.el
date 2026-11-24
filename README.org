@@ -1,12 +1,10 @@
-#+TITLE: ladybird — Ladybird pages in an Emacs canvas
+#+TITLE: ladybird.el - Ladybird pages in an Emacs canvas
 
-=ladybird= shows web pages rendered by the [[https://ladybird.org][Ladybird]] browser in an Emacs buffer.  A Ladybird
+=ladybird.el= shows web pages rendered by the [[https://ladybird.org][Ladybird]] browser in an Emacs buffer.  A Ladybird
 server process renders the page and sends the changed pixels; a native module paints
 them into an Emacs 32 canvas image; the mouse, the wheel and the keyboard go back to the
 page.  The server can run on this machine or on another one, and with a socket its pages
 outlive the Emacs that shows them.
-
-=ladybird= is a working name.
 
 * Status
 
@@ -14,8 +12,8 @@ The Emacs side is in this repository: the Lisp package, the native module, a moc
 and the tests.
 
 The Ladybird side, a headless mode =Ladybird --headless=emacs= that speaks the protocol
-of [[file:plans/01-protocol.md][plans/01-protocol.md]], is under development on a branch of Ladybird named
-=emacs-headless= and is in no Ladybird release.
+of [[file:plans/01-protocol.md][plans/01-protocol.md]], is under development on the =emacs-headless= branch of the fork
+[[https://github.com/dakra/ladybird][dakra/ladybird]] and is in no Ladybird release.
 
 The two are run together by the live test matrix (see Testing): a macOS server on this
 machine over standard input and output and over a Unix socket, with frames in shared
@@ -60,12 +58,16 @@ the server's machine), downloads, bookmarks and profiles.
 
 - Emacs 32 with canvas images and dynamic modules.
 - The native module, built with Zig 0.17 (=make build=).
-- A server: Ladybird built from its =emacs-headless= branch, or the mock server, which
-  needs Python 3.11 or later.
+- A server: Ladybird built from the =emacs-headless= branch of [[https://github.com/dakra/ladybird][dakra/ladybird]] (see
+  Building), or the mock server, which needs Python 3.11 or later.
 
 * Building
 
+** The package
+
 #+begin_src sh
+git clone https://github.com/dakra/ladybird.el
+cd ladybird.el
 make build      # ladybird-module.dylib or .so next to the Makefile
 make test       # Zig tests, module tests in Emacs, ERT tests of the package
 #+end_src
@@ -74,16 +76,44 @@ Put =lisp/= on the =load-path=.  The module is looked for next to the Lisp files
 the directory above them; =ladybird-module-directory= names another place.
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "/path/to/ladybird/lisp")
+(add-to-list 'load-path "/path/to/ladybird.el/lisp")
 (require 'ladybird)
+#+end_src
+
+** The server
+
+An upstream Ladybird does not have the headless mode the package talks to; build the fork
+on the machine that is to run the server, this one or another:
+
+#+begin_src sh
+git clone --branch emacs-headless https://github.com/dakra/ladybird
+cd ladybird
+./Meta/ladybird.py build
+#+end_src
+
+The dependencies are those of Ladybird, listed for each system in its [[https://github.com/dakra/ladybird/blob/emacs-headless/Documentation/BuildInstructionsLadybird.md][build instructions]];
+on macOS they include Xcode, everywhere a Rust toolchain from rustup.  The first build also
+builds the third-party libraries, takes long and needs some 20 GB of disk space.
+
+| System | Program, below the checkout                              |
+|--------+----------------------------------------------------------|
+| Linux  | =Build/release/bin/Ladybird=                             |
+| macOS  | =Build/release/bin/Ladybird.app/Contents/MacOS/Ladybird= |
+
+It runs from the build directory, whose libraries and helper programs it uses.  The branch
+is rebased onto upstream from time to time, so update a checkout with
+
+#+begin_src sh
+git fetch && git reset --hard origin/emacs-headless   # discards local changes
+./Meta/ladybird.py build
 #+end_src
 
 * Quick start
 
-With a Ladybird that has the headless mode:
+With the Ladybird of the fork:
 
 #+begin_src emacs-lisp
-(setq ladybird-program "/path/to/Ladybird")
+(setq ladybird-program "/path/to/ladybird/Build/release/bin/Ladybird")
 ;; M-x ladybird RET https://ladybird.org RET
 #+end_src
 
@@ -102,7 +132,7 @@ With the mock server, which ends with its connection:
 
 #+begin_src emacs-lisp
 (setq ladybird-hosts
-      '(("mock" :command ("python3" "-I" "/path/to/ladybird/tools/mock-server.py")))
+      '(("mock" :command ("python3" "-I" "/path/to/ladybird.el/tools/mock-server.py")))
       ladybird-default-host "mock")
 ;; M-x ladybird RET mock://start RET
 #+end_src
