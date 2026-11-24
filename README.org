@@ -22,8 +22,9 @@ machine over standard input and output and over a Unix socket, with frames in sh
 memory, and a Linux server in a virtual machine over ssh and over an ssh-forwarded
 socket, with frames in the stream; the same server started by systemd socket activation
 in a user session answers on the default socket.  The matrix runs at a device pixel
-ratio of 1; a ratio of 2 is checked by hand on a Retina display.  Not tested: TCP, Emacs
-on Linux and a server on a machine across a real network.
+ratio of 1; a ratio of 2 is checked by hand on a Retina display.  A server across the
+internet, reached as =/ssh:HOST:/PATH=, is checked by hand.  Not tested: TCP and Emacs on
+Linux.
 
 =tools/mock-server.py= stands in for the server in the tests: it draws a test gradient,
 marks mouse presses and typed keys, draws hint labels, and answers the protocol's
@@ -94,7 +95,7 @@ buffer again, =M-x ladybird-attach= only the page picked.  In a page buffer =C-c
 detaches, killing the page buffers of the server and leaving their pages there, and
 =M-x ladybird-attach= (=C-c C-a= in a page buffer) attaches them again; killing a page
 buffer closes its page.  A server on another machine keeps its pages the same way, reached
-through a socket that =ssh -L= forwards (see [[*Other hosts]]).  =n= instead starts a
+through its socket over ssh (see [[*Other hosts]]).  =n= instead starts a
 server for this Emacs alone, over standard input and output, whose pages end with Emacs.
 
 With the mock server, which ends with its connection:
@@ -126,7 +127,7 @@ A server keeps its pages for as long as it runs.  One that listens on a socket k
 running when its connection ends, by a detach, a lost connection, quitting Emacs or a
 crash of Emacs, and the next connection to it gives its pages buffers again.  The usual
 one is this machine's server on the default socket, started in the background; a server
-on another machine is reached through a forwarded socket.  A server over standard input
+on another machine is reached through its socket over ssh.  A server over standard input
 and output, here or over ssh, lives as long as its connection, so its pages end with Emacs
 or with the ssh session: the throwaway option.
 
@@ -255,8 +256,8 @@ server, hidden and without a buffer.  A connection left without a page buffer, a
 =C-g= or with nothing to attach, closes again unless it had page buffers before.  It
 starts no server and dials only a host's socket endpoints: with nothing on the default
 socket, a host without a socket endpoint that is not connected, or a socket nothing
-listens on, it says "No server on ...".  A server whose pages all have buffers, or one
-without pages, is only reported.
+listens on, it says "No server on ...", and for a socket reached by ssh "cannot reach ...".
+A server whose pages all have buffers, or one without pages, is only reported.
 
 =M-x ladybird-connect= reads a host and connects without opening a page.  It gives every
 page the server has open a buffer, also on a connection that is open already, and shows
@@ -273,6 +274,8 @@ endpoints, tried in order:
 | ="local"=                              | =ladybird-program= as a local process            |
 | ="ssh:HOST"=, ="ssh://USER@HOST:PORT"= | =ladybird-program= on HOST, run by =ssh -T=      |
 | ="/PATH"=, ="unix:///PATH"=            | a Unix socket                                  |
+| ="/ssh:HOST:/PATH"=                    | a Unix socket on HOST, through =ssh -W=          |
+| ="/ssh:USER@HOST#PORT:/PATH"=          | the same with a user, a port or both           |
 | ="tcp://HOST:PORT"=                    | a TCP port, unauthenticated                    |
 | ="tls://HOST:PORT"=                    | a TCP port with TLS                            |
 | =(:ssh HOST :program P :args LIST)=    | ssh with another program or arguments          |
@@ -280,9 +283,14 @@ endpoints, tried in order:
 | =(:kind unix :path PATH :shm nil)=     | a Unix socket, without shared memory           |
 
 #+begin_src emacs-lisp
-(setq ladybird-hosts '(("devbox" . "ssh://devbox")
-                     ("work" "/tmp/work.sock" "tcp://work.tailnet.example:7070")))
+(setq ladybird-hosts '(("devbox" . "/ssh:devbox:/run/user/1000/ladybird-emacs.sock")
+                     ("work" "/tmp/work.sock"
+                      "/ssh:work:/run/user/1000/ladybird-emacs.sock")
+                     ("scratch" :ssh "devbox" :program "/opt/ladybird/bin/Ladybird")))
 #+end_src
+
+The Ladybird server does not listen on TCP; =tcp://= and =tls://= need something in front
+of its socket, and whoever reaches that port controls the browser.
 
 =M-x ladybird= opens on =ladybird-default-host=: the local server, a label, or =ask=, and
 without a local server the first host.  With a prefix argument it asks.  A host of
@@ -290,14 +298,25 @@ without a local server the first host.  With a prefix argument it asks.  A host 
 is neither started nor replaced by a local server, and one that cannot be reached is an
 error.
 
-For pages that outlive Emacs on another machine, start the server there in the
-background and forward its socket:
+For pages that outlive Emacs on another machine, run the server there on a socket, with
+the systemd units above or in the background:
 
 #+begin_src sh
 # on devbox, or as ssh devbox Ladybird ... from here
-Ladybird --headless=emacs --emacs-socket=/run/user/1000/ladybird.sock --emacs-background
-# here
-ssh -N -o StreamLocalBindUnlink=yes -L /tmp/devbox.sock:/run/user/1000/ladybird.sock devbox
+Ladybird --headless=emacs --emacs-socket=/run/user/1000/ladybird-emacs.sock --emacs-background
+#+end_src
+
+and name the socket as a remote file, =/ssh:devbox:/run/user/1000/ladybird-emacs.sock=.
+PATH is absolute and taken literally; HOST can be an alias of =~/.ssh/config=, which an IPv6
+address needs, and a host of a tailnet is one like any other as long as it runs sshd.  ssh
+has no terminal here: a password or passphrase it needs is asked for by askpass, again on
+every redial.  The server's sshd must allow stream forwarding.  A
+connection that is lost is dialled again as for any socket.
+
+A socket that =ssh -L= forwards works too:
+
+#+begin_src sh
+ssh -N -o StreamLocalBindUnlink=yes -L /tmp/devbox.sock:/run/user/1000/ladybird-emacs.sock devbox
 #+end_src
 
 With systemd-logind, =/run/user/1000= is removed with the last session of the user, and
@@ -331,10 +350,22 @@ host.  For any other server, file names are asked for as paths on the server's m
 
 ** Servers over standard input and output
 
-The =local= and =ssh:= endpoints, =:command= and the local server with
+The =local=, =ssh:HOST= and =(:ssh HOST ...)= endpoints, =:command= and the local server with
 =ladybird-autostart-server= nil or a no for an answer run the server over its standard
 input and output: =PROGRAM --headless=emacs= here or on the ssh host.  For the local
 server the echo area says once for that connection that its pages end with Emacs.
+
+To try a server on another machine without setting anything up there, name its program,
+which ssh starts and which ends with the connection:
+
+#+begin_src emacs-lisp
+(setq ladybird-hosts
+      '(("scratch" :ssh "devbox" :program "/opt/ladybird/bin/Ladybird")))
+#+end_src
+
+Without =:program= it is =ladybird-program= that runs on the other machine, and without
+=:args= it gets =ladybird-program-arguments=; a =ladybird-program= that is a path on this
+machine seldom exists there.
 
 While a connection to the local server over a socket is open or being dialled again, new
 pages go to that server, wherever it was found.  A server on the default socket comes
@@ -357,9 +388,10 @@ whose buffer was killed meanwhile is closed once the connection is back.  A ques
 page that is open when the connection is lost stays open until it is back, then closes
 and is asked again if the page still waits for it; an answer given meanwhile is lost.
 The delays start at one second again after a connection has lasted ten seconds.  A
-local or ssh server that exited by itself is reported with its exit status and started
-again only with =ladybird-reconnect= set to =always=.  When another client takes the
-server over the buffers show =[taken over]=, and =M-x ladybird-reconnect= takes it back.
+server over standard input and output that exited by itself is reported with its exit
+status and started again only with =ladybird-reconnect= set to =always=.  When another
+client takes the server over the buffers show =[taken over]=, and
+=M-x ladybird-reconnect= takes it back.
 
 A server is pinged after =ladybird-keepalive-interval= seconds of silence and its
 connection dropped when no answer comes within =ladybird-ping-timeout=.
@@ -635,7 +667,7 @@ Elsewhere the default is nil.
 |-----------------------------------+--------------------+---------------------------------------------------|
 | =ladybird-program=                  | ="Ladybird"=       | the local server's program                        |
 | =ladybird-program-arguments=        | nil                | further arguments for it                          |
-| =ladybird-ssh-program=              | ="ssh"=            | program that runs a remote server                 |
+| =ladybird-ssh-program=              | ="ssh"=            | program that reaches a remote server              |
 | =ladybird-hosts=                    | nil                | other servers                                     |
 | =ladybird-default-host=             | nil                | where =ladybird= opens pages                        |
 | =ladybird-autostart-server=         | =ask=              | start a server on the default socket: t, =ask=, nil |

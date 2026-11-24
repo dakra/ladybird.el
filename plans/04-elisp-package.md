@@ -64,7 +64,7 @@ of a canvas, and tests substitute the fake module.
 | `ladybird-hosts` | `nil` | Alist `(LABEL . ENDPOINT)` or `(LABEL ENDPOINT...)` tried in order; see 3.1 for the endpoint syntax. The local server has label `nil` and is always offered. |
 | `ladybird-default-host` | `nil` | Label used without prompting; `nil` = local; `ask` = prompt when several hosts exist. |
 | `ladybird-autostart-server` | `ask` | When the local server would be `ladybird-program` over stdio because nothing accepts connections on the default socket and no connection to the local server is open: `t` runs `ladybird-start-server`, `ask` asks with `y-or-n-p`, `nil` (or no, or `ask` in batch Emacs) keeps stdio and says once per connection that its pages end with Emacs. Not consulted for hosts of `ladybird-hosts` or for a redial. |
-| `ladybird-ssh-program` | `"ssh"` | with `-T` added. |
+| `ladybird-ssh-program` | `"ssh"` | with `-T` added, and `-W PATH` for a socket on another machine. |
 | `ladybird-home-url` | `"about:blank"` | URL of `ladybird` without argument. |
 | `ladybird-device-pixel-ratio` | `1.0` on NS, else `nil` | `nil` = `(frame-scale-factor)`; a number overrides (1.0 renders in logical pixels, no `:scale` in the spec). On NS `nil` needs an Emacs with the canvas transform patch (03 §7). |
 | `ladybird-resize-delay` | `0.05` | Seconds the viewport resize is debounced. |
@@ -168,6 +168,7 @@ item 13): every character from `SPC` up → `ladybird-hint-add-char`, `DEL` and
 | --- | --- | --- |
 | `local` or `nil` host | `local` | `make-process :command (list program "--headless=emacs" args…) :connection-type 'pipe :coding 'binary :noquery t :stderr (get-buffer-create " *ladybird-stderr*")`. The server logs to a file (protocol section 1), stderr stays empty but is captured for diagnostics. |
 | `ssh:HOST` or `ssh://USER@HOST` | `ssh` | `make-process :command (list ssh "-T" host "exec" program "--headless=emacs" …)`, same options; `ladybird-hosts` may give `(:ssh HOST :program PATH :args LIST)` as the plist form. |
+| `/ssh:HOST:/PATH` or `/ssh:USER@HOST#PORT:/PATH` | `ssh` with `:path` | `make-process :command (list ssh "-T" "-p" port "-W" path host)`, same options, `-p` only with a port and `\` and `:` of the path escaped for ssh. The server is on a socket: it keeps its pages, and any exit of ssh is a lost connection. |
 | absolute path, `unix:///path` | `unix` | `make-network-process :family 'local :service PATH :coding 'binary :noquery t`. |
 | `tcp://HOST:PORT` | `tcp` | `open-network-stream NAME nil HOST PORT :type 'plain :nowait t :coding 'binary` |
 | `tls://HOST:PORT` | `tls` | same with `:type 'tls` (as `rexel--open-network`, `rexel.el` line 262; strip `[]` from IPv6 hosts; a status of `failed` right after the call is an error). |
@@ -197,7 +198,7 @@ be an `ssh -L` forward, so a failing `ladybird-module-set-shm` (or a mapped size
 error; an endpoint plist with `:shm nil` skips the attempt. Note in the README: over `ssh` stdio the server dies with the ssh session, so
 sessions that must survive Emacs need `--emacs-socket` on the remote host and
 `ssh -N -o StreamLocalBindUnlink=yes -L /tmp/devbox.sock:/run/user/1000/ladybird.sock devbox`
-(the pattern of rexel's README "ssh" section) or the TCP listener on a tailnet.
+(the pattern of rexel's README "ssh" section) or a `/ssh:HOST:/PATH` endpoint.
 
 ### 3.2 Data structures
 
@@ -262,7 +263,7 @@ any   --ladybird-disconnect--> closed
 - Sentinel `ladybird--sentinel`: on `exit`/`failed`/`closed`: if state was `ready` or
   `redialing` and `ladybird-reconnect` and the conn has views → `ladybird--reconnect` (backoff
   like `rexel--reconnect`, `rexel.el` line 460); otherwise closed. ssh exit code 255 is a
-  connection failure (redial); another non-zero code from a local/ssh process means the
+  connection failure (redial); another non-zero code from a local/ssh stdio process means the
   server itself exited: message the last lines of the stderr buffer and the exit code,
   redial only if `ladybird-reconnect` is `always` (third value of the option).
 - `ladybird--reconnect` doubles `delay` to a maximum of 30 s; the header line of every
@@ -1072,7 +1073,7 @@ Protocol feedback (for `plans/01-protocol.md`):
     field in `hello` now so v1 clients can send it harmlessly later (unknown keys are
     ignored).
 13. **ssh stdio lifetime**: document that a stdio server dies with its ssh session, so
-    detach-and-resume needs the socket or TCP listener.
+    detach-and-resume needs the socket.
 
 ## 9. Size estimate
 

@@ -5163,6 +5163,24 @@ running with 1 page, which `ladybird-attach' or `ladybird-connect' shows again")
                      '("ladybird: no page is open here on test; its server keeps \
 running until it is stopped where it runs"))))))
 
+(ert-deftest ladybird-render-test-last-page-on-ssh-socket ()
+  ;; A socket reached by ssh is treated like any other socket.
+  (ladybird-render-test-with-view
+    (setf (ladybird--conn-dialed conn) '(:kind ssh :host "h" :path "/s"))
+    (should (equal (ladybird-render-test-messages (kill-buffer buffer))
+                   '("ladybird: no page is open here on test; its server keeps \
+running until it is stopped where it runs")))
+    (should (process-live-p (ladybird--conn-process conn)))
+    (should (timerp (ladybird--conn-lingering conn))))
+  (ladybird-test-with-env
+    (let ((conn (ladybird-test-connect '("a" (:kind ssh :host "h" :path "/s")))))
+      (ladybird--attach-end conn)
+      (should (memq conn ladybird--conns))
+      (should (timerp (ladybird--conn-lingering conn))))
+    (let ((conn (ladybird-test-connect '("b" (:kind ssh :host "h")))))
+      (ladybird--attach-end conn)
+      (should-not (memq conn ladybird--conns)))))
+
 (ert-deftest ladybird-render-test-switch-to-page ()
   ;; C-c C-s reads a page by its title and URL.
   (ladybird-render-test-with-view

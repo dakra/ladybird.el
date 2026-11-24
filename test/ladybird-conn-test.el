@@ -257,6 +257,10 @@ The server holds up to 16 views."
                          :args ("--x"))))
   (should (equal (ladybird--parse-endpoint "/tmp/ladybird.sock")
                  '(:kind unix :path "/tmp/ladybird.sock")))
+  (should (equal (ladybird--parse-endpoint "/ssh:devbox:/run/user/1000/lb.sock")
+                 '(:kind ssh :host "devbox" :path "/run/user/1000/lb.sock")))
+  (should (equal (ladybird--parse-endpoint "/ssh:me@devbox#2222:/a b:c")
+                 '(:kind ssh :host "me@devbox" :port 2222 :path "/a b:c")))
   (should (equal (ladybird--parse-endpoint "unix:///a%20b")
                  '(:kind unix :path "/a b")))
   (should (equal (ladybird--parse-endpoint "tcp://devbox:9000")
@@ -269,7 +273,11 @@ The server holds up to 16 views."
                  '(:kind unix :path "/s" :shm nil)))
   (dolist (bad '("" "devbox" "relative/path" "tcp://devbox" "tcp://:9000"
                  "tls://devbox:port" "http://devbox:80" "unix://relative"
-                 "ssh:" "ssh://" (:kind tcp :host "x") (:kind bogus)
+                 "ssh:" "ssh://" "/ssh:devbox" "/ssh:devbox:" "/ssh::/s"
+                 "/ssh:devbox:relative" "/ssh:devbox#x:/s" "/ssh:-oX=y:/s"
+                 "/ssh:a|sudo:b:/s" "/ssh:a b:/s" "/ssh:a\n:/s" "/ssh:[::1]:/s"
+                 (:kind ssh :host "h" :path 42) (:kind ssh :host "h" :path "rel")
+                 (:ssh "h" :path "") (:kind tcp :host "x") (:kind bogus)
                  (:ssh) (:command "python3") 42))
     (should-not (ladybird--parse-endpoint bad))))
 
@@ -549,6 +557,7 @@ function that makes a server listen on it."
   (should (ladybird--shm-p '(:kind unix :path "/s")))
   (should-not (ladybird--shm-p '(:kind unix :path "/s" :shm nil)))
   (should-not (ladybird--shm-p '(:kind ssh :host "h")))
+  (should-not (ladybird--shm-p '(:kind ssh :host "h" :path "/s")))
   (should-not (ladybird--shm-p '(:kind tcp :host "h" :port 1)))
   (should-not (ladybird--shm-p '(:kind tls :host "h" :port 1))))
 
@@ -560,6 +569,12 @@ function that makes a server listen on it."
                    '("--headless=emacs" "--a b")))
     (should (equal (ladybird--server-command '(:kind local :command ("x" "y")))
                    '("x" "y")))
+    (should (equal (ladybird--server-command
+                    '(:kind ssh :host "me@box" :port 22 :path "/a b"))
+                   '("ssh" "-T" "-p" "22" "-W" "/a b" "me@box")))
+    (should (equal (ladybird--server-command
+                    '(:kind ssh :host "box" :path "/a:b\\c"))
+                   '("ssh" "-T" "-W" "/a\\:b\\\\c" "box")))
     (should (equal (ladybird--server-command '(:kind ssh :host "me@box" :port 22))
                    '("ssh" "-T" "-p" "22" "me@box" "exec" "sh"
                      "--headless\\=emacs" "--a\\ b")))
@@ -1076,14 +1091,37 @@ session.  A canvas of the first frame's size is attached to view 1."
       (ladybird--connect ladybird-test-host #'ignore)
       (should (eq (ladybird--conn-state conn) 'hello)))))
 
+(ert-deftest ladybird-conn-test-endpoint-keeps-pages ()
+  (dolist (case '(((:kind local) . nil)
+                  ((:kind ssh :host "h") . nil)
+                  ((:kind ssh :host "h" :path "/s") . t)
+                  ((:kind unix :path "/s") . t)))
+    (should (eq (ladybird--endpoint-keeps-pages-p (car case)) (cdr case))))
+  (should (equal (ladybird--endpoint-name
+                  '(:kind ssh :host "me@h" :port 22 :path "/s"))
+                 "/ssh:me@h#22:/s")))
+
+(ert-deftest ladybird-conn-test-socket-p ()
+  (ladybird-test-with-env
+    (should (ladybird--conn-socket-p
+             (ladybird-test-connect '("a" (:kind ssh :host "h" :path "/s")))))
+    (should-not (ladybird--conn-socket-p
+                 (ladybird-test-connect '("b" (:kind ssh :host "h")))))
+    (cl-letf (((symbol-function 'process-type) (lambda (_) 'network)))
+      (should (ladybird--conn-socket-p (ladybird-test-connect))))))
+
 (ert-deftest ladybird-conn-test-server-exit ()
   (ladybird-test-with-env
     (dolist (case '((t "exit 3" local closed)
                     (always "exit 3" local redialing)
                     (t "exit 255" ssh redialing)
-                    (t "exit 1" ssh closed)))
-      (pcase-let* ((`(,ladybird-reconnect ,script ,kind ,state) case)
-                   (host (list (format "%S" case) (list :kind kind :host "h")))
+                    (t "exit 1" ssh closed)
+                    (t "exit 0" ssh redialing :path "/s")
+                    (t "exit 255" ssh redialing :path "/s")
+                    (nil "exit 255" ssh closed :path "/s")))
+      (pcase-let* ((`(,ladybird-reconnect ,script ,kind ,state . ,rest) case)
+                   (host (list (format "%S" case)
+                               `(:kind ,kind :host "h" ,@rest)))
                    (conn nil))
         (cl-letf (((symbol-function 'ladybird--open-process)
                    (lambda (_endpoint)

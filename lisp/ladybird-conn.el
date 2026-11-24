@@ -69,7 +69,7 @@ over its standard input and output and ends with Emacs."
   :type '(repeat string))
 
 (defcustom ladybird-ssh-program "ssh"
-  "Program that runs a server on another machine."
+  "Program that reaches a server on another machine."
   :type 'string)
 
 (defcustom ladybird-hosts nil
@@ -81,6 +81,8 @@ a host are tried in order.  An endpoint is a string
   \"ssh:HOST\", \"ssh://USER@HOST:PORT\"
                             `ladybird-program' on HOST, run by ssh
   \"/PATH\", \"unix:///PATH\"   a Unix socket
+  \"/ssh:HOST:/PATH\", \"/ssh:USER@HOST#PORT:/PATH\"
+                            a Unix socket on HOST, reached by ssh
   \"tcp://HOST:PORT\"         a TCP port
   \"tls://HOST:PORT\"         a TCP port, with TLS
 
@@ -208,11 +210,23 @@ The length field counts the kind byte and the payload."
             :host (string-trim host "\\[" "\\]")
             :port (string-to-number port)))))
 
+(defun ladybird--parse-remote (name)
+  "Return the endpoint of the remote file name NAME, or nil if malformed.
+NAME is /ssh:HOST:/PATH or /ssh:USER@HOST#PORT:/PATH."
+  (when (string-match
+         "\\`/ssh:\\([^]/:#[:space:][-][^]/:#[:space:][]*\\)\\(?:#\\([0-9]+\\)\\)?:\\(/.+\\)\\'" name)
+    `(:kind ssh :host ,(match-string 1 name)
+            ,@(when-let* ((port (match-string 2 name)))
+                (list :port (string-to-number port)))
+            :path ,(match-string 3 name))))
+
 (defun ladybird--parse-endpoint (endpoint)
   "Return ENDPOINT as a plist (:kind KIND ...), or nil if it is malformed.
 ENDPOINT is a string or plist as in `ladybird-hosts'."
   (pcase endpoint
     ((or 'nil "local") (list :kind 'local))
+    ((and (pred stringp) (pred (string-prefix-p "/ssh:")))
+     (ladybird--parse-remote endpoint))
     ((and (pred stringp) (pred (string-prefix-p "/")))
      (list :kind 'unix :path endpoint))
     ((and (pred stringp) (pred (string-prefix-p "unix://")))
@@ -231,14 +245,17 @@ ENDPOINT is a string or plist as in `ladybird-hosts'."
              ,@(when-let* ((port (match-string 2 endpoint)))
                  (list :port (string-to-number port)))))
     ((and `(:ssh ,(and host (pred stringp)) . ,rest) (guard (plistp rest)))
-     `(:kind ssh :host ,host ,@rest))
+     (ladybird--parse-endpoint `(:kind ssh :host ,host ,@rest)))
     ((and `(:command ,(and command `(,(pred stringp) . ,_)) . ,rest)
           (guard (plistp rest)))
      `(:kind local :command ,command ,@rest))
     ((and `(:kind ,kind . ,_) (guard (plistp endpoint)))
      (and (pcase kind
             ('local t)
-            ('ssh (stringp (plist-get endpoint :host)))
+            ('ssh (and (stringp (plist-get endpoint :host))
+                       (let ((path (plist-get endpoint :path)))
+                         (or (null path)
+                             (and (stringp path) (string-prefix-p "/" path))))))
             ('unix (stringp (plist-get endpoint :path)))
             ((or 'tcp 'tls) (and (stringp (plist-get endpoint :host))
                                  (integerp (plist-get endpoint :port)))))
@@ -312,15 +329,24 @@ directory fails `ladybird--private-directory-p'."
 
 (defun ladybird--endpoint-keeps-pages-p (endpoint)
   "Return non-nil if the server at ENDPOINT keeps its pages without a client.
-A server on a socket does; one over standard input and output, here
-or over ssh, ends with its connection."
-  (memq (plist-get endpoint :kind) '(unix tcp tls)))
+A server on a socket does, also on one reached by ssh; one over
+standard input and output, here or over ssh, ends with its connection."
+  (pcase (plist-get endpoint :kind)
+    ((or 'unix 'tcp 'tls) t)
+    ('ssh (and (plist-get endpoint :path) t))))
 
 (defun ladybird--conn-keeps-pages-p (conn)
   "Return non-nil if CONN's server keeps its pages when CONN closes.
 See `ladybird--endpoint-keeps-pages-p'."
   (ladybird--endpoint-keeps-pages-p (or (ladybird--conn-dialed conn)
                                         (car (ladybird--conn-endpoints conn)))))
+
+(defun ladybird--conn-socket-p (conn)
+  "Return non-nil if CONN's process is a socket, here or reached by ssh."
+  (or (eq (process-type (ladybird--conn-process conn)) 'network)
+      (let ((endpoint (ladybird--conn-dialed conn)))
+        (and (eq (plist-get endpoint :kind) 'ssh)
+             (plist-get endpoint :path)))))
 
 (defun ladybird--local-conn ()
   "Return the open connection to the local server, or nil.
@@ -388,7 +414,11 @@ before."
     ('local (if-let* ((command (plist-get endpoint :command)))
                 (file-name-nondirectory (car command))
               "local"))
-    ('ssh (concat "ssh:" (plist-get endpoint :host)))
+    ('ssh (if-let* ((path (plist-get endpoint :path)))
+              (let ((port (plist-get endpoint :port)))
+                (concat "/ssh:" (plist-get endpoint :host)
+                        (and port (format "#%d" port)) ":" path))
+            (concat "ssh:" (plist-get endpoint :host))))
     ('unix (plist-get endpoint :path))
     (kind (format "%s://%s:%s" kind (plist-get endpoint :host)
                   (plist-get endpoint :port)))))
@@ -422,7 +452,8 @@ before."
                      :noquery t :sentinel #'ignore))
 
 (defun ladybird--server-command (endpoint)
-  "Return the command line of the server at the local or ssh ENDPOINT."
+  "Return the command line that reaches the server at the local or ssh ENDPOINT.
+It runs the server, or connects to its socket when an ssh ENDPOINT has a :path."
   (let ((arguments (append (list "--headless=emacs")
                            (or (plist-get endpoint :args)
                                ladybird-program-arguments))))
@@ -436,10 +467,14 @@ before."
        `(,ladybird-ssh-program "-T"
          ,@(when-let* ((port (plist-get endpoint :port)))
              (list "-p" (number-to-string port)))
-         ,(plist-get endpoint :host) "exec"
-         ,@(mapcar #'shell-quote-argument
-                   (cons (or (plist-get endpoint :program) ladybird-program)
-                         arguments)))))))
+         ,@(if-let* ((path (plist-get endpoint :path)))
+               ;; In the argument of -W a colon separates fields.
+               (list "-W" (replace-regexp-in-string "[\\:]" "\\\\\\&" path)
+                     (plist-get endpoint :host))
+             `(,(plist-get endpoint :host) "exec"
+               ,@(mapcar #'shell-quote-argument
+                         (cons (or (plist-get endpoint :program) ladybird-program)
+                               arguments)))))))))
 
 (defun ladybird--open-process (endpoint)
   "Return a process connected, or connecting, to the server at ENDPOINT.
@@ -720,9 +755,12 @@ SERVER-EXIT is non-nil when the server's process exited by itself."
 
 (defun ladybird--server-exit-p (conn process)
   "Return non-nil if PROCESS ended because CONN's server itself exited.
-An ssh that exits with status 255 lost its connection instead."
-  (let ((kind (plist-get (ladybird--conn-dialed conn) :kind)))
+An ssh that exits with status 255 lost its connection instead, and so
+did one that connected to a socket, whatever its status."
+  (let* ((endpoint (ladybird--conn-dialed conn))
+         (kind (plist-get endpoint :kind)))
     (and (memq kind '(local ssh))
+         (not (ladybird--endpoint-keeps-pages-p endpoint))
          (memq (process-status process) '(exit signal))
          (not (and (eq kind 'ssh) (eql (process-exit-status process) 255))))))
 

@@ -1040,7 +1040,7 @@ connection is being dialled again is closed when it is back."
                (not (ladybird--conn-on-ready conn))
                (not (ladybird--conn-closing conn)))
       (when (and (ladybird--ready-p conn)
-                 (eq (process-type (ladybird--conn-process conn)) 'network))
+                 (ladybird--conn-socket-p conn))
         (message "ladybird: no page is open here on %s; its server keeps running%s"
                  (ladybird--conn-name conn)
                  (if (ladybird--conn-kept conn)
@@ -1049,7 +1049,7 @@ connection is being dialled again is closed when it is back."
                              (if (cdr (ladybird--conn-kept conn)) "s" ""))
                    " until it is stopped where it runs")))
       (if (and closed
-               (eq (process-type (ladybird--conn-process conn)) 'network))
+               (ladybird--conn-socket-p conn))
           (ladybird--linger conn)
         (ladybird--disconnect conn)))))
 
@@ -2503,7 +2503,7 @@ gets time to leave, see `ladybird--linger'."
              (null (ladybird--buffers conn))
              (null (ladybird--conn-on-ready conn)))
     (if (and (ladybird--ready-p conn)
-             (eq (process-type (ladybird--conn-process conn)) 'network))
+             (ladybird--conn-socket-p conn))
         (ladybird--linger conn)
       (ladybird--disconnect conn))))
 
