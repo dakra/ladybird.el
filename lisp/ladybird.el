@@ -64,8 +64,8 @@
 
 (defcustom ladybird-default-host nil
   "Host new pages open on.
-nil is the local server, or the only host there is; a string is a
-label of `ladybird-hosts'; `ask' prompts when there are several hosts."
+nil is the local server; a string is a label of `ladybird-hosts';
+`ask' prompts unless the local server is the only host."
   :type '(choice (const :tag "Local server" nil)
                  (const :tag "Ask" ask)
                  (string :tag "Host label"))
@@ -2100,9 +2100,12 @@ module is not loaded."
 
 (defun ladybird--no-server ()
   "Signal that there is no server to open pages on."
-  (user-error "No server: none usable on %s, %s is not installed and \
-`ladybird-hosts' is empty"
-              (ladybird-default-socket) ladybird-program))
+  (user-error "No local server: none usable on %s and %s is not installed%s"
+              (ladybird-default-socket) ladybird-program
+              (if (ladybird--hosts t)
+                  "; a prefix argument or `ladybird-default-host' picks \
+another host"
+                "")))
 
 (defun ladybird--host (label &optional quiet)
   "Return the host with LABEL, a (LABEL ENDPOINT...) list.
@@ -2115,9 +2118,10 @@ is passed through `ladybird--local-host', with QUIET."
           (user-error "No host %s in `ladybird-hosts'" label))
     (let ((hosts (ladybird--hosts)))
       (cond
-       ((not hosts) (ladybird--no-server))
-       ((and (eq ladybird-default-host 'ask) (cdr hosts))
+       ((and (eq ladybird-default-host 'ask)
+             (or (cdr hosts) (caar hosts)))
         (ladybird--read-host hosts quiet))
+       ((or (not hosts) (caar hosts)) (ladybird--no-server))
        (t (ladybird--local-host (car hosts) quiet))))))
 
 (defun ladybird--read-host (&optional hosts quiet)

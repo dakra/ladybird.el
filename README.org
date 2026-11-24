@@ -292,8 +292,8 @@ endpoints, tried in order:
 The Ladybird server does not listen on TCP; =tcp://= and =tls://= need something in front
 of its socket, and whoever reaches that port controls the browser.
 
-=M-x ladybird= opens on =ladybird-default-host=: the local server, a label, or =ask=, and
-without a local server the first host.  With a prefix argument it asks.  A host of
+=M-x ladybird= opens on =ladybird-default-host=: the local server, a label, or =ask=.
+Without a local server the default is an error.  With a prefix argument it asks.  A host of
 =ladybird-hosts=, picked by its label or by =ladybird-default-host=, is used as it is: it
 is neither started nor replaced by a local server, and one that cannot be reached is an
 error.

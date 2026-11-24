@@ -1160,7 +1160,7 @@ the connection"
            (ladybird-device-pixel-ratio 2.0)
            (ladybird-program "ladybird-no-such-program")
            (ladybird-hosts '(("test" . "/nonexistent/ladybird")))
-           (ladybird-default-host nil)
+           (ladybird-default-host "test")
            buffer)
       (save-window-excursion
         (unwind-protect
@@ -2717,8 +2717,15 @@ https://example.org? (allow once, allow always, deny) "))
         (let ((ladybird-default-host "one"))
           (should (equal (ladybird--host nil) '("one" (:kind ssh :host "one")))))
         (should-not probed)
-        (should (equal (ladybird--host nil) '("one" (:kind ssh :host "one"))))
+        ;; Without a local server no other host takes its place.
+        (should (string-match-p
+                 "ladybird-default-host"
+                 (cadr (should-error (ladybird--host nil) :type 'user-error))))
         (should probed)
+        (let ((ladybird-default-host 'ask))
+          (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "one")))
+            (should (equal (ladybird--host nil)
+                           '("one" (:kind ssh :host "one"))))))
         (let ((ladybird-hosts nil))
           (should (string-match-p
                    (regexp-quote (ladybird-default-socket))
@@ -2818,7 +2825,7 @@ and `answer' is its answer."
     (let ((ladybird-program "ladybird-no-such-program"))
       (should-error (ladybird--host nil) :type 'user-error)
       (let ((ladybird-hosts '(("one" . "ssh:one"))))
-        (should (equal (ladybird--host nil) '("one" (:kind ssh :host "one"))))))
+        (should-error (ladybird--host nil) :type 'user-error)))
     ;; A server on the default socket.
     (ladybird-test-with-runtime
       (let ((listener (funcall listen)))
@@ -3072,7 +3079,7 @@ already; new pages open there, the 2 pages open over stdio stay until they are c
   (ladybird-render-test-with-view
     (let ((ladybird-program "ladybird-no-such-program")
           (ladybird-hosts '(("test" . "/nonexistent/ladybird")))
-          (ladybird-default-host nil)
+          (ladybird-default-host "test")
           (ladybird--last-buffer nil))
       (should (eq (function-get 'ladybird-browse-url 'browse-url-browser-kind)
                   'internal))
@@ -4039,7 +4046,7 @@ ID defaults to the last one sent, ITEMS to the test items."
   (ladybird-render-test-with-view
     (let ((ladybird-program "ladybird-no-such-program")
           (ladybird-hosts '(("test" . "/nonexistent/ladybird")))
-          (ladybird-default-host nil))
+          (ladybird-default-host "test"))
      (save-window-excursion
       (set-window-buffer (selected-window) buffer)
       (setq ladybird--last-buffer buffer)

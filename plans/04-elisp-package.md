@@ -62,7 +62,7 @@ of a canvas, and tests substitute the fake module.
 | `ladybird-program` | `"Ladybird"` | Binary for the local server (`executable-find`), run as `PROGRAM --headless=emacs` (stdio), or by `ladybird-start-server` with `--emacs-default-socket --emacs-background`. |
 | `ladybird-program-arguments` | `nil` | Extra arguments for the local and ssh servers. |
 | `ladybird-hosts` | `nil` | Alist `(LABEL . ENDPOINT)` or `(LABEL ENDPOINT...)` tried in order; see 3.1 for the endpoint syntax. The local server has label `nil` and is always offered. |
-| `ladybird-default-host` | `nil` | Label used without prompting; `nil` = local; `ask` = prompt when several hosts exist. |
+| `ladybird-default-host` | `nil` | Label used without prompting; `nil` = local, an error without a local server; `ask` = prompt unless the local server is the only host. |
 | `ladybird-autostart-server` | `ask` | When the local server would be `ladybird-program` over stdio because nothing accepts connections on the default socket and no connection to the local server is open: `t` runs `ladybird-start-server`, `ask` asks with `y-or-n-p`, `nil` (or no, or `ask` in batch Emacs) keeps stdio and says once per connection that its pages end with Emacs. Not consulted for hosts of `ladybird-hosts` or for a redial. |
 | `ladybird-ssh-program` | `"ssh"` | with `-T` added, and `-W PATH` for a socket on another machine. |
 | `ladybird-home-url` | `"about:blank"` | URL of `ladybird` without argument. |
