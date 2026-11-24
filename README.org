@@ -787,3 +787,8 @@ python3 -I tools/mock-server.py --help
 - =test/elate/= has the scenarios of the mock matrix and, under =live/=, those of the
   live matrix with their pages.
 - =plans/= has the protocol and the design of each part.
+
+* License
+
+GPL-3.0-or-later, see [[file:LICENSE][LICENSE]].  The decoder in =vendor/zstd= has its own license,
+[[file:vendor/zstd/LICENSE][vendor/zstd/LICENSE]].
