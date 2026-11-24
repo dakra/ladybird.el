@@ -301,6 +301,9 @@ REMOTE is the server's socket there, by default `ladybird-live-remote-socket'."
 (defun ladybird-live-start (variant &optional page)
   "Start what VARIANT needs and open PAGE, by default index.html.
 Return the page buffer."
+  ;; A message of several lines from startup makes the window smaller.
+  (message nil)
+  (redisplay t)
   (setq ladybird-live-variant variant
         ladybird-live-sent nil
         ladybird-live-received nil

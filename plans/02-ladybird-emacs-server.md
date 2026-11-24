@@ -356,8 +356,7 @@ click in `Libraries/LibWeb/Page/GuardedClick.cpp`). No script runs in the page.
 - **Check:** `tools/checks/hints.sh` (run.sh name `hints`) with the scripts `hints.txt`,
   `hints-hidden.txt`, `hints-hostile.txt`, `hints-refused.txt`, and, served over HTTP from
   127.0.0.1 with frames from localhost on one server whose processes are counted,
-  `hints-frames.txt`, `hints-jack.txt` and `hints-hung.txt` (`hints-frames.txt` also with
-  `--site-isolation=top-level`), the session scripts and the pages `hints*.html`.
+  `hints-frames.txt`, `hints-jack.txt` and `hints-hung.txt`, the session scripts and the pages `hints*.html`.
 
 ### 2.10 Views
 

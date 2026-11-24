@@ -9,7 +9,8 @@ expect state title#=1048576
 expect state 'title="T�X"'
 {"type":"set_console","enabled":true}
 {"type":"load_html","html":"<script>console.log('\\u0001'.repeat(12 << 20)); console.log('C\\udfffX')</script>console"}
-expect console text#=1048576
+# The page process cuts a logged string to 1024 characters and an ellipsis.
+expect console text#=1027
 # Console text arrives from the page as bytes, in which an unpaired surrogate takes three.
 expect console 'text="C���X"'
 {"type":"set_console","enabled":false}

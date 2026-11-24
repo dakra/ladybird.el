@@ -186,7 +186,8 @@ fi
 refused wrong-pid wrong-pid "LISTEN_PID does not name this process"
 refused no-pid no-pid "LISTEN_PID does not name this process"
 refused two two "LISTEN_FDS does not count exactly one socket"
-refused closed closed "There is no open descriptor 3"
+# The process may have opened a descriptor 3 of its own by the time it looks for the socket.
+refused closed closed "There is no open descriptor 3|It is not a socket"
 refused file file "It is not a socket"
 refused pipe pipe "It is not a socket"
 refused datagram datagram "It is not a stream socket"
